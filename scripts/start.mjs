@@ -25,10 +25,14 @@ const NO_FREE_PORTS = ['1', 'true', 'yes'].includes(
   String(process.env.OPENCLAW_NO_FREE_PORTS || '').toLowerCase()
 );
 
-/** Read FRIDAY_AMBIENT from .env (no dependency on dotenv). */
-function readFridayAmbientFromDotEnv() {
+/**
+ * Minimal .env loader — parses KEY=VALUE lines (strips inline comments, quotes).
+ * Injects into process.env so all spawned children (Python daemons etc.) inherit them.
+ * System env vars take precedence (never overwritten).
+ */
+function loadDotEnv() {
   const p = path.join(ROOT, '.env');
-  if (!existsSync(p)) return false;
+  if (!existsSync(p)) return;
   try {
     const text = readFileSync(p, 'utf8');
     for (const line of text.split('\n')) {
@@ -37,14 +41,18 @@ function readFridayAmbientFromDotEnv() {
       const eq = t.indexOf('=');
       if (eq < 1) continue;
       const k = t.slice(0, eq).trim();
-      if (k !== 'FRIDAY_AMBIENT') continue;
-      let v = t.slice(eq + 1).trim();
+      if (!k || k in process.env) continue;   // system env wins
+      let v = t.slice(eq + 1).split('#')[0].trim();  // strip inline comments
       if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'")))
         v = v.slice(1, -1);
-      return ['1', 'true', 'yes', 'on'].includes(v.toLowerCase());
+      process.env[k] = v;
     }
   } catch { /* ignore */ }
-  return false;
+}
+loadDotEnv();
+
+function readFridayAmbientFromDotEnv() {
+  return ['1', 'true', 'yes', 'on'].includes(String(process.env.FRIDAY_AMBIENT || '').toLowerCase());
 }
 
 // ── Colours ──────────────────────────────────────────────────────────────────

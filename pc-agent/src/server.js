@@ -275,8 +275,10 @@ voiceRouter.get('/stream', (req, res) => {
   res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders();
 
-  // Replay recent history so the page isn't blank on (re)connect
-  for (const msg of sseBuffer) {
+  // Replay only tail — full buffer on every reconnect duplicates the whole conversation in the UI
+  const SSE_REPLAY_TAIL = 35;
+  const tail = sseBuffer.slice(-SSE_REPLAY_TAIL);
+  for (const msg of tail) {
     try { res.write(msg); } catch { /* ignore */ }
   }
 

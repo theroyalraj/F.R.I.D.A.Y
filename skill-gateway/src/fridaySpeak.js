@@ -48,13 +48,12 @@ export function speakFridayPy(text, log) {
   const safeText = String(text || '').replace(/["`]/g, "'").trim().slice(0, 300);
   if (!safeText) return;
 
-  // Fade out Alexa music before speaking, then wait 600ms for it to stop
-  const fadeDelay = alexaMusicConfigured() ? 600 : 0;
+  // Stop Alexa cloud music before speaking (no fade API for Alexa, just stop)
   if (alexaMusicConfigured()) {
     alexaStopMusic(log).catch(() => {});
   }
 
-  setTimeout(() => {
+  // Local song fade-out is handled inside friday-speak.py via pycaw (PID-targeted)
   log?.info({ text: safeText.slice(0, 80) }, 'fridaySpeak: spawning');
   const child = spawn('python', [SPEAK_SCRIPT, safeText], {
     env: {
@@ -85,7 +84,6 @@ export function speakFridayPy(text, log) {
   });
 
   child.unref();
-  }, fadeDelay);
 }
 
 // ── Phrase pools — conversational, varied, human feel ─────────────────────────

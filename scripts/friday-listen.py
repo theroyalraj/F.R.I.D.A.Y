@@ -70,7 +70,23 @@ SAMPLE_RATE  = 16000   # Google STT works best at 16 kHz
 CHANNELS     = 1
 # Seconds after startup to ignore mic energy — lets the welcome song + greeting
 # finish before the daemon can stop the music via voice activity detection.
-DEAF_SEC     = float(os.environ.get("LISTEN_DEAF_SEC", "60"))
+DEAF_SEC     = float(os.environ.get("LISTEN_DEAF_SEC", "15"))
+# Separate, longer window protecting the startup song from being killed by mic feedback.
+# Defaults to FRIDAY_PLAY_SECONDS (45) + 15s buffer so the full song + greeting finish
+# before any VAD can fire stop_music().  Override via LISTEN_MUSIC_PROTECT_SEC.
+_play_sec    = int(os.environ.get("FRIDAY_PLAY_SECONDS", "45").split("#")[0].strip())
+MUSIC_PROTECT_SEC = float(os.environ.get("LISTEN_MUSIC_PROTECT_SEC", str(_play_sec + 15)))
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    v = os.environ.get(name, "").strip().lower()
+    if not v:
+        return default
+    return v in ("1", "true", "yes", "on")
+
+
+# Default false: spoken "On it…" + agent reply = two TTS playbacks (sounds like double).
+# Monitor UI still shows PROCESSING. Set FRIDAY_LISTEN_SPEAK_ACK=true to hear the ack.
+SPEAK_ACK = _env_bool("FRIDAY_LISTEN_SPEAK_ACK", False)
 
 MIC_INDEX  = int(MIC_INDEX) if MIC_INDEX else None
 PLAY_PID   = Path(tempfile.gettempdir()) / "friday-play.pid"
@@ -287,8 +303,11 @@ def record_phrase(mic_idx: int | None) -> np.ndarray | None:
 
             if rms > THRESHOLD:
                 if not speaking:
-                    # Only kill music after the startup deaf window has elapsed
-                    if DEAF_SEC <= 0 or (time.monotonic() - _daemon_start) >= DEAF_SEC:
+                    # Only kill music after the startup music-protect window has elapsed.
+                    # This is longer than DEAF_SEC so the gateway greeting (fires at ~28s)
+                    # can play without mic feedback killing the song.
+                    elapsed = time.monotonic() - _daemon_start
+                    if MUSIC_PROTECT_SEC <= 0 or elapsed >= MUSIC_PROTECT_SEC:
                         stop_music()
                 speaking = True
                 silent   = 0
@@ -342,8 +361,11 @@ def main():
     global _daemon_start
     _daemon_start = time.monotonic()
     log.info("Listening — speak to Friday any time. Ctrl+C to stop.\n")
-    if DEAF_SEC > 0:
-        log.info("Startup deaf period: %.0fs (mic energy ignored until startup music finishes)", DEAF_SEC)
+    if DEAF_SEC > 0 or MUSIC_PROTECT_SEC > 0:
+        log.info(
+            "Startup windows — deaf (commands): %.0fs | music-protect (stop_music): %.0fs",
+            DEAF_SEC, MUSIC_PROTECT_SEC,
+        )
 
     while True:
         try:
@@ -454,7 +476,8 @@ def main():
         ])
         post_event("thinking", "Routing to Friday agent…")
         post_event("speak", ack)
-        speak(ack)
+        if SPEAK_ACK:
+            speak(ack)
         log.info("Sending to agent…")
         reply = send_command(text)
         log.info("◄ %s", reply[:120])

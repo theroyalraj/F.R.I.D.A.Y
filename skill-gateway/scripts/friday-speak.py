@@ -250,45 +250,51 @@ def _play_to_device(mp3_data: bytes, device_name_sub: str) -> bool:
 
 def _fade_and_stop_music(fade_sec: float = 1.5, steps: int = 20) -> None:
     """
-    Fade out any running music (ffplay audio sessions) to silence, then kill
-    the friday-play process via its PID file.  Called automatically before
-    every TTS playback so speech is never buried under music.
+    Fade out ONLY the startup song (friday-play.py's ffplay process) before TTS speaks.
+    Targets the specific PID from friday-play.pid so TTS voices are never accidentally faded.
     """
+    pid_file = Path(tempfile.gettempdir()) / "friday-play.pid"
+    if not pid_file.exists():
+        return  # no song playing — nothing to do
+
+    try:
+        song_pid = int(pid_file.read_text().strip())
+    except Exception:
+        return
+
+    # Fade only the session whose process PID matches the song's ffplay
     try:
         from pycaw.utils import AudioUtilities
 
         sessions = AudioUtilities.GetAllSessions()
         music_sessions = [
             s for s in sessions
-            if s.Process and "ffplay" in s.Process.name().lower() and s.SimpleAudioVolume
+            if s.Process and s.Process.pid == song_pid and s.SimpleAudioVolume
         ]
-        if not music_sessions:
-            return  # nothing playing — nothing to do
 
-        step_time = fade_sec / steps
-        for i in range(steps + 1):
-            vol = 1.0 - (i / steps)   # 1.0 → 0.0 linear fade
-            for s in music_sessions:
-                try:
-                    s.SimpleAudioVolume.SetMasterVolume(vol, None)
-                except Exception:
-                    pass
-            if i < steps:
-                time.sleep(step_time)
-
-        # Kill the friday-play ffplay process so it doesn't linger silently at volume 0
-        pid_file = Path(tempfile.gettempdir()) / "friday-play.pid"
-        if pid_file.exists():
-            try:
-                pid = int(pid_file.read_text().strip())
-                os.kill(pid, _signal.SIGTERM)
-                pid_file.unlink(missing_ok=True)
-            except Exception:
-                pass
-
-        print(f"[friday-speak] faded out {len(music_sessions)} music session(s)", flush=True)
+        if music_sessions:
+            step_time = fade_sec / steps
+            for i in range(steps + 1):
+                vol = 1.0 - (i / steps)   # 1.0 → 0.0 linear fade
+                for s in music_sessions:
+                    try:
+                        s.SimpleAudioVolume.SetMasterVolume(vol, None)
+                    except Exception:
+                        pass
+                if i < steps:
+                    time.sleep(step_time)
+            print(f"[friday-speak] song faded out (PID {song_pid})", flush=True)
+    except ImportError:
+        pass  # pycaw not installed — skip volume fade, just kill
     except Exception as exc:
         print(f"[friday-speak] fade-out skipped ({exc.__class__.__name__}: {exc})", file=sys.stderr, flush=True)
+
+    # Kill the song process so it doesn't linger silently at volume 0
+    try:
+        os.kill(song_pid, _signal.SIGTERM)
+        pid_file.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 async def speak():

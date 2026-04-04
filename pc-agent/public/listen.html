@@ -623,12 +623,30 @@
       scroll.scrollTop = scroll.scrollHeight;
     }
 
+    // ── Dedupe (SSE reconnect replay + multiple tabs can repeat the same payload) ──
+    const dedupeWindowMs = 8000;
+    const dedupeSeen = new Map(); // key -> wall time
+
+    function shouldSkipDuplicateEvent(type, text) {
+      if (!['heard', 'reply', 'error'].includes(type)) return false;
+      const key = `${type}:${String(text || '').trim()}`;
+      const now = Date.now();
+      const prev = dedupeSeen.get(key);
+      if (prev != null && now - prev < dedupeWindowMs) return true;
+      dedupeSeen.set(key, now);
+      for (const [k, t] of dedupeSeen) {
+        if (now - t > dedupeWindowMs * 2) dedupeSeen.delete(k);
+      }
+      return false;
+    }
+
     // ── Event handler ─────────────────────────────────────────────
     function handleEvent(raw) {
       let evt;
       try { evt = JSON.parse(raw); } catch { return; }
 
       const { type, text, ts } = evt;
+      if (shouldSkipDuplicateEvent(type, text)) return;
 
       switch (type) {
         case 'daemon_start':
