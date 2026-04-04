@@ -8,6 +8,18 @@ services:
       - openclaw_redis:/data
     command: redis-server --appendonly yes
 
+  # Redis Insight — GUI for keys, memory, CLI (http://127.0.0.1:5540)
+  # Add Redis: host "redis", port 6379 (Docker network), or from the host use 127.0.0.1:6379
+  redis-insight:
+    image: redis/redisinsight:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5540:5540"
+    volumes:
+      - openclaw_redis_insight:/data
+    depends_on:
+      - redis
+
   n8n:
     image: n8nio/n8n:latest
     restart: unless-stopped
@@ -52,5 +64,6 @@ services:
 
 volumes:
   openclaw_redis:
+  openclaw_redis_insight:
   openclaw_n8n:
   openclaw_evolution:

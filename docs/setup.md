@@ -47,11 +47,15 @@ npm install
 
 (Equivalent: `npm run install:all` from the repo root.)
 
-## 4) Start Docker (N8N + Redis)
+## 4) Start Docker (N8N + Redis + Redis Insight)
 
 ```powershell
 docker compose up -d
 ```
+
+- **N8N** — `http://127.0.0.1:5678`
+- **Redis** — `127.0.0.1:6379` (from Windows / `friday-ambient.py`)
+- **Redis Insight** — `http://127.0.0.1:5540` — **Add Redis database**: host **`redis`**, port **6379**, no TLS (same Docker Compose network as this stack).
 
 Open `http://127.0.0.1:5678`, complete N8N setup, then **Import** `n8n/workflows/friday-intake.json` and **Activate** the workflow. The **PCAgent** node must send **`source: $json.source`** in the JSON body (included in the repo file) so Alexa jobs get spoken-friendly replies from Claude.
 
