@@ -20,11 +20,13 @@ cd d:\code\openclaw; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; Start-Job { pyt
 ```
 
 **⚠️ RULE: Every single `friday-speak.py` invocation MUST be fire-and-forget.**
+- **Cursor Shell tool: ALWAYS set `block_until_ms: 0`** — no exceptions, not even for completion summaries.
 - NEVER `await`, NEVER block, NEVER wait for the process to exit before continuing.
 - Use PowerShell `Start-Process` (no `-Wait`) or append `; exit 0` and background it.
 - The Bash equivalent: append ` &` to run in background — e.g. `python .../friday-speak.py "text" &`
 - If running via Bash tool: always use `run_in_background: true` on any TTS command, OR append ` &` to the shell command.
 - Blocking on TTS freezes your work loop — this is never acceptable.
+- **Do NOT call `pick-session-voice.py` separately** — `friday-speak.py` auto-triggers it in the background if no session file exists. One fewer Shell call per message.
 
 ---
 
@@ -82,7 +84,7 @@ See `friday-thinking-sounds.mdc` for the full phrase pools. The table below show
 |--------|--------------------------------------|
 | Starting research / exploration | "Right, let me have a look at that." / "On it." / "Let me dig into this." |
 | Found something important | "Got it." / "There it is." / "Okay, I see the issue." |
-| About to edit a file | "Writing this out now." / "Patching that in." / "Let me wire this up." |
+| About to edit a file | "Writing this out in [file name]." / "Patching that into [file name]." / "Updating [file name] now." — **always name the file naturally** (e.g. "the speak script", "server dot JS", "the env file") |
 | Running a command / install | "Running that now." / "Firing that off." / "Kicking that off." |
 | Waiting on a slow process | "Still on it — hang tight." / "Getting there." / "Nearly there." |
 | Spawning a subagent | "Spinning up an agent for [task]." |
@@ -104,9 +106,9 @@ speak → "Both agents running. Reporting back when done."
 speak → "All done. [verbose summary]."
 ```
 
-**Subagent voice (mandatory in subagent prompts):** each Task subagent must use the adult subagent voice pool — never Ana or any child/teen voice. Tell the subagent to run pick and speak with:
+**Subagent voice (mandatory in subagent prompts):** each Task subagent must use the adult subagent voice pool — never Ana or any child/teen voice. No separate `pick-session-voice.py` call needed — `friday-speak.py` auto-picks if missing. Just set:
 
-`$env:FRIDAY_TTS_SESSION='subagent'` and `pick-session-voice.py --subagent` before any `friday-speak.py`, and the same env plus `FRIDAY_TTS_PRIORITY='1'` and `FRIDAY_TTS_BYPASS_CURSOR_DEFER=true` on **every** `friday-speak.py` call.
+`$env:FRIDAY_TTS_SESSION='subagent'` plus `FRIDAY_TTS_PRIORITY='1'` and `FRIDAY_TTS_BYPASS_CURSOR_DEFER=true` on **every** `friday-speak.py` call.
 
 `FRIDAY_TTS_PRIORITY=1` is non-negotiable for subagents — without it, subagents queue silently behind ambient TTS and the user never hears them. Priority pre-empts ambient, clears any TTS lock, and speaks immediately.
 

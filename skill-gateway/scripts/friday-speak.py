@@ -59,6 +59,7 @@ import asyncio
 import hashlib
 import io
 import os
+import random
 import unicodedata
 import re
 import signal as _signal
@@ -68,9 +69,30 @@ import tempfile
 import threading
 import time
 import platform
+import warnings
 from pathlib import Path
 
+# Python 3.14 Windows: ProactorEventLoop breaks aiohttp SSL/WebSocket (WinError 64
+# on speech.platform.bing.com). SelectorEventLoop restores stable edge-tts.
+if platform.system() == "Windows":
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        try:
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        except AttributeError:
+            pass  # removed in Python 3.16+
+
+import socket
+import aiohttp
 import edge_tts
+
+# Force IPv4 for aiohttp — IPv6 routes to speech.platform.bing.com are unreliable
+# on some Windows networks (connection reset during TLS handshake).
+_orig_tcp_init = aiohttp.TCPConnector.__init__
+def _ipv4_tcp_init(self, *args, **kwargs):
+    kwargs.setdefault("family", socket.AF_INET)
+    _orig_tcp_init(self, *args, **kwargs)
+aiohttp.TCPConnector.__init__ = _ipv4_tcp_init
 
 from friday_win_audio import find_output_device_id as _find_device_id
 from friday_win_audio import get_default_output_id as _get_default_output_id
@@ -89,6 +111,56 @@ if _ENV_FILE.exists():
         v = rest.split("#", 1)[0].strip().strip('"').strip("'")
         if k and k not in os.environ:
             os.environ[k] = v
+
+# ── Thinking openers (prepended to FRIDAY_TTS_THINKING speaks) ────────────────
+_THINKING_OPENERS = (
+    "Hmm. ", "Interesting — ", "Actually — ", "Wait — ", "Hang on — ",
+    "Hold on a second — ", "That's a good question — ",
+    "Now that I look at this — ", "Okay, this is nuanced — ",
+    "There's a subtlety here — ", "This is worth unpacking — ",
+    "So here's what's happening — ", "Let me reason through this — ",
+    "Okay, thinking this through — ", "The thing to notice here is — ",
+    "This is more involved than it looks — ", "Let me connect the dots here — ",
+    "Right. ", "So — ", "Now — ", "Right, so — ", "Okay, so — ",
+    "Here's the thing — ", "The key insight is — ", "What matters here is — ",
+    "From what I can tell — ", "Based on what I'm seeing — ",
+    "If I'm reading this correctly — ", "The way this works is — ",
+    "So the pattern here is — ", "What's going on under the hood is — ",
+    "Let me think — ", "Let me see — ", "Let me check — ",
+    "Let me dig into this — ", "Let me trace through this — ",
+    "Okay, pulling this apart — ", "Let me walk through the logic — ",
+    "Bear with me on this one — ",
+    "I want to make sure I get this right — ",
+    "Okay, working through this step by step — ",
+    "Okay — ", "Alright — ", "Right then — ", "So look — ",
+    "Okay, here's my read — ", "So basically — ", "Yeah, so — ",
+    "Alright, so — ", "Let me break this down — ",
+    "Okay, let me lay this out — ",
+    "Oh boy. ", "Oh no. ", "Wow, okay — ", "Who wrote this? ",
+    "Yikes — ", "Well that's creative — ", "Brave choice — ",
+    "Oh, we're doing this are we — ",
+    "Someone was feeling adventurous — ", "This is a cry for help — ",
+    "Bold strategy, let's see if it pays off — ",
+    "I have questions. Many questions — ",
+    "Tell me you didn't test this — ",
+    "I'm not mad, I'm just disappointed — ",
+    "Whoever did this owes me an explanation — ",
+    "This has big 'it works on my machine' energy — ",
+    "Ah yes, the classic 'fix it later' approach — ",
+    "I see someone chose violence today — ",
+    "Pain. Pure pain — ", "This code has a certain chaotic energy — ",
+    "It's giving spaghetti code — ", "First time? ",
+    "Skill issue detected — ", "This ain't it, chief — ",
+    "We need to talk — ", "So anyway, I started blasting — ",
+    "Confused screaming — ", "Task failed successfully — ",
+    "Not gonna lie — ", "Top ten anime betrayals — ",
+    "How do I even begin — ", "Bro really said 'trust me' — ",
+    "You see what happened was — ",
+    "Ladies and gentlemen, we got him — ", "Outstanding move — ",
+    "I'm going to pretend I didn't see that — ",
+    "Modern problems require modern solutions — ",
+    "That's rough, buddy — ", "They don't know — ", "Big brain time — ",
+)
 
 # ── Arg parsing ───────────────────────────────────────────────────────────────
 _args  = sys.argv[1:]
@@ -118,6 +190,8 @@ _SESSION_STICKY = os.environ.get("FRIDAY_TTS_USE_SESSION_STICKY_VOICE", "true").
     "0", "false", "no", "off",
 )
 _SESSION_VOICE_FILE = Path(__file__).resolve().parent.parent.parent / ".session-voice.json"
+_PICK_SCRIPT = Path(__file__).resolve().parent / "pick-session-voice.py"
+_session_loaded = False
 try:
     import json as _json
     _sv = _json.loads(_SESSION_VOICE_FILE.read_text(encoding="utf-8"))
@@ -127,8 +201,32 @@ try:
         VOICE = _sv["cursor_reply_voice"]
     elif _sv.get("voice") and _SESSION_STICKY:
         VOICE = _sv["voice"]
+    _session_loaded = True
 except Exception:
     pass
+
+if not _session_loaded and _PICK_SCRIPT.exists():
+    try:
+        import subprocess as _sp_init
+        _pick_args = [sys.executable, str(_PICK_SCRIPT)]
+        if _SESSION_KIND == "subagent":
+            _pick_args.append("--subagent")
+        elif _SESSION_KIND == "cursor-reply":
+            _pick_args.append("--cursor-reply")
+        _pick_env = {**os.environ}
+        if _SESSION_KIND:
+            _pick_env["FRIDAY_TTS_SESSION"] = _SESSION_KIND
+        _pick_env["FRIDAY_PICK_SESSION_NO_WELCOME"] = "true"
+        _sp_init.Popen(
+            _pick_args,
+            env=_pick_env,
+            cwd=str(_SESSION_VOICE_FILE.parent),
+            stdout=_sp_init.DEVNULL,
+            stderr=_sp_init.DEVNULL,
+            **({} if sys.platform != "win32" else {"creationflags": 0x08000000}),
+        )
+    except Exception:
+        pass
 
 _blocked_tts = {v.strip() for v in os.environ.get("FRIDAY_TTS_VOICE_BLOCK", "").split(",") if v.strip()}
 _blocked_tts |= {
@@ -169,6 +267,11 @@ TTS_ACTIVE_FILE = Path(tempfile.gettempdir()) / "friday-tts-active"  # exists wh
 AMBIENT_SPEAKING_FILE = Path(tempfile.gettempdir()) / "friday-ambient-speaking.txt"
 # Thinking singleton — at most one thinking-narration speak in the pipeline at a time.
 THINKING_SINGLETON_FILE = Path(tempfile.gettempdir()) / "friday-thinking-singleton"
+# Global singleton generation — each speak bumps a monotonic counter on entry.
+# Queued speaks check their generation before acquiring the playback lock: if a
+# newer generation exists, the queued speak exits (it's been superseded).
+# Ensures only the LATEST speak plays — no pile-up from concurrent fire-and-forget calls.
+TTS_GENERATION_FILE = Path(tempfile.gettempdir()) / "friday-tts-generation"
 
 
 def _write_last_spoken_ts() -> None:
@@ -177,6 +280,48 @@ def _write_last_spoken_ts() -> None:
         TTS_TS_FILE.write_text(str(time.time()), encoding="utf-8")
     except OSError:
         pass
+
+
+_REDIS_TTS_GEN_KEY = "friday:tts:generation"
+_REDIS_TTS_GEN_TTL = 120  # 2 min auto-expire
+
+def _bump_tts_generation() -> int:
+    """Atomically INCR the global TTS generation counter in Redis. Falls back to file."""
+    r = _get_redis_client()
+    if r is not None:
+        try:
+            nxt = r.incr(_REDIS_TTS_GEN_KEY)
+            r.expire(_REDIS_TTS_GEN_KEY, _REDIS_TTS_GEN_TTL)
+            return int(nxt)
+        except Exception:
+            pass
+    # File fallback
+    try:
+        cur = int(TTS_GENERATION_FILE.read_text().strip()) if TTS_GENERATION_FILE.exists() else 0
+    except (OSError, ValueError):
+        cur = 0
+    nxt = cur + 1
+    try:
+        TTS_GENERATION_FILE.write_text(str(nxt), encoding="utf-8")
+    except OSError:
+        pass
+    return nxt
+
+
+def _current_tts_generation() -> int:
+    r = _get_redis_client()
+    if r is not None:
+        try:
+            val = r.get(_REDIS_TTS_GEN_KEY)
+            if val is not None:
+                return int(val)
+        except Exception:
+            pass
+    # File fallback
+    try:
+        return int(TTS_GENERATION_FILE.read_text().strip()) if TTS_GENERATION_FILE.exists() else 0
+    except (OSError, ValueError):
+        return 0
 
 
 # ── Human-speech normaliser ────────────────────────────────────────────────────
@@ -402,8 +547,8 @@ def _save_cache(data: bytes):
 
 
 # ── Edge-TTS fetch (full download — used for --output / --stdout) ─────────────
-async def _fetch_mp3_network(retries: int = 1) -> bytes:
-    """1 attempt then raise immediately — caller falls back to SAPI without delay."""
+async def _fetch_mp3_network(retries: int = 2) -> bytes:
+    """Download full MP3 via edge-tts. Retries with backoff before raising."""
     last_err = None
     for attempt in range(1, retries + 1):
         try:
@@ -812,8 +957,8 @@ def _get_redis_client():
 
 # ── Redis distributed TTS lock ───────────────────────────────────────────────
 _REDIS_TTS_LOCK_KEY = "friday:tts:lock"
-_REDIS_TTS_LOCK_TTL = 90
-_TTS_ACTIVE_LOCK_TTL = 120.0  # seconds — auto-expire file lock if process dies without cleanup
+_REDIS_TTS_LOCK_TTL = 120  # 2 min auto-expire — covers long TTS + network retries
+_TTS_ACTIVE_LOCK_TTL = 120.0  # file lock matches Redis TTL
 _own_redis_token: str | None = None
 
 def _acquire_redis_tts_lock(priority: bool = False, timeout: float = 60.0) -> bool:
@@ -915,21 +1060,36 @@ except (OSError, ValueError):
     pass
 
 
-_THINKING_SINGLETON_TTL = 45.0  # seconds — auto-expire stale singleton
+_REDIS_THINKING_KEY = "friday:tts:thinking_singleton"
+_THINKING_SINGLETON_TTL = 45  # seconds — auto-expire in Redis AND file fallback
+_own_thinking_token: str | None = None
 
 
 def _try_acquire_thinking_singleton() -> bool:
-    """Atomic try-acquire for thinking narration. Returns True if this process won."""
+    """Atomic try-acquire for thinking narration via Redis (file fallback). Returns True if won."""
+    global _own_thinking_token
+    import uuid as _uuid
+    token = f"{os.getpid()}:{_uuid.uuid4().hex[:8]}"
+    r = _get_redis_client()
+    if r is not None:
+        try:
+            if r.set(_REDIS_THINKING_KEY, token, nx=True, ex=_THINKING_SINGLETON_TTL):
+                _own_thinking_token = token
+                return True
+            return False
+        except Exception:
+            pass
+    # File fallback
     try:
         fd = os.open(str(THINKING_SINGLETON_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         try:
             os.write(fd, f"{os.getpid()}\n{time.time()}".encode())
         finally:
             os.close(fd)
+        _own_thinking_token = token
         return True
     except FileExistsError:
         pass
-    # Check if stale (holder dead or TTL expired)
     try:
         raw = THINKING_SINGLETON_FILE.read_text(encoding="utf-8").strip()
         lines = raw.split("\n", 1)
@@ -944,6 +1104,7 @@ def _try_acquire_thinking_singleton() -> bool:
                     os.write(fd, f"{os.getpid()}\n{time.time()}".encode())
                 finally:
                     os.close(fd)
+                _own_thinking_token = token
                 return True
             except FileExistsError:
                 return False
@@ -953,7 +1114,16 @@ def _try_acquire_thinking_singleton() -> bool:
 
 
 def _release_thinking_singleton() -> None:
-    """Release the thinking singleton only if this process owns it."""
+    """Release the thinking singleton (Redis + file) only if this process owns it."""
+    global _own_thinking_token
+    r = _get_redis_client()
+    if r is not None and _own_thinking_token:
+        try:
+            holder = r.get(_REDIS_THINKING_KEY)
+            if holder == _own_thinking_token:
+                r.delete(_REDIS_THINKING_KEY)
+        except Exception:
+            pass
     try:
         raw = THINKING_SINGLETON_FILE.read_text(encoding="utf-8").strip()
         pid_str = raw.split("\n", 1)[0]
@@ -961,6 +1131,7 @@ def _release_thinking_singleton() -> None:
             THINKING_SINGLETON_FILE.unlink(missing_ok=True)
     except Exception:
         pass
+    _own_thinking_token = None
 
 
 atexit.register(_release_thinking_singleton)
@@ -1118,6 +1289,18 @@ async def speak():
     _is_thinking = os.environ.get("FRIDAY_TTS_THINKING", "").strip().lower() in (
         "1", "true", "yes", "on",
     )
+
+    if _is_thinking:
+        _opener_chance_raw = os.environ.get("FRIDAY_CURSOR_THINKING_OPENER_CHANCE", "0.35").strip()
+        try:
+            _opener_chance = float(_opener_chance_raw)
+        except ValueError:
+            _opener_chance = 0.35
+        if _opener_chance > 1.0:
+            _opener_chance = min(_opener_chance / 100.0, 1.0)
+        if random.random() < _opener_chance:
+            TEXT = random.choice(_THINKING_OPENERS) + TEXT
+
     preempted_replay: str | None = None
     if is_playback:
         # Cursor / IDE voice: do not play TTS over the same session as dictation.
@@ -1155,6 +1338,9 @@ async def speak():
         if _priority:
             preempted_replay = _preempt_for_priority_tts()
 
+        # ── Generation singleton: newer speak supersedes any queued older one ──
+        _my_gen = _bump_tts_generation()
+
         # ── Redis distributed lock — serialises ALL callers system-wide ──
         if not _acquire_redis_tts_lock(priority=_priority, timeout=60.0):
             print("[friday-speak] timed out waiting for Redis TTS lock — skipping", flush=True)
@@ -1172,6 +1358,12 @@ async def speak():
         # alive past 60 s (long lines), and always re-enter the O_EXCL race.
         _wait_deadline = time.time() + 60.0
         while True:
+            # Superseded: a newer speak process has started — drop out silently.
+            if _current_tts_generation() > _my_gen:
+                print(f"[friday-speak] superseded (gen {_my_gen} < {_current_tts_generation()}) — exiting", flush=True)
+                _release_redis_tts_lock()
+                sys.exit(0)
+
             # Atomic try-acquire: only ONE process wins the O_CREAT|O_EXCL race.
             try:
                 fd = os.open(str(TTS_ACTIVE_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -1303,22 +1495,30 @@ async def _speak_inner():
         _play_with_device(cached, device_result, use_device)
         return
 
-    # Streaming path: cache miss — stream to ffplay while device switch runs
+    # Cache miss — download full MP3 then play from file (clean audio, no pipe stutter).
+    # Set FRIDAY_TTS_STREAM=true to restore low-latency pipe-to-player streaming.
+    _use_stream = os.environ.get("FRIDAY_TTS_STREAM", "false").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
     _fade_and_stop_music()
-    try:
-        await _stream_and_play(switch_done)
-        print(f"[friday-speak] streamed via {VOICE}", flush=True)
-    except Exception as exc:
-        print(f"[friday-speak] stream failed ({exc.__class__.__name__}) — retrying full download…", file=sys.stderr, flush=True)
-        # 1 attempt only — fall through to SAPI immediately on failure
+
+    if _use_stream:
         try:
-            mp3_data = await _fetch_mp3_network(retries=1)
+            await _stream_and_play(switch_done)
+            print(f"[friday-speak] streamed via {VOICE}", flush=True)
+        except Exception as exc:
+            print(f"[friday-speak] stream failed ({exc.__class__.__name__}) — falling back to full download…", file=sys.stderr, flush=True)
+            _use_stream = False  # fall through to download path below
+
+    if not _use_stream:
+        try:
+            mp3_data = await _fetch_mp3_network(retries=2)
             _save_cache(mp3_data)
             switch_done.wait(timeout=10)
             _play_with_device(mp3_data, device_result, use_device)
-            print(f"[friday-speak] retry ok via {VOICE}", flush=True)
-        except Exception as retry_exc:
-            print(f"friday-speak: edge-tts retry failed — {retry_exc}", file=sys.stderr, flush=True)
+            print(f"[friday-speak] played via {VOICE} (full download)", flush=True)
+        except Exception as dl_exc:
+            print(f"friday-speak: edge-tts download failed — {dl_exc}", file=sys.stderr, flush=True)
             print(
                 "[friday-speak] Cannot reach Microsoft Edge TTS (speech.platform.bing.com). "
                 "Check network, VPN, firewall, or DNS — falling back to Windows SAPI. "

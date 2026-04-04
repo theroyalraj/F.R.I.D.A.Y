@@ -16,12 +16,11 @@ Without priority, a subagent's TTS waits behind the global speak lock — which 
 ## Required subagent speak pattern (copy verbatim into every Task prompt)
 
 ```powershell
-# Voice setup — run once at subagent start
-cd d:\code\openclaw; $env:FRIDAY_TTS_SESSION='subagent'; python skill-gateway/scripts/pick-session-voice.py --subagent
-
-# Every subsequent friday-speak.py call MUST include PRIORITY and BYPASS
+# Single command — no separate pick-session-voice needed (friday-speak.py auto-picks if missing)
 cd d:\code\openclaw; $env:FRIDAY_TTS_SESSION='subagent'; $env:FRIDAY_TTS_PRIORITY='1'; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "your message here"
 ```
+
+**No separate `pick-session-voice.py` call needed.** `friday-speak.py` auto-detects missing session voice and spawns the picker in the background.
 
 ## Test command — verify subagent TTS is working
 
@@ -31,7 +30,7 @@ Run this to confirm a subagent voice fires with priority and is heard through th
 cd d:\code\openclaw; $env:FRIDAY_TTS_SESSION='subagent'; $env:FRIDAY_TTS_PRIORITY='1'; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "Subagent priority TTS test. If you hear this, the fix is working."
 ```
 
-Expected: a teen/young-adult voice speaks the test line immediately, pre-empting any ambient TTS. If you hear nothing within three seconds, check that `pick-session-voice.py --subagent` has been run first to assign the subagent voice pool.
+Expected: a teen/young-adult voice speaks the test line immediately, pre-empting any ambient TTS.
 
 ## Enforcement checklist
 

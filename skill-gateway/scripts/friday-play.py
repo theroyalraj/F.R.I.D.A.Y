@@ -9,6 +9,7 @@ Usage:
   python friday-play.py "Back in Black AC DC"
   python friday-play.py "Back in Black AC DC" --seconds=30
   python friday-play.py "Back in Black AC DC" --full
+  python friday-play.py --mp3=C:\\path\\clip.mp3 --seconds=12   # play local cached MP3 (no yt-dlp)
 
 Env vars (all optional):
   FRIDAY_PLAY_CACHE    cache dir  (default: %TEMP%/friday-play)
@@ -52,6 +53,12 @@ FULL     = "--full" in flags
 SEC_FLAG = next((f.split("=")[1] for f in flags if f.startswith("--seconds=")), None)
 MAX_SEC  = None if FULL else int(SEC_FLAG or os.environ.get("FRIDAY_PLAY_SECONDS", "45"))
 
+MP3_PATH: Path | None = None
+for f in flags:
+    if f.startswith("--mp3="):
+        MP3_PATH = Path(f.split("=", 1)[1].strip().strip('"'))
+        break
+
 CACHE_DIR = Path(os.environ.get("FRIDAY_PLAY_CACHE",
               os.path.join(tempfile.gettempdir(), "friday-play")))
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -82,8 +89,9 @@ if not SEARCH:
         clear_music_active()
         SESSION_START_FILE.unlink(missing_ok=True)
         sys.exit(0)
-    print("friday-play: no search phrase provided", file=sys.stderr)
-    sys.exit(1)
+    if not MP3_PATH:
+        print("friday-play: no search phrase provided", file=sys.stderr)
+        sys.exit(1)
 
 # ── Download via yt-dlp (cached) ───────────────────────────────────────────────
 def get_audio_file(search: str) -> Path:
@@ -273,5 +281,13 @@ def play(mp3_path: Path):
         print("[friday-play] done", flush=True)
 
 # ── Main ───────────────────────────────────────────────────────────────────────
-mp3 = get_audio_file(SEARCH)
-play(mp3)
+if MP3_PATH:
+    mp3_local = MP3_PATH.expanduser().resolve()
+    if not mp3_local.is_file():
+        print(f"[friday-play] --mp3 file not found: {mp3_local}", file=sys.stderr)
+        sys.exit(1)
+    SEARCH = mp3_local.name
+    play(mp3_local)
+else:
+    mp3 = get_audio_file(SEARCH)
+    play(mp3)

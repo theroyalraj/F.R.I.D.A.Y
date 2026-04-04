@@ -31,7 +31,15 @@ import {
   generateAiSummary,
 } from './alexaProactive.js';
 import { winTtsEnabled, speakWinTts } from './winTts.js';
-import { fridaySpeakEnabled, speakFridayPy, speakGatewayStartup, speakTaskDone, speakAlexaLaunch, speakAlexaCommand } from './fridaySpeak.js';
+import {
+  fridaySpeakEnabled,
+  speakFridayPy,
+  speakGatewayStartup,
+  speakTaskDone,
+  speakAlexaLaunch,
+  speakAlexaCommand,
+  speakJarvisReadyAfterSong,
+} from './fridaySpeak.js';
 import { notifyFollowupListenEnabled, spawnNotifyFollowupListen } from './notifyFollowupListen.js';
 import { alexaMusicConfigured, alexaPlayMusic, alexaStopMusic } from './alexaMusic.js';
 import { playLocalSong } from './fridayPlay.js';
@@ -47,15 +55,34 @@ function fridaySongsPreferLocalPc() {
 function playStartupSong(log) {
   const phrase = process.env.FRIDAY_STARTUP_SONG;
   if (!phrase?.trim()) return;
+
+  const promptAfterSong = !['false', '0', 'no', 'off'].includes(
+    String(process.env.FRIDAY_STARTUP_AFTER_SONG_PROMPT ?? 'true').toLowerCase(),
+  );
+  const gapMs = Math.max(0, parseInt(process.env.FRIDAY_STARTUP_AFTER_SONG_GAP_MS || '700', 10));
+
+  const jarvisPrompt = () => {
+    if (!promptAfterSong || !fridaySpeakEnabled()) return;
+    const run = () => speakJarvisReadyAfterSong(log);
+    if (gapMs > 0) setTimeout(run, gapMs);
+    else run();
+  };
+
   if (fridaySongsPreferLocalPc()) {
-    playLocalSong(phrase, log);
+    playLocalSong(phrase, log, { onClose: jarvisPrompt });
   } else if (alexaMusicConfigured()) {
-    alexaPlayMusic(phrase, log).catch((err) => {
-      log.warn({ err: String(err?.message || err) }, 'startup song: Alexa failed — local friday-play');
-      playLocalSong(phrase, log);
-    });
+    alexaPlayMusic(phrase, log)
+      .then(() => {
+        const sec = parseInt(process.env.FRIDAY_PLAY_SECONDS || '45', 10);
+        // Alexa has no end signal — approximate clip length (+ gap inside jarvisPrompt).
+        setTimeout(jarvisPrompt, Math.max(4000, sec * 1000));
+      })
+      .catch((err) => {
+        log.warn({ err: String(err?.message || err) }, 'startup song: Alexa failed — local friday-play');
+        playLocalSong(phrase, log, { onClose: jarvisPrompt });
+      });
   } else {
-    playLocalSong(phrase, log);
+    playLocalSong(phrase, log, { onClose: jarvisPrompt });
   }
 }
 

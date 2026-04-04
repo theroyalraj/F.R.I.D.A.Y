@@ -53,7 +53,7 @@ Examples:
 
 ## Announce it
 
-Speak via friday-speak.py before committing:
+Speak via friday-speak.py before committing — **always `block_until_ms: 0`**:
 
 ```powershell
 cd d:\code\openclaw

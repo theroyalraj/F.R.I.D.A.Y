@@ -203,6 +203,23 @@ function alexaLaunchPhrases() {
   ];
 }
 
+/** Jarvis-style line after startup / entry song — invite a command. */
+function jarvisAfterSongPool() {
+  const n = fridayUserDisplayName();
+  return [
+    `At your service, ${n}. What would you like me to do, sir?`,
+    `Standing by, sir. What shall I handle for you, ${n}?`,
+    `Whenever you're ready, sir — what do you need, ${n}?`,
+    `All yours, ${n}. How may I assist, sir?`,
+    `I'm listening, sir. What's the play, ${n}?`,
+    `Right then, ${n}. What would you like me to take care of?`,
+    `Systems ready, sir. What can I do for you, ${n}?`,
+    `That ought to wake the room, ${n}. What next, sir?`,
+    `Here when you are, sir. What would you like, ${n}?`,
+    `Go ahead, ${n}. I'm at your disposal, sir.`,
+  ];
+}
+
 function alexaCommandPhrases() {
   const n = fridayUserDisplayName();
   return [
@@ -262,6 +279,18 @@ export function speakTaskDone(summary, log, chainOpts = {}) {
  */
 export function speakAlexaLaunch(log) {
   speakFridayPy(pick(alexaLaunchPhrases()), log, { bypassCursorDefer: true });
+}
+
+/**
+ * Spoken after the startup entry song ends (local friday-play exit or Alexa delay).
+ * Jarvis-style prompt so the user knows to give a command.
+ */
+export function speakJarvisReadyAfterSong(log) {
+  speakFridayPy(pick(jarvisAfterSongPool()), log, {
+    bypassCursorDefer: true,
+    priority: true,
+    interruptMusic: false,
+  });
 }
 
 /**

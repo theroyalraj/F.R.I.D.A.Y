@@ -58,7 +58,7 @@ cd d:\code\openclaw; $env:FRIDAY_TTS_SESSION='subagent'; $env:FRIDAY_TTS_PRIORIT
 
 ## What NOT to do
 
-- **Don't read out code or filenames** — keep it conceptual. Say "the speak script" not "friday-speak.py line forty-two".
+- **DO mention file names naturally** — say "the speak script" or "server dot JS" or "the env file", not line numbers or raw paths. When you are about to change or create a file, say which file.
 - **Don't dump the entire thinking block** — distill it. If you thought for twenty lines internally, speak the three most important insights in one paragraph.
 - **Don't skip this for complex tasks** — if you did significant reasoning, the user deserves to hear it. That reasoning is about to be redacted.
 - **Don't block on these calls** — always `block_until_ms: 0`.
@@ -81,13 +81,11 @@ All fire simultaneously. The TTS lock serialises playback (ack first, then reaso
 
 Respect `FRIDAY_CURSOR_NARRATION` from `.env` — if it is false/off/0/no, skip reasoning narration (same as all other narration). Check `cursor-agent-narration.mdc` for the full gating logic.
 
-## Relationship with cursor-reply-watch.py
+## CRITICAL: You are the ONLY source of thinking narration
 
-`cursor-reply-watch.py` captures thinking from JSONL when `FRIDAY_CURSOR_SPEAK_THINKING` is on (default). With `FRIDAY_CURSOR_NARRATION` on, **watcher thinking stays on by default** — live agent `FRIDAY_TTS_THINKING` speaks are best-effort and often never run, so JSONL capture is the reliable path. `friday-speak.py` thinking singleton still limits overlap.
+Cursor does **NOT** write `type: thinking` blocks to JSONL transcripts. The watcher (`cursor-reply-watch.py`) cannot capture thinking — there is nothing to capture. **Your own `friday-speak.py` call with `FRIDAY_TTS_THINKING=1` is the ONLY way the user hears you think.**
 
-Set `FRIDAY_CURSOR_SPEAK_THINKING_WITH_NARRATION=false` if you want **only** live agent thinking narration and no JSONL echo (watcher thinking off while narration is on).
-
-When narration is OFF, the watcher is the primary thinking capturer from JSONL.
+This is NOT optional or best-effort. If you did significant reasoning, you MUST fire the thinking speak. If you skip it, the user hears nothing — no watcher backup exists.
 
 ## Why this matters
 
