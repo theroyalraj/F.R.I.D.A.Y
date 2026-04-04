@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import random
+import re
 import signal
 import subprocess
 import sys
@@ -228,6 +229,202 @@ def speak(text: str):
             time.sleep(_POST_SPEAK_COOLDOWN)   # keep mic deaf briefly after audio ends
             _speaking.clear()
     threading.Thread(target=_run, daemon=True).start()
+
+# ── Ambient frequency control ─────────────────────────────────────────────────
+_MORE_PATTERNS = re.compile(
+    r"(speak|talk|chat|chime|comment).*(more|often|frequent|louder)|"
+    r"(more|often|frequent).*(speak|talk|chat|ambient|updates?)|"
+    r"(increase|crank up|bump up).*(frequency|interval|silence|gap)|"
+    r"i (want|need).*(hear|more) (you|friday|updates?)",
+    re.IGNORECASE,
+)
+_LESS_PATTERNS = re.compile(
+    r"(speak|talk|chat|chime|comment).*(less|quieter|quiet|rarely|infrequent|seldom)|"
+    r"(less|rarely|quiet|silence).*(speak|talk|chat|ambient|updates?)|"
+    r"(reduce|decrease|lower).*(frequency|interval|silence|gap)|"
+    r"(you talk|too much|too (often|frequent|loud|noisy|chatty))|"
+    r"(shut up|be quiet|tone it down|dial.*(back|down)).*(a (bit|little))?",
+    re.IGNORECASE,
+)
+_EVERY_N_PATTERN = re.compile(
+    r"every\s+(\d+)\s*(second|sec|minute|min)",
+    re.IGNORECASE,
+)
+
+_ENV_PATH = root / ".env"
+
+
+def _read_env_value(key: str) -> str | None:
+    """Read a single key from .env file."""
+    if not _ENV_PATH.exists():
+        return None
+    for line in _ENV_PATH.read_text(encoding="utf-8").splitlines():
+        t = line.strip()
+        if t.startswith(f"{key}="):
+            return t[len(key) + 1:].split("#")[0].strip().strip('"').strip("'")
+    return None
+
+
+def _write_env_value(key: str, value: str) -> None:
+    """Update or append a key=value line in .env."""
+    lines = _ENV_PATH.read_text(encoding="utf-8").splitlines(keepends=True)
+    found = False
+    for i, line in enumerate(lines):
+        if re.match(rf"^{re.escape(key)}\s*=", line):
+            lines[i] = f"{key}={value}\n"
+            found = True
+            break
+    if not found:
+        lines.append(f"{key}={value}\n")
+    _ENV_PATH.write_text("".join(lines), encoding="utf-8")
+
+
+def _restart_ambient() -> None:
+    """Kill all running ambient processes and start a fresh one."""
+    try:
+        import subprocess as sp
+        result = sp.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-Process python* -ErrorAction SilentlyContinue | "
+             "ForEach-Object { $cmd=(Get-CimInstance Win32_Process -Filter \"ProcessId=$($_.Id)\" "
+             "-ErrorAction SilentlyContinue).CommandLine; "
+             "if($cmd -like '*friday-ambient*'){Stop-Process -Id $_.Id -Force} }"],
+            capture_output=True, timeout=10,
+        )
+        time.sleep(0.5)
+        sp.Popen(
+            [sys.executable, str(root / "scripts" / "friday-ambient.py")],
+            cwd=str(root),
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        log.info("Ambient restarted.")
+    except Exception as e:
+        log.warning("Ambient restart failed: %s", e)
+
+
+def try_handle_whatsapp_read(text: str) -> bool:
+    """
+    If the user says something like 'read my WhatsApp', 'summarize messages',
+    'any WhatsApp messages', etc. — fetch recent messages via Evolution API,
+    summarize with Claude via pc-agent, and speak it. Returns True if handled.
+    """
+    _WA_READ_PATTERN = re.compile(
+        r"(read|check|any|show|summarize?).*(whatsapp|messages?|texts?|chats?)|"
+        r"(whatsapp|messages?).*(read|check|summary|summarize?|what.*say)|"
+        r"(anything|what).*(whatsapp|messages?|texts?)",
+        re.IGNORECASE,
+    )
+    if not _WA_READ_PATTERN.search(text):
+        return False
+
+    speak("Checking your WhatsApp messages, sir. One moment.")
+    log.info("WhatsApp read requested — fetching via Evolution API...")
+
+    def _fetch_and_speak():
+        try:
+            ev_key      = os.environ.get("EVOLUTION_API_KEY", "change-me").strip()
+            ev_instance = os.environ.get("EVOLUTION_INSTANCE", "openclaw").strip()
+            ev_port     = os.environ.get("EVOLUTION_PORT", "8181").strip()
+            ev_base     = f"http://127.0.0.1:{ev_port}"
+
+            headers = {"apikey": ev_key, "Content-Type": "application/json"}
+            import json as _json
+            # Fetch recent chats
+            r_chats = req_lib.get(
+                f"{ev_base}/chat/findChats/{ev_instance}",
+                headers=headers, timeout=8,
+            )
+            r_chats.raise_for_status()
+            chats = r_chats.json()
+            if not isinstance(chats, list) or not chats:
+                speak("No WhatsApp chats found right now, sir.")
+                return
+
+            # Pull last message from each of the 5 most recent non-group chats
+            snippets = []
+            for chat in chats[:10]:
+                jid = chat.get("id") or chat.get("remoteJid") or ""
+                if "@g.us" in str(jid):
+                    continue  # skip groups
+                name = chat.get("name") or chat.get("pushName") or jid.split("@")[0]
+                last = chat.get("lastMessage") or {}
+                msg_obj = last.get("message") or {}
+                body = (
+                    msg_obj.get("conversation")
+                    or (msg_obj.get("extendedTextMessage") or {}).get("text")
+                    or ""
+                ).strip()[:200]
+                if body:
+                    snippets.append(f"{name}: {body}")
+                if len(snippets) >= 5:
+                    break
+
+            if not snippets:
+                speak("I can see chats but couldn't pull message text right now, sir.")
+                return
+
+            # Summarise via pc-agent (Claude)
+            summary_prompt = (
+                "Summarise these WhatsApp messages for Raj in 2-3 natural spoken sentences. "
+                "Be conversational — tell him who said what and whether anything needs a reply. "
+                "Messages:\n" + "\n".join(snippets)
+            )
+            reply = send_command(summary_prompt)
+            speak(reply)
+        except req_lib.exceptions.ConnectionError:
+            speak("Couldn't reach the Evolution API, sir. Make sure Docker is running.")
+        except Exception as e:
+            log.warning("WhatsApp read failed: %s", e)
+            speak(f"Hit an issue reading your messages, sir: {str(e)[:100]}")
+
+    threading.Thread(target=_fetch_and_speak, daemon=True).start()
+    return True
+
+
+def try_handle_ambient_frequency(text: str) -> bool:
+    """
+    If text semantically means 'speak more/less often' or 'every N seconds',
+    update .env and restart ambient. Returns True if handled.
+    """
+    lower = text.lower()
+
+    # Explicit "every N seconds/minutes"
+    m = _EVERY_N_PATTERN.search(lower)
+    if m:
+        n = int(m.group(1))
+        unit = m.group(2).lower()
+        secs = n * 60 if "min" in unit else n
+        secs = max(3, min(300, secs))
+        _write_env_value("FRIDAY_AMBIENT_SILENCE_SEC", str(secs))
+        _write_env_value("FRIDAY_AMBIENT_MIN_SILENCE_SEC", str(max(3, secs - 2)))
+        threading.Thread(target=_restart_ambient, daemon=True).start()
+        speak(f"Done, sir. I'll chime in roughly every {secs} seconds from now on.")
+        log.info("Ambient frequency set to %ds by voice command.", secs)
+        return True
+
+    if _MORE_PATTERNS.search(lower):
+        current = float(_read_env_value("FRIDAY_AMBIENT_SILENCE_SEC") or "12")
+        new_val = max(3, int(current * 0.55))
+        _write_env_value("FRIDAY_AMBIENT_SILENCE_SEC", str(new_val))
+        _write_env_value("FRIDAY_AMBIENT_MIN_SILENCE_SEC", str(max(3, new_val - 2)))
+        threading.Thread(target=_restart_ambient, daemon=True).start()
+        speak(f"Got it, sir. Increasing my frequency — I'll speak roughly every {new_val} seconds.")
+        log.info("Ambient frequency increased to %ds by voice command.", new_val)
+        return True
+
+    if _LESS_PATTERNS.search(lower):
+        current = float(_read_env_value("FRIDAY_AMBIENT_SILENCE_SEC") or "12")
+        new_val = min(180, int(current * 2.0))
+        _write_env_value("FRIDAY_AMBIENT_SILENCE_SEC", str(new_val))
+        _write_env_value("FRIDAY_AMBIENT_MIN_SILENCE_SEC", str(max(3, new_val - 5)))
+        threading.Thread(target=_restart_ambient, daemon=True).start()
+        speak(f"Understood, sir. Dialling it back — I'll speak roughly every {new_val} seconds.")
+        log.info("Ambient frequency reduced to %ds by voice command.", new_val)
+        return True
+
+    return False
+
 
 # ── PC-agent command ───────────────────────────────────────────────────────────
 def send_command(text: str) -> str:
@@ -450,6 +647,16 @@ def main():
         if lower in ("status", "are you there", "hello", "hey friday", "friday"):
             post_event("speak", ping_reply)
             speak(ping_reply)
+            post_event("listening", "Ready for your command, sir.")
+            continue
+
+        # Ambient frequency control (semantic intercept before routing to agent)
+        if try_handle_ambient_frequency(text):
+            post_event("listening", "Ready for your command, sir.")
+            continue
+
+        # WhatsApp read/summarize intercept
+        if try_handle_whatsapp_read(text):
             post_event("listening", "Ready for your command, sir.")
             continue
 

@@ -1,0 +1,76 @@
+{
+  "name": "Openclaw — WhatsApp 10 AM Daily Reminder",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 10 * * *" }]
+        }
+      },
+      "id": "aaa00001-0000-4000-8000-000000000001",
+      "name": "Schedule 10 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build the reminder text.\n// You can edit this or make it dynamic by calling an API.\nconst name = $env.FRIDAY_USER_NAME || 'Raj';\nconst city = $env.FRIDAY_USER_CITY || 'Hyderabad';\nconst now = new Date().toLocaleString('en-IN', {timeZone:'Asia/Kolkata', weekday:'long', hour:'2-digit', minute:'2-digit'});\nreturn [{\n  json: {\n    reminderText: `Good morning, ${name}! It's 10 AM in ${city}. Your daily reminder from Jarvis — check your priorities, stay hydrated, and have a productive day. The IPL might also have something exciting lined up tonight. 🏏`,\n    number: ($env.WHATSAPP_NOTIFY_NUMBER || '').trim(),\n    instance: $env.EVOLUTION_INSTANCE || 'openclaw',\n  }\n}];\n"
+      },
+      "id": "aaa00002-0000-4000-8000-000000000002",
+      "name": "Build Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [240, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://evolution-api:8080/message/sendText/{{ $json.instance }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "apikey", "value": "={{ $env.EVOLUTION_API_KEY }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { number: $json.number, text: $json.reminderText } }}",
+        "options": {}
+      },
+      "id": "aaa00003-0000-4000-8000-000000000003",
+      "name": "Send WhatsApp Reminder",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://host.docker.internal:{{ $env.PORT || '3848' }}/internal/speak",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "X-Openclaw-Secret", "value": "={{ $env.N8N_WEBHOOK_SECRET }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { text: '10 AM reminder just sent to your WhatsApp, sir.' } }}",
+        "options": { "ignore404": true }
+      },
+      "id": "aaa00004-0000-4000-8000-000000000004",
+      "name": "Speak via Jarvis",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [720, 0]
+    }
+  ],
+  "connections": {
+    "Schedule 10 AM": { "main": [[{ "node": "Build Message", "type": "main", "index": 0 }]] },
+    "Build Message":  { "main": [[{ "node": "Send WhatsApp Reminder", "type": "main", "index": 0 }]] },
+    "Send WhatsApp Reminder": { "main": [[{ "node": "Speak via Jarvis", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" }
+}

@@ -555,6 +555,29 @@ app.post('/internal/alexa-stop', async (req, res) => {
 });
 
 /**
+ * Speak arbitrary text via Jarvis (friday-speak.py).
+ * Body: { text } — called by N8N workflows for WhatsApp notifications, reminders, etc.
+ */
+app.post('/internal/speak', async (req, res) => {
+  const secret = req.headers['x-openclaw-secret'];
+  if (N8N_WEBHOOK_SECRET && secret !== N8N_WEBHOOK_SECRET) {
+    req.log.warn('internal/speak unauthorized');
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  const { text } = req.body || {};
+  if (!text || typeof text !== 'string' || !text.trim()) {
+    return res.status(400).json({ error: 'text is required' });
+  }
+  res.json({ ok: true });
+  // Fire-and-forget — don't block the response
+  if (fridaySpeakEnabled()) {
+    speakFridayPy(text.trim()).catch(() => {});
+  } else if (winTtsEnabled()) {
+    speakWinTts(text.trim()).catch(() => {});
+  }
+});
+
+/**
  * Push an Alexa notification (Proactive Events — MessageAlert). Same auth as last-result.
  * Body: { userId, creatorName?, count?, referenceId? } — userId must be the skill account id from the intake payload.
  * Requires LWA client credentials + skill manifest (see docs/setup.md). EU endpoints: set ALEXA_PROACTIVE_API_HOST.

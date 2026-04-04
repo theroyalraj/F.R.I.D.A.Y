@@ -9,8 +9,8 @@ Usage:
 
 Env vars (all optional):
   FRIDAY_TTS_VOICE   edge-tts voice name  (default: en-GB-RyanNeural)
-  FRIDAY_TTS_DEVICE  audio device substring (default: Echo Dot)
-                     set to "" or "default" to use system default device
+  FRIDAY_TTS_DEVICE  audio device substring (default: "" = Windows default device)
+                     set to "Echo Dot", "WH-1000XM3", etc. to lock a specific output
   FRIDAY_TTS_RATE    speed               (default: +0%)
   FRIDAY_TTS_PITCH   pitch               (default: +0Hz)
   FRIDAY_TTS_VOLUME  volume              (default: +0%)
@@ -66,7 +66,7 @@ VOICE  = os.environ.get("FRIDAY_TTS_VOICE",  "en-GB-RyanNeural")
 RATE   = os.environ.get("FRIDAY_TTS_RATE",   "+0%")
 PITCH  = os.environ.get("FRIDAY_TTS_PITCH",  "+0Hz")
 VOLUME = os.environ.get("FRIDAY_TTS_VOLUME", "+0%")
-DEVICE = os.environ.get("FRIDAY_TTS_DEVICE", "Echo Dot").strip()
+DEVICE = os.environ.get("FRIDAY_TTS_DEVICE", "").strip()
 
 _cache_env = os.environ.get("FRIDAY_TTS_CACHE", "").strip()
 CACHE_DIR: Path | None = None
@@ -200,6 +200,35 @@ def _get_default_output_id() -> str | None:
         return None
 
 
+# ── Windows mixer volume guard ─────────────────────────────────────────────────
+def _fix_ffplay_volume(pid: int, target: float = 1.0, timeout: float = 2.0) -> None:
+    """
+    Poll the Windows audio session for ffplay PID and force volume to 100%.
+
+    Windows remembers per-app mixer volume. If ffplay.exe was ever dragged
+    to 0% in the Volume Mixer, every new instance silently plays at 0%.
+    This background thread catches that within ~50 ms of the session appearing.
+    """
+    try:
+        from pycaw.utils import AudioUtilities
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            sessions = AudioUtilities.GetAllSessions()
+            for s in sessions:
+                try:
+                    if s.Process and s.Process.pid == pid and s.SimpleAudioVolume:
+                        current = s.SimpleAudioVolume.GetMasterVolume()
+                        if current < target - 0.01:
+                            s.SimpleAudioVolume.SetMasterVolume(target, None)
+                            print(f"[friday-speak] fixed ffplay mixer volume {current:.0%} → {target:.0%}", flush=True)
+                        return
+                except Exception:
+                    pass
+            time.sleep(0.05)
+    except Exception:
+        pass
+
+
 # ── ffplay (plays from bytes via temp file) ────────────────────────────────────
 def _play_ffplay(mp3_data: bytes) -> None:
     with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
@@ -215,11 +244,14 @@ def _play_ffplay(mp3_data: bytes) -> None:
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
 
     try:
-        subprocess.run(
+        proc = subprocess.Popen(
             ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", tmp],
-            check=True,
             **kwargs,
         )
+        threading.Thread(target=_fix_ffplay_volume, args=(proc.pid,), daemon=True).start()
+        proc.wait()
+        if proc.returncode not in (0, None):
+            raise subprocess.CalledProcessError(proc.returncode, "ffplay")
         _write_last_spoken_ts()
     except subprocess.CalledProcessError as e:
         print(f"friday-speak: ffplay error {e.returncode}", file=sys.stderr)
@@ -277,6 +309,7 @@ async def _stream_and_play(switch_done: threading.Event) -> None:
         ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", "-"],
         **kwargs,
     )
+    threading.Thread(target=_fix_ffplay_volume, args=(proc.pid,), daemon=True).start()
 
     pipe_ok = True
     try:

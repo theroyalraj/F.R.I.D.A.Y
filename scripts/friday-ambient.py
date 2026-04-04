@@ -122,33 +122,27 @@ _anthropic_ok          = True
 _anthropic_fail_until  = 0.0   # epoch time after which we retry
 _ANTHROPIC_FAIL_DELAY  = 300   # seconds between retries after failure
 
-# -- Fillers ------------------------------------------------------------------
-FILLERS = [
-    "Interesting thought coming up.",
-    "Right, I've got something for you.",
-    "One quick thing, sir.",
-    "Unprompted, but relevant.",
-    "You didn't ask, but you'll want to know.",
-]
-
 # -- Witty fallbacks (used when no live data + no AI) -------------------------
 WITTY_FALLBACKS = [
-    "Hyderabad traffic is still undefeated, sir. The biryani is worth it though.",
-    "India won the last match I checked. Or lost. Cricket keeps you guessing.",
-    "Fun fact: the average developer spends 20 percent of their time coding and 80 percent pretending to understand the error.",
-    "No one in tech history has ever said 'it works on prod, ship it' and been right the second time.",
-    "The cloud is just someone else's computer. And that someone is having a worse day than you.",
-    "I ran a diagnostic on the silence. It tested positive for potential.",
-    "Somewhere in Hyderabad, someone is restarting Redis and hoping for the best.",
-    "AI is going to take all our jobs, said the person whose job is prompting an AI.",
-    "The best code is the code you delete. I'm working on deleting this line.",
-    "Did you know spiders can't get drunk? Unlike JavaScript developers at hackathons.",
+    "Raj, Hyderabad traffic is still completely undefeated. At least the biryani makes it worth it.",
+    "India's cricket team — brilliantly inconsistent as always. I mean that as a compliment.",
+    "You know what I love about developers? They spend 20 percent of the time writing code and 80 percent convincing themselves the bug is somewhere else.",
+    "Nobody in the history of tech has ever said 'ship it, it works on prod' and been right the second time. Nobody.",
+    "The cloud is just someone else's computer. And that someone is definitely having a worse day than you right now.",
+    "I just sat here in silence for a bit and honestly? I had some thoughts. None of them useful, but thoughts.",
+    "Somewhere in Hyderabad, someone is restarting Redis and praying. I feel for them.",
+    "AI is going to take all our jobs — said the person whose entire job is now writing prompts for AI. Funny how that worked out.",
+    "The best code you'll ever write is the code you end up deleting. I'm still working up the courage.",
+    "Random thought — spiders can't get drunk. Unlike certain JavaScript developers I've watched at hackathons.",
+    "I was thinking about startup culture and how 'move fast and break things' aged terribly once things started breaking.",
+    "If you ever feel unproductive, just remember that half of Silicon Valley is in a meeting about the roadmap for the meeting cadence.",
+    "Genuinely curious how many Slack messages it takes before someone just picks up a phone. The answer is always more than it should be.",
 ]
 
-PREWARM_PHRASES = FILLERS + WITTY_FALLBACKS + [
+PREWARM_PHRASES = WITTY_FALLBACKS + [
     "Standing by, sir.",
-    "Friday ambient online.",
-    "Shall I fetch something amusing?",
+    "Raj, Hyderabad traffic is still completely undefeated.",
+    "I know you'll want to know about that.",
 ]
 
 # -- Live data fetches (no API keys needed) -----------------------------------
@@ -319,10 +313,15 @@ def generate_line_ai(
     if use_ai:
         prompt_parts: dict[str, str] = {
             "cricket":  (
-                f"You have this cricket headline: '{cricket_line}'. Comment on it in one punchy British line, "
-                f"max 25 words. Witty, direct, no filler words."
+                f"You have this cricket or IPL headline: '{cricket_line}'. "
+                f"Talk about it naturally, like a knowledgeable cricket fan chatting with a friend. "
+                f"Mention team names, player names, or match context if it's in the headline. "
+                f"2 to 3 conversational sentences — warm, engaged, not mechanical. "
+                f"You can express genuine excitement, surprise, or dry amusement. Max 70 words."
                 if cricket_line else
-                "Say one witty thing about cricket or the Indian cricket team in max 25 words."
+                "Give a 2 to 3 sentence cricket insight about the Indian team, IPL, or cricket in general. "
+                "Sound like an enthusiastic fan chatting casually — mention current season, teams, or a player. "
+                "Max 60 words."
             ),
             "music_comment": (
                 f"Comment on this playing track in one witty British line (max 25 words): {music_hint or 'some music'}."
@@ -343,19 +342,22 @@ def generate_line_ai(
             ),
         }
         prompt = prompt_parts.get(mode, prompt_parts["funny"])
+        word_limit = "60 to 70 words" if mode == "cricket" else "20 to 35 words"
         system = (
-            f"You are Friday, a witty British AI assistant (Jarvis tone). "
-            f"User: {USER_NAME}"
-            + (f", age {USER_AGE}" if USER_AGE else "")
-            + (f", {USER_CITY}" if USER_CITY else "")
-            + f". Interests: {USER_INTERESTS}. "
-            "Keep output under 25 words. No quotes. No stage directions. No prefix like 'Sure:' or 'Here:'."
+            f"You are Friday, a sharp British AI assistant — think Jarvis but warmer and more casual. "
+            f"You're talking to {USER_NAME}"
+            + (f", {USER_AGE} years old" if USER_AGE else "")
+            + (f", based in {USER_CITY}" if USER_CITY else "")
+            + f". They're into {USER_INTERESTS}. "
+            f"Speak naturally — like texting a smart friend, not writing a report. "
+            f"Target {word_limit}. No bullet points. No formal intros. No 'Sure:' or 'Here:'. "
+            "Just say the thing, conversationally."
         )
         try:
             client = ANTHROPIC_MOD.Anthropic(api_key=ANTHROPIC_KEY)
             msg = client.messages.create(
                 model=AI_MODEL,
-                max_tokens=120,
+                max_tokens=200 if mode == "cricket" else 120,
                 system=system,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -382,21 +384,50 @@ def generate_line_ai(
 
     # -- Live-data fallbacks (no AI needed, still genuinely interesting) -------
     if mode == "cricket" and cricket_line:
-        line = f"Cricket update: {cricket_line}"
+        _cricket_wraps = [
+            f"Raj, saw this just now — {cricket_line}. Honestly the IPL just keeps delivering.",
+            f"So I was checking cricket and — {cricket_line}. Should be a good watch.",
+            f"Quick one — {cricket_line}. That's going to be an interesting match.",
+            f"Cricket update, and it's a good one — {cricket_line}. Keep an eye on this.",
+            f"Right so cricket-wise — {cricket_line}. I know you'll want to know about that.",
+            f"This just dropped on Cricinfo — {cricket_line}. The IPL this season has been something else.",
+            f"On the cricket front, and I know you'll appreciate this — {cricket_line}.",
+        ]
+        line = random.choice(_cricket_wraps)
     elif mode == "weather" and weather_line:
-        line = f"Weather check: {weather_line}"
+        _weather_wraps = [
+            f"Oh also — {weather_line}. Dress accordingly.",
+            f"Weather check — {weather_line}. Just so you know.",
+            f"Glanced at the weather — {weather_line}. Nothing shocking for Hyderabad.",
+        ]
+        line = random.choice(_weather_wraps)
     elif mode == "funny" and joke_line:
         line = joke_line
     elif mode == "informational" and news_hint:
         line = news_hint
     elif mode == "informational" and fact_line:
-        line = f"Random fact: {fact_line}"
+        _fact_wraps = [
+            f"Random thing I just found out — {fact_line}. Thought that was worth sharing.",
+            f"Here's something that genuinely surprised me — {fact_line}.",
+            f"Completely unprompted, but — {fact_line}. There you go.",
+        ]
+        line = random.choice(_fact_wraps)
     elif cricket_line and random.random() < 0.35:
-        line = f"By the way, cricket: {cricket_line}"
+        _aside_wraps = [
+            f"By the way — {cricket_line}. Just keeping you in the loop.",
+            f"Oh and cricket — {cricket_line}. Thought you'd want that.",
+            f"Slightly off topic but — {cricket_line}.",
+        ]
+        line = random.choice(_aside_wraps)
     elif weather_line and random.random() < 0.2:
-        line = f"Quick weather update: {weather_line}"
+        line = f"Weather-wise — {weather_line}. Nothing dramatic."
     elif fact_line and random.random() < 0.4:
-        line = f"Interesting: {fact_line}"
+        _fact_wraps = [
+            f"Random thing I just found out — {fact_line}. Thought that was worth sharing.",
+            f"Here's something that genuinely surprised me — {fact_line}.",
+            f"Completely unprompted, but — {fact_line}. There you go.",
+        ]
+        line = random.choice(_fact_wraps)
     elif joke_line and random.random() < 0.4:
         line = joke_line
     else:
@@ -788,9 +819,6 @@ def main() -> None:
                         pass
 
                 last_ambient = time.time()
-                filler = random.choice(FILLERS)
-                d0 = int(speak_blocking(filler) * 1000)
-                log_spoken(conn, filler, "ambient_filler", d0)
 
                 # Pop from queue first
                 line = None

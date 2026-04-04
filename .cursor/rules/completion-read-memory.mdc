@@ -1,0 +1,31 @@
+---
+description: Before any spoken completion notification, read from memory/Jarvis context
+alwaysApply: true
+---
+
+# Completion Notification — Read Memory First
+
+**MANDATORY: Before running the final completion `friday-speak.py` command (the "Done. [summary], sir." line), you MUST read the relevant memory or context file that relates to the task just completed.**
+
+## What to read before speaking
+
+| Task type | Read this first |
+|-----------|----------------|
+| Changes to `friday-listen.py`, `friday-ambient.py`, `friday-speak.py` | Re-read the changed file to confirm what actually changed |
+| Changes to `.env` | Re-read `.env` to verify the new values are what you intended |
+| Changes to `skill-gateway/src/` (server, memory, alexa) | Re-read the changed file |
+| Any other code change | Re-read the primary file you edited |
+
+## Why
+
+The spoken summary **must match reality**. If you speak "Done. Updated silence to 5 seconds, sir." without re-reading `.env`, you may have mis-stated the actual written value.
+
+## Format
+
+```powershell
+# 1. Read the relevant file (Read tool) — ALWAYS do this first
+# 2. Then speak the summary based on what you actually confirmed
+cd d:\code\openclaw; python skill-gateway/scripts/friday-speak.py "Done. [confirmed summary], sir."
+```
+
+**The spoken summary must be derived from what you read, not from memory of what you intended to write.**

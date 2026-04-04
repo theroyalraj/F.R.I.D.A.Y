@@ -1,0 +1,55 @@
+{
+  "name": "Openclaw — Incoming WhatsApp → Jarvis speaks it",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "whatsapp-jarvis-notify",
+        "responseMode": "onReceived",
+        "options": { "responseCode": 202 }
+      },
+      "id": "bbb00001-0000-4000-8000-000000000001",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "openclaw-whatsapp-jarvis-notify"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Pull sender name + message text from Evolution webhook payload.\nconst body = $input.first().json.body ?? $input.first().json;\nconst data = body.data ?? body;\nconst key = data.key ?? {};\nif (key.fromMe === true) return []; // ignore own messages\nconst inner = data.message ?? data;\nconst m = inner.message ?? inner;\nfunction textOf(x) {\n  if (!x) return '';\n  if (typeof x.conversation === 'string') return x.conversation;\n  if (x.extendedTextMessage?.text) return String(x.extendedTextMessage.text);\n  if (x.imageMessage?.caption) return String(x.imageMessage.caption);\n  if (x.audioMessage) return '[voice note]';\n  return '';\n}\nconst msgText = textOf(m).trim();\nif (!msgText) return [];\nconst pushName = data.pushName || inner.pushName || key.remoteJid?.split('@')[0] || 'Someone';\nconst spokenText = `WhatsApp from ${pushName}: \"${msgText.slice(0, 200)}\"`;\nreturn [{ json: { spokenText } }];\n"
+      },
+      "id": "bbb00002-0000-4000-8000-000000000002",
+      "name": "Parse Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [240, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://host.docker.internal:{{ $env.PORT || '3848' }}/internal/speak",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "X-Openclaw-Secret", "value": "={{ $env.N8N_WEBHOOK_SECRET }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { text: $json.spokenText } }}",
+        "options": { "ignore404": true }
+      },
+      "id": "bbb00003-0000-4000-8000-000000000003",
+      "name": "Speak via Jarvis",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 0]
+    }
+  ],
+  "connections": {
+    "Webhook":       { "main": [[{ "node": "Parse Message",    "type": "main", "index": 0 }]] },
+    "Parse Message": { "main": [[{ "node": "Speak via Jarvis", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" }
+}
