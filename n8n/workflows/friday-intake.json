@@ -1,0 +1,125 @@
+{
+  "id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "name": "Openclaw Friday Intake",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "friday-intake",
+        "responseMode": "onReceived",
+        "options": {
+          "responseCode": 202
+        }
+      },
+      "id": "11111111-1111-4111-8111-111111111111",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "openclaw-friday-intake"
+    },
+    {
+      "parameters": {
+        "jsCode": "const j = $input.first().json;\nconst got = j.headers?.['x-openclaw-secret'] ?? j.headers?.['X-Openclaw-Secret'];\nconst want = $env.N8N_WEBHOOK_SECRET;\nif (!want || got !== want) {\n  throw new Error('Invalid or missing X-Openclaw-Secret');\n}\nconst b = j.body ?? j;\n// Lambda LaunchRequest probe only — real commands use IntentRequest or openclaw/trigger\nif (b.lambdaLaunchProbe === true && String(b.requestType || '') === 'LaunchRequest') {\n  return [];\n}\nconst cmd = String(b.commandText ?? '').trim();\nif (!cmd) {\n  return [];\n}\nreturn [{ json: b }];"
+      },
+      "id": "22222222-2222-4222-8222-222222222222",
+      "name": "Normalize",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:3847/task",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.PC_AGENT_SECRET }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { text: $json.commandText, userId: $json.userId, correlationId: $json.correlationId, source: $json.source } }}",
+        "options": {
+          "timeout": 300000
+        }
+      },
+      "id": "33333333-3333-4333-8333-333333333333",
+      "name": "PCAgent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.GATEWAY_INTERNAL_URL }}/internal/last-result",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Openclaw-Secret",
+              "value": "={{ $env.N8N_WEBHOOK_SECRET }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { userId: $json.userId, message: $json.summary, correlationId: $json.correlationId, notify: true } }}",
+        "options": {}
+      },
+      "id": "44444444-4444-4444-8444-444444444444",
+      "name": "PushSummary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, 0]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize": {
+      "main": [
+        [
+          {
+            "node": "PCAgent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PCAgent": {
+      "main": [
+        [
+          {
+            "node": "PushSummary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "pinData": {}
+}

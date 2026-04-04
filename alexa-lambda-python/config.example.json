@@ -1,0 +1,12 @@
+{
+  "_note": "AWS Lambda cannot call 127.0.0.1. Tunnel skill-gateway (3848) for Alexa HTTPS, or N8N (5678) for intake only. last_result_url: POST {userId} to gateway https://<host>/internal/last-result/fetch (returns message + pending reminder). awaiting_user_peek_url / awaiting_user_clear_url: same host …/internal/awaiting-user/peek|clear — see docs/setup.md.",
+  "openclaw_intake_url": "https://YOUR-N8N-NGROK-HOST.ngrok-free.app/webhook/friday-intake",
+  "openclaw_webhook_secret": "paste-the-same-value-as-N8N_WEBHOOK_SECRET-from-root-.env",
+  "last_result_url": "",
+  "awaiting_user_peek_url": "",
+  "awaiting_user_clear_url": "",
+  "http_timeout_sec": 8,
+  "ngrok_bypass_value": "69420",
+  "debug_log_full_envelope": false,
+  "intake_probe_on_launch": false
+}

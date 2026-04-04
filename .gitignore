@@ -1,0 +1,10 @@
+node_modules/
+.env
+*.log
+logs/
+.DS_Store
+alexa-endpoint.local.txt
+alexa-lambda-python/config.json
+.openclaw-skip-notify-prompt
+.alexa-token-cache.json
+.alexa-cookie.json

@@ -1,0 +1,86 @@
+﻿{
+  "manifest": {
+    "apis": {
+      "custom": {
+        "endpoint": {
+          "uri": "arn:aws:lambda:us-east-1:520687296473:function:bd92be37-91e4-4a70-a999-25f37a485f41:Release_0"
+        },
+        "interfaces": [],
+        "locales": {},
+        "regions": {
+          "NA": {
+            "endpoint": {
+              "uri": "arn:aws:lambda:us-east-1:520687296473:function:bd92be37-91e4-4a70-a999-25f37a485f41:Release_0"
+            }
+          },
+          "EU": {
+            "endpoint": {
+              "uri": "arn:aws:lambda:eu-west-1:520687296473:function:bd92be37-91e4-4a70-a999-25f37a485f41:Release_0"
+            }
+          },
+          "FE": {
+            "endpoint": {
+              "uri": "arn:aws:lambda:us-west-2:520687296473:function:bd92be37-91e4-4a70-a999-25f37a485f41:Release_0"
+            }
+          }
+        }
+      }
+    },
+    "manifestVersion": "1.0",
+    "permissions": [
+      { "name": "alexa::devices:all:address:full:read" },
+      { "name": "alexa::profile:given_name:read" },
+      { "name": "alexa::profile:email:read" },
+      { "name": "alexa::profile:mobile_number:read" },
+      { "name": "alexa::household:lists:read" },
+      { "name": "alexa::household:lists:write" },
+      { "name": "alexa::alerts:reminders:skill:readwrite" },
+      { "name": "alexa::devices:all:geolocation:read" },
+      { "name": "alexa::person_id:read" },
+      { "name": "alexa::alerts:timers:skill:readwrite" },
+      { "name": "alexa::devices:all:notifications:write" }
+    ],
+    "events": {
+      "publications": [
+        { "eventName": "AMAZON.MessageAlert.Activated" }
+      ],
+      "endpoint": {
+        "uri": "arn:aws:lambda:us-east-1:520687296473:function:bd92be37-91e4-4a70-a999-25f37a485f41:Release_0"
+      },
+      "subscriptions": []
+    },
+    "privacyAndCompliance": {
+      "locales": {
+        "en-US": {
+          "privacyPolicyUrl": "https://8252-2406-7400-51-d378-a455-c81c-756d-9b04.ngrok-free.app/privacy.html"
+        }
+      },
+      "shoppingKit": {
+        "isAmazonAssociatesOnAlexaEnabled": false,
+        "isShoppingActionsEnabled": false
+      }
+    },
+    "publishingInformation": {
+      "automaticDistribution": {
+        "isActive": false
+      },
+      "category": "KNOWLEDGE_AND_TRIVIA",
+      "distributionCountries": [],
+      "isAvailableWorldwide": true,
+      "locales": {
+        "en-US": {
+          "description": "My jarvis is my personal assistant capable of automating my laptop.",
+          "examplePhrases": [
+            "Alexa, open claw",
+            "Let's go my Friday",
+            "fire up Saturday"
+          ],
+          "keywords": [],
+          "name": "Friday",
+          "summary": "My jarvis is my personal assistant capable of automating my laptop."
+        }
+      },
+      "testingInstructions": "{\"ask_dist_username\":\"\",\"ask_dist_password\":\"\",\"ask_dist_testing_instructions\":\"Sample Testing Instructions.\"}"
+    }
+  }
+}

@@ -1,0 +1,96 @@
+{
+  "interactionModel": {
+    "languageModel": {
+      "invocationName": "friday",
+      "intents": [
+        {
+          "name": "FridayCommandIntent",
+          "slots": [
+            {
+              "name": "command",
+              "type": "AMAZON.SearchQuery"
+            }
+          ],
+          "samples": [
+            "{command}",
+            "open {command}",
+            "launch {command}",
+            "run {command}",
+            "start {command}",
+            "to {command}",
+            "to open {command}",
+            "ask friday {command}",
+            "ask friday to {command}",
+            "ask friday to open {command}",
+            "tell friday {command}",
+            "tell friday to {command}",
+            "friday {command}",
+            "friday open {command}",
+            "on the pc {command}",
+            "on my pc {command}",
+            "computer {command}",
+            "and {command}",
+            "also {command}",
+            "then {command}",
+            "now {command}",
+            "next {command}",
+            "ok {command}",
+            "please {command}",
+            "go ahead and {command}",
+            "can you {command}",
+            "could you {command}",
+            "I want to {command}",
+            "I need to {command}",
+            "just {command}"
+          ]
+        },
+        {
+          "name": "FridayLastResultIntent",
+          "slots": [],
+          "samples": [
+            "what was the last result",
+            "last result",
+            "what did you do",
+            "status",
+            "what happened"
+          ]
+        },
+        {
+          "name": "FridayAckPendingIntent",
+          "slots": [],
+          "samples": [
+            "i took care of it",
+            "i handled it",
+            "i did that",
+            "done with that",
+            "i replied",
+            "i responded",
+            "clear the reminder",
+            "not waiting anymore"
+          ]
+        },
+        {
+          "name": "AMAZON.CancelIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.HelpIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.StopIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.NavigateHomeIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.FallbackIntent",
+          "samples": []
+        }
+      ],
+      "types": []
+    }
+  }
+}
