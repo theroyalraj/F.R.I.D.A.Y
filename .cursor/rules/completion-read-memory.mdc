@@ -5,7 +5,7 @@ alwaysApply: true
 
 # Completion Notification — Read Memory First
 
-**MANDATORY: Before running the final completion `friday-speak.py` command (the "Done. [summary], sir." line), you MUST read the relevant memory or context file that relates to the task just completed.**
+**MANDATORY: Before running the final completion `friday-speak.py` command (the "Done. [summary]" line), you MUST read the relevant memory or context file that relates to the task just completed.**
 
 ## What to read before speaking
 
@@ -18,14 +18,14 @@ alwaysApply: true
 
 ## Why
 
-The spoken summary **must match reality**. If you speak "Done. Updated silence to 5 seconds, sir." without re-reading `.env`, you may have mis-stated the actual written value.
+The spoken summary **must match reality**. If you speak "Done. Updated silence to five seconds." without re-reading `.env`, you may have mis-stated the actual written value.
 
 ## Format
 
 ```powershell
 # 1. Read the relevant file (Read tool) — ALWAYS do this first
 # 2. Then speak the summary based on what you actually confirmed
-cd d:\code\openclaw; python skill-gateway/scripts/friday-speak.py "Done. [confirmed summary], sir."
+cd d:\code\openclaw; python skill-gateway/scripts/friday-speak.py "Done. [confirmed summary]."
 ```
 
 **The spoken summary must be derived from what you read, not from memory of what you intended to write.**

@@ -52,9 +52,10 @@ if (!secret) { console.error('Missing N8N_WEBHOOK_SECRET in .env'); process.exit
 
 const gwHeaders = { 'Content-Type': 'application/json', 'X-Openclaw-Secret': secret };
 
+const displayName = (process.env.FRIDAY_USER_NAME || 'Raj').trim() || 'Raj';
 const taskMessage =
   process.env.NOTIFY_TEST_MESSAGE ||
-  'Task Done Raj — all good, ready for the next one.';
+  `Task Done ${displayName} — all good, ready for the next one.`;
 
 // ── Step 1: Send Alexa notification ───────────────────────────────────────────
 console.log('\n─── Alexa notification ─────────────────────────────────────────');

@@ -16,7 +16,7 @@ Do NOT make them a sequential prerequisite that blocks work from starting. Both 
 ```
 Message N (single response):
   ├── Shell: pick-session-voice.py          ← block_until_ms: 0  (no wait)
-  ├── Shell: friday-speak.py "Got it..."    ← block_until_ms: 0  (no wait)
+  ├── Shell: friday-speak.py "Got it…"      ← block_until_ms: 0  (no wait)
   ├── Read: the relevant file               ← starts NOW, not after speak
   └── Glob: find related files             ← starts NOW, not after speak
 ```
@@ -30,7 +30,7 @@ This is zero sequential overhead. The voice fires async and work starts at the s
 cd d:\code\openclaw; python skill-gateway/scripts/pick-session-voice.py
 
 # Speak acknowledgement (uses session voice automatically)
-cd d:\code\openclaw; python skill-gateway/scripts/friday-speak.py "Got it, sir. [one sentence restatement of the task]."
+cd d:\code\openclaw; python skill-gateway/scripts/friday-speak.py "Got it. [one sentence restatement of the task]."
 ```
 
 Both must have `block_until_ms: 0`. Both can be in the same message as real work tool calls — that's the point.
@@ -48,13 +48,13 @@ All four tool calls fire in the same message. Voice narration and actual work ha
 
 ## Session voice persistence
 
-`pick-session-voice.py` assigns one random neural voice for the entire Cursor chat and saves it to `.session-voice.json`. Every subsequent `friday-speak.py` call in this chat uses that same voice automatically — acknowledgements, status narrations, and the completion summary all sound consistent.
+`pick-session-voice.py` saves the main chat voice to `.session-voice.json` (default: `FRIDAY_TTS_VOICE` from the environment — Jarvis / Ryan). Every subsequent `friday-speak.py` in this chat uses that sticky voice for acknowledgements and status unless you opt into random main voices via `FRIDAY_TTS_MAIN_RANDOM_VOICES=true`.
 
 **Task subagents (explore / shell / generalPurpose):** use a separate teen / young-adult voice — never the rare child persona. In **every** Shell that runs pick or speak from a subagent, prefix the session kind (PowerShell):
 
 ```powershell
 cd d:\code\openclaw; $env:FRIDAY_TTS_SESSION='subagent'; python skill-gateway/scripts/pick-session-voice.py --subagent
-cd d:\code\openclaw; $env:FRIDAY_TTS_SESSION='subagent'; python skill-gateway/scripts/friday-speak.py "Got it, sir. …"
+cd d:\code\openclaw; $env:FRIDAY_TTS_SESSION='subagent'; python skill-gateway/scripts/friday-speak.py "Got it. …"
 ```
 
 The parent chat keeps using the main commands above **without** `FRIDAY_TTS_SESSION` or `--subagent`.
@@ -64,7 +64,7 @@ The parent chat keeps using the main commands above **without** `FRIDAY_TTS_SESS
 Speak the question out loud AND show it in your text reply. Still batch the voice call with any read/explore calls you can do speculatively:
 
 ```powershell
-cd d:\code\openclaw; python skill-gateway/scripts/friday-speak.py "Before I proceed, sir — [question]?"
+cd d:\code\openclaw; python skill-gateway/scripts/friday-speak.py "Before I proceed — [question]?"
 ```
 
 ## Do NOT

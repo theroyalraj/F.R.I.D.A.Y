@@ -18,6 +18,8 @@ Env vars (all optional):
                      set to "" to disable cache
   FRIDAY_TTS_SESSION  when set to "subagent", session voice is read from
                      subagent_voice in .session-voice.json (Task subagents)
+  FRIDAY_TTS_USE_SESSION_STICKY_VOICE  set false so FRIDAY_TTS_VOICE from this
+                     process env wins over .session-voice.json (e.g. ambient alt voice)
 
 Good voices:
   en-GB-RyanNeural              British male    ← default (Jarvis feel)
@@ -69,16 +71,20 @@ TEXT   = " ".join(_args).strip()
 _RAW_TEXT = TEXT
 VOICE  = os.environ.get("FRIDAY_TTS_VOICE",  "en-GB-RyanNeural")
 
-# Session-sticky voice: .session-voice.json overrides the env default above.
+# Session-sticky voice: .session-voice.json overrides the env default above
+# unless FRIDAY_TTS_USE_SESSION_STICKY_VOICE is false (ambient alternate voice).
 # FRIDAY_TTS_SESSION=subagent → use subagent_voice (teen pool; pick-session-voice --subagent).
 _SESSION_KIND = os.environ.get("FRIDAY_TTS_SESSION", "").strip().lower()
+_SESSION_STICKY = os.environ.get("FRIDAY_TTS_USE_SESSION_STICKY_VOICE", "true").strip().lower() not in (
+    "0", "false", "no", "off",
+)
 _SESSION_VOICE_FILE = Path(__file__).resolve().parent.parent.parent / ".session-voice.json"
 try:
     import json as _json
     _sv = _json.loads(_SESSION_VOICE_FILE.read_text(encoding="utf-8"))
     if _SESSION_KIND == "subagent" and _sv.get("subagent_voice"):
         VOICE = _sv["subagent_voice"]
-    elif _sv.get("voice"):
+    elif _sv.get("voice") and _SESSION_STICKY:
         VOICE = _sv["voice"]
 except Exception:
     pass
@@ -141,6 +147,18 @@ def normalize_for_speech(text: str) -> str:
     if not text:
         return text
     t = text
+
+    # Devanagari (Hindi, etc.): skip English-centric rewrites — they garble TTS.
+    if re.search(r"[\u0900-\u097F]", t):
+        t = re.sub(r"```[\s\S]*?```", " ", t)
+        t = re.sub(r"`[^`]+`", " ", t)
+        t = re.sub(r"https?://\S+", "", t)
+        t = re.sub(r"[\U0001F000-\U0001FFFF]", " ", t)
+        t = re.sub(r"[\u2600-\u27BF]", " ", t)
+        t = re.sub(r"\s{2,}", " ", t).strip()
+        if len(t) > 3800:
+            t = t[:3800] + "."
+        return t or "Done."
 
     # Code blocks and inline code
     t = re.sub(r"```[\s\S]*?```", " ", t)

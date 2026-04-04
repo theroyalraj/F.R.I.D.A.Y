@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-pick-session-voice.py — assign one random TTS voice per Cursor chat session.
+pick-session-voice.py — sticky Edge-TTS voice for Cursor chat / Task subagents.
 
 How it works:
   1. Finds the most-recently-modified chat UUID from the Cursor agent-transcripts folder.
   2. Compares it to the stored chat ID in .session-voice.json (repo root).
-  3. If it's a NEW chat → pick a voice, persist it, then speak a welcome greeting
-     (main chat only — see voice pools below).
+  3. If it's a NEW chat → pick a voice, persist it, then speak a short welcome (main only).
   4. If it's the SAME chat → reuse the existing voice silently.
   5. Prints the chosen voice name to stdout.
 
-Voice policy (main chat):
-  • ~1 in 25 new sessions use en-US-AnaNeural (Edge's child persona — very young).
-  • All other sessions pick from adult neural voices only (no Maisie / teen pool here).
+Voice policy (main Cursor chat — default):
+  • Uses FRIDAY_TTS_VOICE from the environment (Jarvis / Ryan by default). Same voice every time.
+
+Optional party mode:
+  • Set FRIDAY_TTS_MAIN_RANDOM_VOICES=true to restore random adult voices + rare Ana roll.
 
 Subagents (Task tool):
   Run:  FRIDAY_TTS_SESSION=subagent  python pick-session-voice.py --subagent
@@ -28,11 +29,11 @@ import json
 import os
 import random
 import re
-
-from friday_greeting_delivery import sample_greeting_rate_pitch
 import subprocess
 import sys
 from pathlib import Path
+
+from friday_greeting_delivery import sample_greeting_rate_pitch
 
 # ── Voice pools ────────────────────────────────────────────────────────────────
 # Child: Edge Ana — toddler / small-child timbre (rare in main chat only).
@@ -127,6 +128,25 @@ def _save_state(state: dict) -> None:
         pass
 
 
+def _user_display_name() -> str:
+    return (os.environ.get("FRIDAY_USER_NAME", "Raj") or "Raj").strip() or "Raj"
+
+
+def _main_random_voices_enabled() -> bool:
+    v = os.environ.get("FRIDAY_TTS_MAIN_RANDOM_VOICES", "").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
+def _pick_main_chat_voice(state: dict) -> str:
+    if _main_random_voices_enabled():
+        last_voice = state.get("voice", "")
+        if random.randint(1, CHILD_ROLL_MAX) == 1:
+            return CHILD_VOICE
+        pool = [v for v in ADULT_POOL if v != last_voice] or ADULT_POOL
+        return random.choice(pool)
+    return os.environ.get("FRIDAY_TTS_VOICE", "en-GB-RyanNeural").strip() or "en-GB-RyanNeural"
+
+
 def _jarvis_greeting_env(voice: str) -> dict:
     """First-contact line only: random or fixed rate/pitch (see friday_greeting_delivery)."""
     rate, pitch = sample_greeting_rate_pitch()
@@ -140,11 +160,18 @@ def _jarvis_greeting_env(voice: str) -> dict:
 
 def _speak_welcome(voice: str) -> None:
     """Fire-and-forget: speak the session-start greeting in the new voice."""
-    friendly = _friendly_voice_name(voice)
-    greeting = (
-        f"Friday online, sir. Your session voice today is {friendly}. "
-        f"All responses this chat will use this voice."
-    )
+    who = _user_display_name()
+    if _main_random_voices_enabled():
+        friendly = _friendly_voice_name(voice)
+        greeting = (
+            f"Friday online, {who}. Your session voice today is {friendly}. "
+            f"All responses this chat will use this voice."
+        )
+    else:
+        greeting = (
+            f"Friday online, {who}. Main assistant voice is active for this chat. "
+            "Ambient and subagents may use other voices."
+        )
     try:
         subprocess.Popen(
             [sys.executable, str(_SPEAK_SCRIPT), greeting],
@@ -182,12 +209,7 @@ def pick_voice(*, subagent: bool = False) -> str:
     if not is_new:
         return state["voice"]
 
-    last_voice = state.get("voice", "")
-    if random.randint(1, CHILD_ROLL_MAX) == 1:
-        new_voice = CHILD_VOICE
-    else:
-        pool = [v for v in ADULT_POOL if v != last_voice] or ADULT_POOL
-        new_voice = random.choice(pool)
+    new_voice = _pick_main_chat_voice(state)
 
     state["chat_id"] = chat_id
     state["voice"]   = new_voice

@@ -39,13 +39,17 @@ const PORT = Number(process.env.PC_AGENT_PORT || 3847);
 // ── Friday startup voice ──────────────────────────────────────────────────────
 const SPEAK_SCRIPT = path.resolve(__dirname, '../../skill-gateway/scripts/friday-speak.py');
 
-const PC_AGENT_GREETINGS = [
-  'P.C. agent online. Voice interface active. Ready to assist, sir.',
-  'All local systems operational. Friday standing by, sir.',
-  'Agent initialised. Claude is armed and standing by, sir.',
-  'Online. What shall we build today, sir?',
-  'Systems up. Voice and command interface ready, sir.',
-];
+function pcAgentStartupGreetingPhrase() {
+  const n = (process.env.FRIDAY_USER_NAME || 'Raj').trim() || 'Raj';
+  const lines = [
+    `P.C. agent online. Voice interface active. Ready to assist, ${n}.`,
+    `All local systems operational. Friday standing by, ${n}.`,
+    `Agent initialised. Claude is armed and standing by, ${n}.`,
+    `Online. What shall we build today, ${n}?`,
+    `Systems up. Voice and command interface ready, ${n}.`,
+  ];
+  return lines[Math.floor(Math.random() * lines.length)];
+}
 
 function parseIntEnv(name, defaultVal) {
   const raw = process.env[name];
@@ -83,7 +87,7 @@ function greetingTtsRatePitch() {
 function speakStartup() {
   if (process.env.FRIDAY_SPEAK_PY === 'false' || process.env.FRIDAY_SPEAK_PY === '0') return;
   if (!existsSync(SPEAK_SCRIPT)) return;
-  const phrase = PC_AGENT_GREETINGS[Math.floor(Math.random() * PC_AGENT_GREETINGS.length)];
+  const phrase = pcAgentStartupGreetingPhrase();
   const delivery = greetingTtsRatePitch();
   const child = spawn('python', [SPEAK_SCRIPT, phrase], {
     env: {

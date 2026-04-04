@@ -17,6 +17,7 @@ Env vars (optional — reads .env automatically):
   FRIDAY_TTS_VOICE       edge-tts voice       (default: en-GB-RyanNeural)
   FRIDAY_TTS_DEVICE      audio output device  (default: Echo Dot)
   FRIDAY_TTS_JARVIS_RANDOM — random greeting speed/pitch (default true; set false for fixed JARVIS_*)
+  FRIDAY_USER_NAME       spoken address / prompts (default Raj)
   PC_AGENT_URL           pc-agent base URL    (default: http://127.0.0.1:3847)
   LISTEN_DEVICE_INDEX    mic device index     (default: system default)
   LISTEN_LANGUAGE        speech language      (default: en-US)
@@ -67,10 +68,12 @@ if str(_sg_scripts) not in sys.path:
     sys.path.insert(0, str(_sg_scripts))
 from friday_greeting_delivery import sample_greeting_rate_pitch  # noqa: E402
 from friday_win_focus import should_defer_voice_for_cursor  # noqa: E402
+from indic_tts_voice import edge_voice_override_for_text  # noqa: E402
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 VOICE        = os.environ.get("FRIDAY_TTS_VOICE",    "en-GB-RyanNeural")
 DEVICE_HINT  = os.environ.get("FRIDAY_TTS_DEVICE",   "Echo Dot")
+USER_DISPLAY = (os.environ.get("FRIDAY_USER_NAME", "Raj") or "Raj").strip() or "Raj"
 AGENT_URL    = os.environ.get("PC_AGENT_URL",         "http://127.0.0.1:3847").rstrip("/")
 MIC_INDEX    = os.environ.get("LISTEN_DEVICE_INDEX")
 LANGUAGE     = os.environ.get("LISTEN_LANGUAGE",     "en-US")
@@ -235,7 +238,10 @@ def speak(text: str, *, jarvis: bool = False):
                 # Wait for any ambient or other TTS to finish before we start
                 _wait_for_tts_clear()
                 try:
-                    env = {**os.environ, "FRIDAY_TTS_VOICE": VOICE}
+                    override = edge_voice_override_for_text(text)
+                    env = {**os.environ, "FRIDAY_TTS_VOICE": override or VOICE}
+                    if override:
+                        env["FRIDAY_TTS_USE_SESSION_STICKY_VOICE"] = "false"
                     if jarvis:
                         gr, gp = sample_greeting_rate_pitch()
                         env["FRIDAY_TTS_RATE"] = gr
@@ -355,7 +361,7 @@ def try_handle_whatsapp_read(text: str) -> bool:
     if not _WA_READ_PATTERN.search(text):
         return False
 
-    speak("Checking your WhatsApp messages, sir. One moment.")
+    speak(f"Checking your WhatsApp messages, {USER_DISPLAY}. One moment.")
     log.info("WhatsApp read requested — fetching via Evolution API...")
 
     def _fetch_and_speak():
@@ -375,7 +381,7 @@ def try_handle_whatsapp_read(text: str) -> bool:
             r_chats.raise_for_status()
             chats = r_chats.json()
             if not isinstance(chats, list) or not chats:
-                speak("No WhatsApp chats found right now, sir.")
+                speak(f"No WhatsApp chats found right now, {USER_DISPLAY}.")
                 return
 
             # Pull last message from each of the 5 most recent non-group chats
@@ -398,22 +404,22 @@ def try_handle_whatsapp_read(text: str) -> bool:
                     break
 
             if not snippets:
-                speak("I can see chats but couldn't pull message text right now, sir.")
+                speak(f"I can see chats but couldn't pull message text right now, {USER_DISPLAY}.")
                 return
 
             # Summarise via pc-agent (Claude)
             summary_prompt = (
-                "Summarise these WhatsApp messages for Raj in 2-3 natural spoken sentences. "
+                f"Summarise these WhatsApp messages for {USER_DISPLAY} in 2-3 natural spoken sentences. "
                 "Be conversational — tell him who said what and whether anything needs a reply. "
                 "Messages:\n" + "\n".join(snippets)
             )
             reply = send_command(summary_prompt)
             speak(reply)
         except req_lib.exceptions.ConnectionError:
-            speak("Couldn't reach the Evolution API, sir. Make sure Docker is running.")
+            speak(f"Couldn't reach the Evolution API, {USER_DISPLAY}. Make sure Docker is running.")
         except Exception as e:
             log.warning("WhatsApp read failed: %s", e)
-            speak(f"Hit an issue reading your messages, sir: {str(e)[:100]}")
+            speak(f"Hit an issue reading your messages, {USER_DISPLAY}: {str(e)[:100]}")
 
     threading.Thread(target=_fetch_and_speak, daemon=True).start()
     return True
@@ -436,7 +442,7 @@ def try_handle_ambient_frequency(text: str) -> bool:
         _write_env_value("FRIDAY_AMBIENT_SILENCE_SEC", str(secs))
         _write_env_value("FRIDAY_AMBIENT_MIN_SILENCE_SEC", str(max(3, secs - 2)))
         threading.Thread(target=_restart_ambient, daemon=True).start()
-        speak(f"Done, sir. I'll chime in roughly every {secs} seconds from now on.")
+        speak(f"Done, {USER_DISPLAY}. I'll chime in roughly every {secs} seconds from now on.")
         log.info("Ambient frequency set to %ds by voice command.", secs)
         return True
 
@@ -446,7 +452,7 @@ def try_handle_ambient_frequency(text: str) -> bool:
         _write_env_value("FRIDAY_AMBIENT_SILENCE_SEC", str(new_val))
         _write_env_value("FRIDAY_AMBIENT_MIN_SILENCE_SEC", str(max(3, new_val - 2)))
         threading.Thread(target=_restart_ambient, daemon=True).start()
-        speak(f"Got it, sir. Increasing my frequency — I'll speak roughly every {new_val} seconds.")
+        speak(f"Got it, {USER_DISPLAY}. Increasing my frequency — I'll speak roughly every {new_val} seconds.")
         log.info("Ambient frequency increased to %ds by voice command.", new_val)
         return True
 
@@ -456,7 +462,7 @@ def try_handle_ambient_frequency(text: str) -> bool:
         _write_env_value("FRIDAY_AMBIENT_SILENCE_SEC", str(new_val))
         _write_env_value("FRIDAY_AMBIENT_MIN_SILENCE_SEC", str(max(3, new_val - 5)))
         threading.Thread(target=_restart_ambient, daemon=True).start()
-        speak(f"Understood, sir. Dialling it back — I'll speak roughly every {new_val} seconds.")
+        speak(f"Understood, {USER_DISPLAY}. Dialling it back — I'll speak roughly every {new_val} seconds.")
         log.info("Ambient frequency reduced to %ds by voice command.", new_val)
         return True
 
@@ -592,8 +598,8 @@ def main():
 
     _mic_errors = 0
     post_event("daemon_start", f"Voice daemon online. {mode.capitalize()} mode.")
-    speak(f"Friday voice daemon online, sir. {mode.capitalize()} mode. Ready.", jarvis=True)
-    post_event("listening", "Ready for your command, sir.")
+    speak(f"Friday voice daemon online, {USER_DISPLAY}. {mode.capitalize()} mode. Ready.", jarvis=True)
+    post_event("listening", f"Ready for your command, {USER_DISPLAY}.")
     global _daemon_start
     _daemon_start = time.monotonic()
     log.info("Listening — speak to Friday any time. Ctrl+C to stop.\n")
@@ -634,7 +640,7 @@ def main():
         except sr.RequestError as e:
             log.warning("Google STT error: %s", e)
             post_event("error", f"Google STT error: {e}")
-            speak("Speech recognition error, sir. Check your internet connection.")
+            speak(f"Speech recognition error, {USER_DISPLAY}. Check your internet connection.")
             time.sleep(2)
             continue
         except Exception as e:
@@ -663,11 +669,11 @@ def main():
         # Built-in stop commands
         if lower in ("stop", "exit", "quit", "goodbye", "shut down", "go offline"):
             bye = random.choice([
-                "Going offline, sir. Goodbye.",
-                "Shutting down. Take care, sir.",
+                f"Going offline, {USER_DISPLAY}. Goodbye.",
+                f"Shutting down. Take care, {USER_DISPLAY}.",
                 "Signing off. Till next time.",
-                "Offline. Catch you later, sir.",
-                "Done for now. Goodbye, sir.",
+                f"Offline. Catch you later, {USER_DISPLAY}.",
+                f"Done for now. Goodbye, {USER_DISPLAY}.",
             ])
             post_event("speak", bye)
             speak(bye)
@@ -676,36 +682,36 @@ def main():
 
         # Status ping
         ping_reply = random.choice([
-            "Right here, sir. Ready for your command.",
+            f"Right here, {USER_DISPLAY}. Ready for your command.",
             "Online and listening.",
-            "Always here, sir.",
+            f"Always here, {USER_DISPLAY}.",
             "Standing by. What do you need?",
             "Alive and well. Go ahead.",
-            "Ready when you are, sir.",
+            f"Ready when you are, {USER_DISPLAY}.",
             "At your service.",
-            "Here, sir. What's the play?",
+            f"Here, {USER_DISPLAY}. What's the play?",
             "Fully operational. Talk to me.",
         ])
         if lower in ("status", "are you there", "hello", "hey friday", "friday"):
             post_event("speak", ping_reply)
             speak(ping_reply)
-            post_event("listening", "Ready for your command, sir.")
+            post_event("listening", f"Ready for your command, {USER_DISPLAY}.")
             continue
 
         # Ambient frequency control (semantic intercept before routing to agent)
         if try_handle_ambient_frequency(text):
-            post_event("listening", "Ready for your command, sir.")
+            post_event("listening", f"Ready for your command, {USER_DISPLAY}.")
             continue
 
         # WhatsApp read/summarize intercept
         if try_handle_whatsapp_read(text):
-            post_event("listening", "Ready for your command, sir.")
+            post_event("listening", f"Ready for your command, {USER_DISPLAY}.")
             continue
 
         # Send to Friday pc-agent
         ack = random.choice([
             "On it.",
-            "Already on it, sir.",
+            f"Already on it, {USER_DISPLAY}.",
             "Consider it done.",
             "Right away.",
             "Copy that. Working on it.",
@@ -718,7 +724,7 @@ def main():
             "Understood. Give me a second.",
             "Yep, on it.",
             "Roger that.",
-            "Diving in now, sir.",
+            f"Diving in now, {USER_DISPLAY}.",
             "Absolutely. One moment.",
             "I'm on it — back in a moment.",
             "All over it.",
@@ -735,7 +741,7 @@ def main():
         post_event("reply", spoken)
         post_event("speak", spoken)
         speak(spoken)
-        post_event("listening", "Ready for your command, sir.")
+        post_event("listening", f"Ready for your command, {USER_DISPLAY}.")
 
     log.info("Voice daemon stopped.")
 
@@ -753,8 +759,8 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         speak(random.choice([
-            "Going offline, sir.",
-            "Shutting down. Later, sir.",
+            f"Going offline, {USER_DISPLAY}.",
+            f"Shutting down. Later, {USER_DISPLAY}.",
             "Offline. See you next time.",
         ]))
         print("\nStopped.")

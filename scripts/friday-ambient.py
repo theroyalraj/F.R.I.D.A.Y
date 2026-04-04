@@ -75,6 +75,11 @@ if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 from friday_win_focus import should_defer_voice_for_cursor  # noqa: E402
 
+_SG_SCRIPTS = ROOT / "skill-gateway" / "scripts"
+if str(_SG_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SG_SCRIPTS))
+from indic_tts_voice import edge_voice_override_for_text  # noqa: E402
+
 # -- Config -------------------------------------------------------------------
 # Accept both names — FRIDAY_AMBIENT_POST_TTS_GAP is the .env canonical name
 SILENCE_SEC         = float(
@@ -94,7 +99,7 @@ NEWS_API_KEY        = os.environ.get("NEWS_API_KEY", "").strip()
 AI_MODEL            = os.environ.get("FRIDAY_AMBIENT_AI_MODEL", "claude-haiku-4-5").strip()
 ANTHROPIC_KEY       = os.environ.get("ANTHROPIC_API_KEY", "").strip()
 
-USER_NAME      = os.environ.get("FRIDAY_USER_NAME",      "sir").strip()
+USER_NAME      = os.environ.get("FRIDAY_USER_NAME",      "Raj").strip() or "Raj"
 USER_AGE       = os.environ.get("FRIDAY_USER_AGE",       "").strip()
 USER_CITY      = os.environ.get("FRIDAY_USER_CITY",      "").strip()
 USER_INTERESTS = os.environ.get("FRIDAY_USER_INTERESTS", "technology, cricket, AI, startups").strip()
@@ -118,14 +123,22 @@ def _cricket_hindi_enabled() -> bool:
     return _interests_cricket_ipl()
 
 
-def _cricket_tts_voice() -> str | None:
-    """Edge TTS voice for cricket turns when Hindi cricket is on (empty = default session voice)."""
-    if not _cricket_hindi_enabled():
-        return None
-    v = os.environ.get("FRIDAY_AMBIENT_CRICKET_VOICE", "").strip()
-    if v.lower() in ("0", "false", "no", "off", "default"):
-        return None
-    return v or "hi-IN-SwaraNeural"
+def _ambient_line_tts_voice(line: str, mode: str) -> str | None:
+    """
+    Route Hindi / Hinglish ambient lines to appropriate Edge voices.
+
+    Devanagari → Hindi neural; Roman Hinglish hints → Indian English neural.
+    Cricket + Hindi mode but English-only model output → Indian English (not British ambient).
+    """
+    o = edge_voice_override_for_text(line)
+    if o:
+        return o
+    if mode == "cricket" and _cricket_hindi_enabled():
+        v = os.environ.get("FRIDAY_TTS_HINGLISH_VOICE", "").strip()
+        if v and v.lower() not in ("0", "false", "no", "off", "default"):
+            return v
+        return "en-IN-NeerjaExpressiveNeural"
+    return None
 
 
 _db_raw = os.environ.get("FRIDAY_AMBIENT_DB_PATH", "data/friday.db").strip()
@@ -275,7 +288,7 @@ WITTY_FALLBACKS = [
     "The metaverse was going to change everything apparently. I checked — it did not change everything.",
     "GPT-4 is already being called legacy by certain people on the internet. The internet moves uncomfortably fast.",
     "I find it genuinely funny that 'prompt engineering' is now a skill on CVs. Future historians will have questions.",
-    "Raj, startups that 'move fast and break things' eventually just have a lot of broken things. It's a whole journey.",
+    "{user}, startups that 'move fast and break things' eventually just have a lot of broken things. It's a whole journey.",
     # India / Hyderabad
     "Fun fact — Hyderabad has more tech talent per square kilometre than most countries have in total. We just don't market it aggressively enough.",
     "India's startup ecosystem is legitimately impressive now. Fifteen years ago this conversation would have been about outsourcing. Times have genuinely changed.",
@@ -1315,6 +1328,8 @@ def generate_line_ai(
         ])
     else:
         line = random.choice(WITTY_FALLBACKS)
+    if "{user}" in line:
+        line = line.format(user=USER_NAME)
 
     _redis_push_recent_topic(r, topic)
     return topic, line
@@ -2135,7 +2150,7 @@ def main() -> None:
                     last_ambient = time.time()
                     _mark_spoken(r, line)
 
-                    cv = _cricket_tts_voice() if mode == "cricket" else None
+                    cv = _ambient_line_tts_voice(line, mode)
                     d1 = int(speak_blocking(line, voice=cv) * 1000)
 
                     # Reset clocks from end of speech (gap timer starts here)
