@@ -3,9 +3,12 @@
 friday-ambient.py -- Jarvis-style ambient intelligence for OpenClaw.
 
 Live data sources (no API keys required unless noted):
-  - Cricket / IPL ambient speech only when IPL is "on": FRIDAY_IPL_ACTIVE, or local calendar window
-    (FRIDAY_IPL_WINDOW_START / END), or (if CRICAPI_API_KEY set) CricAPI lists an IPL fixture.
-  - While on: ~50% IPL-focused Google News headlines vs general cricket RSS (FRIDAY_IPL_HEADLINE_RATIO).
+  - Cricket / IPL "special" ambient (Hindi prompts, Neerja TTS, cricket witties, live headlines/scores):
+    FRIDAY_IPL_ACTIVE=true forces on; false forces normal. Otherwise: with CRICAPI_API_KEY and inside
+    the IPL calendar window, special mode only while CricAPI shows an IPL match live or in progress —
+    when the match is over or on a rest day, behaviour returns to normal. Without CricAPI key,
+    the calendar window alone controls special mode (match-over cannot be detected).
+  - While special mode on: ~50% IPL-focused Google News headlines vs general cricket RSS (FRIDAY_IPL_HEADLINE_RATIO).
     Headlines, scores, CricAPI JSON, and IPL on/off are cached in Redis with tunable TTLs.
   - ESPN Cricinfo RSS (English), Amar Ujala cricket RSS (Hindi), Google News IPL feeds
   - Optional: CRICAPI_API_KEY for live scores + off-season IPL fixture detection
@@ -282,7 +285,7 @@ def _cricapi_is_ipl_match_name(name: str) -> bool:
 
 
 def _cricapi_match_live_or_in_progress(m: dict[str, Any]) -> bool:
-    """True if the fixture is not finished — live, in progress, or not yet started (we only treat live/in-progress as special)."""
+    """True if the fixture is live or in progress (not ended). Pre-match listings are ignored."""
     if not isinstance(m, dict):
         return False
     if m.get("matchEnded"):
@@ -2175,11 +2178,11 @@ _LIVE_TTL = max(120, int(os.environ.get("FRIDAY_AMBIENT_LIVE_CACHE_SEC", "600"))
 
 def _refresh_live_data(r: Any | None = None) -> None:
     """Fetch all live data sources in parallel — no sequential waiting."""
-    global _live_cache, _live_cache_ts, _ipl_speech_on
+    global _live_cache, _live_cache_ts
 
     rr = r if r is not None else _ambient_redis_default()
-    _ipl_speech_on = _ipl_speech_allowed(rr)
-    log.info("  ipl_speech_allowed=%s", _ipl_speech_on)
+    sync_ipl_live_ambient(rr)
+    log.info("  ipl_live_ambient=%s", _ipl_speech_on)
 
     def _cricket_slot() -> str | None:
         return fetch_cricket_combined(rr)
@@ -2224,9 +2227,14 @@ def _refresh_live_data(r: Any | None = None) -> None:
 
 
 def get_live_data(r: Any | None = None) -> dict[str, str | None]:
+    rr = r if r is not None else _ambient_redis_default()
+    try:
+        sync_ipl_live_ambient(rr)
+    except Exception:
+        pass
     if time.time() - _live_cache_ts > _LIVE_TTL or not _live_cache:
         try:
-            _refresh_live_data(r if r is not None else _ambient_redis_default())
+            _refresh_live_data(rr)
         except Exception as e:
             log.warning("live data refresh failed: %s", e)
     return _live_cache
@@ -2430,7 +2438,7 @@ def main() -> None:
                     # Pop pre-generated content from queue first (queue is
                     # filled by non-song modes only)
                     line = None
-                    if not (mode == "cricket" and _cricket_hindi_enabled()):
+                    if not (mode == "cricket" and _cricket_hindi_live_ambient()):
                         try:
                             raw = r.rpop("friday:ambient:content_queue")
                             line = raw if isinstance(raw, str) else None
