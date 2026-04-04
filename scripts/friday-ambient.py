@@ -23,11 +23,15 @@ Live data sources (no API keys required unless noted):
 Anthropic (optional): used for witty, personalised lines.
   401 / network failures trigger a 5-min cooldown to avoid log spam.
 
+Background check-in thread (FRIDAY_AMBIENT_CHECKIN_ENABLED, default on): grabs the Redis TTS lock on a
+timer and speaks the time plus a wellness line in sub-agent TTS so normal ambient yields.
+
 Set FRIDAY_AMBIENT=true to enable.
 """
 from __future__ import annotations
 
 import asyncio
+import datetime
 import hashlib
 import json
 import logging
@@ -91,13 +95,28 @@ if str(_SG_SCRIPTS) not in sys.path:
 from indic_tts_voice import edge_voice_override_for_text  # noqa: E402
 
 # -- Config -------------------------------------------------------------------
-# Accept both names — FRIDAY_AMBIENT_POST_TTS_GAP is the .env canonical name
-SILENCE_SEC         = float(
-    os.environ.get("FRIDAY_AMBIENT_POST_TTS_GAP")
-    or os.environ.get("FRIDAY_AMBIENT_SILENCE_SEC", "6")
+# Ambient spacing: mutable so pc-agent GET /settings/ambient (Postgres) can override .env without rewriting .env.
+_timing_lock = threading.Lock()
+_post_tts_gap = float(
+    (os.environ.get("FRIDAY_AMBIENT_POST_TTS_GAP") or os.environ.get("FRIDAY_AMBIENT_SILENCE_SEC") or "12").split("#")[
+        0
+    ].strip()
 )
-MIN_AMBIENT_GAP     = float(os.environ.get("FRIDAY_AMBIENT_MIN_SILENCE_SEC", "4"))
-MAX_SILENCE_CAP     = float(os.environ.get("FRIDAY_AMBIENT_MAX_SILENCE_SEC", "25"))
+_min_ambient_gap = float(os.environ.get("FRIDAY_AMBIENT_MIN_SILENCE_SEC", "4").split("#")[0].strip())
+_max_silence_cap = float(os.environ.get("FRIDAY_AMBIENT_MAX_SILENCE_SEC", "25").split("#")[0].strip())
+
+
+def _get_ambient_timing() -> tuple[float, float, float]:
+    with _timing_lock:
+        return _post_tts_gap, _min_ambient_gap, _max_silence_cap
+
+
+def _set_ambient_timing(post: float, min_g: float, max_c: float) -> None:
+    global _post_tts_gap, _min_ambient_gap, _max_silence_cap
+    with _timing_lock:
+        _post_tts_gap, _min_ambient_gap, _max_silence_cap = post, min_g, max_c
+
+
 TONE                = os.environ.get("FRIDAY_AMBIENT_TONE", "mixed").strip().lower()
 FUNNY_RATIO         = float(os.environ.get("FRIDAY_AMBIENT_FUNNY_RATIO", "0.5"))
 TRACK_MEDIA         = _env_bool("FRIDAY_AMBIENT_TRACK_MEDIA", True)
@@ -127,6 +146,47 @@ USER_NAME      = os.environ.get("FRIDAY_USER_NAME",      "Raj").strip() or "Raj"
 USER_AGE       = os.environ.get("FRIDAY_USER_AGE",       "").strip()
 USER_CITY      = os.environ.get("FRIDAY_USER_CITY",      "").strip()
 USER_INTERESTS = os.environ.get("FRIDAY_USER_INTERESTS", "technology, cricket, AI, startups").strip()
+_USER_TZ_NAME  = os.environ.get("FRIDAY_USER_TZ",        "").strip()
+
+# ── Timezone-aware local time ─────────────────────────────────────────────────
+# Uses FRIDAY_USER_TZ (IANA name) so the time of day is always the user's local
+# time even when TZ= is set to something different (e.g. America/New_York for
+# Docker/n8n). Falls back through pytz → fixed offset → system localtime.
+def _get_user_tz():
+    """Return a tzinfo object for FRIDAY_USER_TZ, or None to mean system localtime."""
+    if not _USER_TZ_NAME:
+        return None
+    try:
+        from zoneinfo import ZoneInfo  # Python 3.9+
+        return ZoneInfo(_USER_TZ_NAME)
+    except Exception:
+        pass
+    try:
+        import pytz  # type: ignore
+        return pytz.timezone(_USER_TZ_NAME)
+    except Exception:
+        pass
+    return None
+
+_USER_TZ = _get_user_tz()
+
+
+def _user_now() -> datetime.datetime:
+    """Current datetime in the user's configured timezone (falls back to system local)."""
+    if _USER_TZ is not None:
+        return datetime.datetime.now(tz=_USER_TZ)
+    return datetime.datetime.now().astimezone()
+
+
+def _user_localtime():
+    """struct_time equivalent of _user_now() — drop-in for time.localtime()."""
+    return _user_now().timetuple()
+
+
+def _user_date() -> datetime.date:
+    """Today's date in the user's timezone — replaces datetime.date.today()."""
+    return _user_now().date()
+
 
 # Cricket / IPL: Hindi delivery + optional CricAPI live scores (see .env.example)
 CRICAPI_API_KEY = os.environ.get("CRICAPI_API_KEY", "").strip()
@@ -147,6 +207,12 @@ def _cricket_hindi_enabled() -> bool:
     return _interests_cricket_ipl()
 
 
+def _ambient_main_voice_only() -> bool:
+    """When true, ambient uses FRIDAY_TTS_VOICE only — no Hinglish/Devanagari routing or FRIDAY_AMBIENT_TTS_VOICE."""
+    v = os.environ.get("FRIDAY_AMBIENT_MAIN_VOICE_ONLY", "").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
 def _ambient_line_tts_voice(line: str, mode: str) -> str | None:
     """
     Route Hindi / Hinglish ambient lines to appropriate Edge voices.
@@ -154,6 +220,8 @@ def _ambient_line_tts_voice(line: str, mode: str) -> str | None:
     Devanagari → Hindi neural; Roman Hinglish hints → Indian English neural.
     Cricket + Hindi mode but English-only model output → Indian English (not British ambient).
     """
+    if _ambient_main_voice_only():
+        return None
     o = edge_voice_override_for_text(line)
     if o:
         return o
@@ -179,7 +247,7 @@ def _date_in_ipl_calendar_window() -> bool:
     """Approximate IPL season in local date (configurable). Uses month-day only."""
     sm, sd = _parse_mmdd(os.environ.get("FRIDAY_IPL_WINDOW_START", "03-22"))
     em, ed = _parse_mmdd(os.environ.get("FRIDAY_IPL_WINDOW_END", "05-31"))
-    t = time.localtime()
+    t = _user_localtime()
     mm, dd = t.tm_mon, t.tm_mday
 
     def ordinal(m: int, d: int) -> int:
@@ -379,6 +447,28 @@ def _witty_fallback_pool() -> list[str]:
     return pool if pool else WITTY_FALLBACKS
 
 
+def _poll_pc_agent_ambient_timing() -> None:
+    """Pull ambient spacing overrides from Postgres via pc-agent (no .env writes)."""
+    secret = os.environ.get("PC_AGENT_SECRET", "").strip()
+    base = os.environ.get("PC_AGENT_URL", "http://127.0.0.1:3847").rstrip("/")
+    if not secret:
+        return
+    url = f"{base}/settings/ambient"
+    headers = {"Authorization": f"Bearer {secret}", "ngrok-skip-browser-warning": "1"}
+    while True:
+        try:
+            req = urllib.request.Request(url, headers=headers, method="GET")
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                j = json.loads(resp.read().decode())
+            post = float(j.get("postTtsGap"))
+            min_g = float(j.get("minSilenceSec"))
+            max_c = float(j.get("maxSilenceSec"))
+            _set_ambient_timing(post, min_g, max_c)
+        except Exception:
+            pass
+        time.sleep(15)
+
+
 _db_raw = os.environ.get("FRIDAY_AMBIENT_DB_PATH", "data/friday.db").strip()
 DB_PATH = Path(_db_raw) if Path(_db_raw).is_absolute() else ROOT / _db_raw
 
@@ -388,20 +478,51 @@ AMBIENT_SPEAKING_FILE = Path(tempfile.gettempdir()) / "friday-ambient-speaking.t
 AMBIENT_PID_FILE= Path(tempfile.gettempdir()) / "friday-ambient.pid"
 SPEAK_SCRIPT    = ROOT / "skill-gateway" / "scripts" / "friday-speak.py"
 
-POST_TTS_GAP  = float(os.environ.get("FRIDAY_AMBIENT_POST_TTS_GAP", "12"))   # wait this long after TTS ends
-
-VERBOSE_RATIO = float(os.environ.get("FRIDAY_AMBIENT_VERBOSE_RATIO", "0.30"))  # 30% of turns are longer / richer
-SONG_CHANCE   = float(os.environ.get("FRIDAY_AMBIENT_SONG_CHANCE",   "0.12"))  # 12% of ambient turns play music
+VERBOSE_RATIO   = float(os.environ.get("FRIDAY_AMBIENT_VERBOSE_RATIO", "0.30"))  # 30% of turns are longer / richer
+SONG_CHANCE     = float(os.environ.get("FRIDAY_AMBIENT_SONG_CHANCE",   "0.12"))  # 12% of ambient turns play music
+_autoplay_v     = os.environ.get("FRIDAY_AUTOPLAY", "true").lower()
+AUTOPLAY_ENABLED = _autoplay_v not in ("false", "0", "off", "no")
+# After this many completed ambient speech turns (not counting song intros), force song_moment next.
+# 0 = disabled (only SONG_CHANCE). Same quiet hours and _is_music_playing() guards as random songs.
+SONG_AFTER_SPEECHES = int(os.environ.get("FRIDAY_AMBIENT_SONG_AFTER_SPEECHES", "3"))
 # Featured ambient song: short iconic clip (default ~10s). Override min/max to taste.
 SONG_SECONDS  = int(os.environ.get("FRIDAY_AMBIENT_SONG_SECONDS",    "10"))
 SONG_SEC_MIN  = int(os.environ.get("FRIDAY_AMBIENT_SONG_SECONDS_MIN",  "8"))
 SONG_SEC_MAX  = int(os.environ.get("FRIDAY_AMBIENT_SONG_SECONDS_MAX",  "14"))
 PLAY_SCRIPT   = ROOT / "skill-gateway" / "scripts" / "friday-play.py"
 
+
+def _python_for_friday_play() -> str:
+    """Windows: pythonw.exe avoids a flashing console when spawning friday-play (see FRIDAY_PYTHON_CHILD)."""
+    if sys.platform != "win32":
+        return sys.executable
+    override = os.environ.get("FRIDAY_PYTHON_CHILD", "").strip()
+    if override:
+        return override
+    base = Path(sys.executable)
+    w = base.parent / "pythonw.exe"
+    if w.is_file():
+        return str(w)
+    return sys.executable
+
+
 # Sub-agent child voice — slightly different rate/pitch so parallel worker
 # announcements feel distinct from main Friday deliveries
 SUB_VOICE_RATE  = os.environ.get("FRIDAY_AMBIENT_SUB_VOICE_RATE",  "+9%")
 SUB_VOICE_PITCH = os.environ.get("FRIDAY_AMBIENT_SUB_VOICE_PITCH", "+3Hz")
+
+# Periodic sub-agent check-in: time + wellness ping (holds TTS lock; pauses competing ambient)
+CHECKIN_ENABLED = _env_bool("FRIDAY_AMBIENT_CHECKIN_ENABLED", True)
+try:
+    CHECKIN_INTERVAL_SEC = float(os.environ.get("FRIDAY_AMBIENT_CHECKIN_INTERVAL_SEC", "3600"))
+except ValueError:
+    CHECKIN_INTERVAL_SEC = 3600.0
+CHECKIN_INTERVAL_SEC = max(300.0, CHECKIN_INTERVAL_SEC)
+try:
+    CHECKIN_INITIAL_DELAY_SEC = float(os.environ.get("FRIDAY_AMBIENT_CHECKIN_INITIAL_DELAY_SEC", "120"))
+except ValueError:
+    CHECKIN_INITIAL_DELAY_SEC = 120.0
+CHECKIN_INITIAL_DELAY_SEC = max(0.0, CHECKIN_INITIAL_DELAY_SEC)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1161,8 +1282,7 @@ def fetch_space_news() -> str | None:
 
 def fetch_this_day_history() -> str | None:
     """A 'this day in history' event (history.muffinlabs.com — free, no key)."""
-    import datetime
-    today = datetime.date.today()
+    today = _user_date()
     raw = _get(f"https://history.muffinlabs.com/date/{today.month}/{today.day}", timeout=6)
     if not raw:
         return None
@@ -1366,7 +1486,7 @@ def generate_line_ai(
     )
 
     if use_ai:
-        hour = time.localtime().tm_hour
+        hour = _user_localtime().tm_hour
         if 5 <= hour < 12:
             time_feel = "morning"
         elif 12 <= hour < 17:
@@ -1870,7 +1990,7 @@ def generate_song_moment() -> dict | None:
     if not (_anthropic_ok or time.time() > _anthropic_fail_until):
         return None
 
-    hour = time.localtime().tm_hour
+    hour = _user_localtime().tm_hour
     if 5 <= hour < 9:
         mood = "early morning, calm and fresh"
     elif 9 <= hour < 12:
@@ -1935,13 +2055,17 @@ def play_song_ambient(query: str, seconds: int) -> None:
     """
     Launch friday-play.py in the background (non-blocking).
     The play script has its own fade / PID management.
+    Skipped when FRIDAY_AUTOPLAY=false.
     """
+    if not AUTOPLAY_ENABLED:
+        log.info("[song] autoPlay disabled — skipping ambient song")
+        return
     if not PLAY_SCRIPT.exists():
         log.warning("PLAY_SCRIPT not found: %s", PLAY_SCRIPT)
         return
     try:
         subprocess.Popen(
-            [sys.executable, str(PLAY_SCRIPT), query, f"--seconds={seconds}"],
+            [_python_for_friday_play(), str(PLAY_SCRIPT), query, f"--seconds={seconds}"],
             env={**os.environ},
             **_no_window(),
         )
@@ -1968,11 +2092,11 @@ def pick_mode() -> str:
 
     # Song moment: inject based on SONG_CHANCE — but never if music already playing
     if random.random() < SONG_CHANCE and not _is_music_playing():
-        hour = time.localtime().tm_hour
+        hour = _user_localtime().tm_hour
         if 7 <= hour <= 23:  # don't play music late night / very early
             return "song_moment"
 
-    hour = time.localtime().tm_hour
+    hour = _user_localtime().tm_hour
     roll = random.random()
     ck = "cricket" if (_ipl_speech_on and _interests_cricket_ipl()) else "trending"
     if 6 <= hour < 11:        # morning — curious, news, trending
@@ -2298,31 +2422,28 @@ def _no_window() -> dict:
 
 
 def speak_blocking(text: str, voice: str | None = None) -> float:
+    from friday_speaker import speaker
+
     t0 = time.perf_counter()
     if not text.strip():
         return 0.0
     if should_defer_voice_for_cursor():
         return 0.0
-    env = {**os.environ, "FRIDAY_TTS_USE_SESSION_STICKY_VOICE": "false"}
-    env.pop("FRIDAY_TTS_PRIORITY", None)
-    if voice:
-        env["FRIDAY_TTS_VOICE"] = voice
-    else:
+    resolved_voice = voice
+    if not resolved_voice and not _ambient_main_voice_only():
         av = os.environ.get("FRIDAY_AMBIENT_TTS_VOICE", "").strip()
         if av:
-            env["FRIDAY_TTS_VOICE"] = av
+            resolved_voice = av
     line = text.strip()[:4000]
     try:
         AMBIENT_SPEAKING_FILE.write_text(line, encoding="utf-8")
     except OSError:
         pass
     try:
-        subprocess.run(
-            [sys.executable, str(SPEAK_SCRIPT), line],
-            env=env,
-            capture_output=True,
-            timeout=120,
-            **_no_window(),
+        speaker.speak_blocking(
+            line,
+            voice=resolved_voice,
+            use_session_sticky=False,
         )
     except Exception as e:
         log.warning("speak failed: %s", e)
@@ -2346,34 +2467,107 @@ _SUB_VOICE_PHRASES = [
 ]
 
 
+def _format_local_time_spoken() -> str:
+    """12-hour time string for TTS — no trailing period so templates control punctuation."""
+    t = _user_localtime()
+    h12 = t.tm_hour % 12 or 12
+    suf = "AM" if t.tm_hour < 12 else "PM"
+    return f"{h12}:{t.tm_min:02d} {suf}"
+
+
+_CHECKIN_TEMPLATES = [
+    # ── Physical / wellness ───────────────────────────────────────────────────
+    "Hey {user}, quick pulse check. It's {time}. How are you holding up? Maybe water, a stretch, or a short break?",
+    "Time check for {user}: {time}. You've been at this a while — want to pause, snack, or just breathe for a minute?",
+    "{user}, {time}. Sub-agent check-in: posture okay? Eyes need a break? I'm not going anywhere.",
+    "It's {time}, {user}. Gentle nudge — hydrate if you can, and don't forget to unclench your jaw.",
+    "{user}, shoulders. Right now. Drop them. It's {time} and you've been tensed up for a while.",
+    "Blink check, {user} — it's {time}. Seriously, look away from the screen for twenty seconds. I'll wait.",
+    # ── Humorous ─────────────────────────────────────────────────────────────
+    "{user}, it is {time} and I am legally required to ask if you've eaten anything that wasn't coffee.",
+    "Sub-agent reporting in at {time}. {user}, the chair is not a throne — stand up for sixty seconds.",
+    "{time}, {user}. Just checking you haven't been sucked into a rabbit hole. How's the surface world?",
+    "It's {time}. {user}, if you've been in flow state this whole time, impressive — but your back disagrees.",
+    # ── Motivational / curious ────────────────────────────────────────────────
+    "{time}, {user}. Quick check-in — how's the problem you were working on? Any breakthrough yet?",
+    "{user}, it's {time}. You've put in solid time. Take sixty seconds to step back and look at the big picture before diving back in.",
+    "Clock says {time}, {user}. Sometimes the best debugging tool is a short walk and fresh eyes.",
+    # ── Late-night / early-morning aware ─────────────────────────────────────
+    "{time} and you're still at it, {user}. Respect — but brain fog is real after midnight. A short break now saves an hour of confusion later.",
+    "Hey {user}, {time}. The screen has been winning for a while. Give your eyes a rest — even two minutes helps.",
+    "{user}, {time}. Sub-agent wellness ping: water, posture, one deep breath. Go.",
+]
+
+
+def _pick_checkin_line() -> str:
+    return random.choice(_CHECKIN_TEMPLATES).format(user=USER_NAME, time=_format_local_time_spoken())
+
+
+def speak_subagent_blocking(text: str) -> float:
+    """
+    Blocking TTS using the ambient sub-agent voice (rate/pitch + optional FRIDAY_AMBIENT_SUB_TTS_VOICE).
+    Used for periodic check-ins; ignores FRIDAY_AMBIENT_MAIN_VOICE_ONLY so timbre stays distinct.
+    """
+    from friday_speaker import speaker
+
+    t0 = time.perf_counter()
+    if not text.strip():
+        return 0.0
+    if should_defer_voice_for_cursor():
+        return 0.0
+    subv = os.environ.get("FRIDAY_AMBIENT_SUB_TTS_VOICE", "").strip() or None
+    line = text.strip()[:4000]
+    try:
+        AMBIENT_SPEAKING_FILE.write_text(line, encoding="utf-8")
+    except OSError:
+        pass
+    try:
+        speaker.speak_blocking(
+            line,
+            voice=subv,
+            rate=SUB_VOICE_RATE,
+            pitch=SUB_VOICE_PITCH,
+            use_session_sticky=False,
+        )
+    except Exception as e:
+        log.warning("speak_subagent_blocking failed: %s", e)
+    finally:
+        try:
+            AMBIENT_SPEAKING_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return time.perf_counter() - t0
+
+
 def speak_child(text: str | None = None) -> None:
     """
     Speak a brief phrase in the sub-agent voice (faster + lower pitch than
     main Friday — sounds like a subordinate reporting in).
     Non-blocking fire-and-forget; used by parallel content workers.
     """
+    from friday_speaker import speaker
+
     phrase = text or random.choice(_SUB_VOICE_PHRASES)
     if not phrase.strip():
         return
     if should_defer_voice_for_cursor():
         return
-    env = {
-        **os.environ,
-        "FRIDAY_TTS_USE_SESSION_STICKY_VOICE": "false",
-        "FRIDAY_TTS_RATE":  SUB_VOICE_RATE,
-        "FRIDAY_TTS_PITCH": SUB_VOICE_PITCH,
-    }
-    subv = os.environ.get("FRIDAY_AMBIENT_SUB_TTS_VOICE", "").strip()
-    if subv:
-        env["FRIDAY_TTS_VOICE"] = subv
-    try:
-        subprocess.Popen(
-            [sys.executable, str(SPEAK_SCRIPT), phrase.strip()],
-            env=env,
-            **_no_window(),
-        )
-    except Exception as e:
-        log.debug("speak_child failed: %s", e)
+    voice = None
+    rate = None
+    pitch = None
+    if not _ambient_main_voice_only():
+        rate = SUB_VOICE_RATE
+        pitch = SUB_VOICE_PITCH
+        subv = os.environ.get("FRIDAY_AMBIENT_SUB_TTS_VOICE", "").strip()
+        if subv:
+            voice = subv
+    speaker.speak(
+        phrase.strip(),
+        voice=voice,
+        rate=rate,
+        pitch=pitch,
+        use_session_sticky=False,
+    )
 
 
 def prewarm_tts() -> None:
@@ -2382,11 +2576,12 @@ def prewarm_tts() -> None:
     log.info("Pre-warming TTS cache (%d phrases)...", len(PREWARM_PHRASES))
     cache_dir = Path(os.environ.get("FRIDAY_TTS_CACHE", "") or Path(tempfile.gettempdir()) / "friday-tts-cache")
     cache_dir.mkdir(parents=True, exist_ok=True)
+    speak_script = str(SPEAK_SCRIPT)
     for phrase in PREWARM_PHRASES:
         try:
             out = cache_dir / f"prewarm-{hashlib.md5(phrase.encode()).hexdigest()}.mp3"
             subprocess.run(
-                [sys.executable, str(SPEAK_SCRIPT), "--output", str(out), phrase],
+                [sys.executable, speak_script, "--output", str(out), phrase],
                 env={**os.environ}, capture_output=True, timeout=90, **_no_window(),
             )
         except Exception:
@@ -2586,9 +2781,104 @@ def refill_content_queue(conn, r) -> None:
 
 # -- Main brain ---------------------------------------------------------------
 def _jitter_threshold() -> float:
-    """Dynamic silence threshold: POST_TTS_GAP ± jitter, capped by env bounds."""
-    base = POST_TTS_GAP + random.uniform(-1.5, 3.5)
-    return max(MIN_AMBIENT_GAP, min(MAX_SILENCE_CAP, base))
+    """Dynamic silence threshold: post-TTS gap ± jitter, capped by min/max."""
+    post, min_g, max_c = _get_ambient_timing()
+    base = post + random.uniform(-1.5, 3.5)
+    return max(min_g, min(max_c, base))
+
+
+def _execute_checkin_speak(
+    conn: sqlite3.Connection,
+    last_ambient_holder: list[float],
+    line: str,
+) -> None:
+    """Run sub-agent check-in TTS and log (caller holds Redis TTS lock)."""
+    last_ambient_holder[0] = time.time()
+    d1 = int(speak_subagent_blocking(line) * 1000)
+    last_ambient_holder[0] = time.time()
+    try:
+        TTS_TS_FILE.write_text(str(time.time()), encoding="utf-8")
+    except OSError:
+        pass
+    log_spoken(conn, line, "ambient_checkin", d1)
+    log.info("[checkin] sub-agent time and wellness ping")
+
+
+def _ambient_checkin_loop(
+    r,
+    conn: sqlite3.Connection,
+    speak_lock: threading.Lock,
+    last_ambient_holder: list[float],
+    stop: threading.Event,
+) -> None:
+    """
+    Background thread: after an initial delay, periodically grabs the TTS lock and
+    speaks a sub-agent time + wellness line so normal ambient yields the floor.
+    """
+    if stop.wait(timeout=CHECKIN_INITIAL_DELAY_SEC):
+        return
+    while not stop.is_set():
+        try:
+            if should_defer_voice_for_cursor():
+                if stop.wait(timeout=30.0):
+                    break
+                continue
+            if _is_music_playing():
+                if stop.wait(timeout=45.0):
+                    break
+                continue
+            quiet_deadline = time.time() + 180.0
+            while time.time() < quiet_deadline and not stop.is_set():
+                if not _is_tts_active():
+                    break
+                if stop.wait(timeout=2.0):
+                    return
+            else:
+                if stop.is_set():
+                    return
+                if stop.wait(timeout=CHECKIN_INTERVAL_SEC):
+                    break
+                continue
+            if stop.is_set():
+                return
+            line = _pick_checkin_line()
+            need_redis_wait = False
+            with speak_lock:
+                if stop.is_set():
+                    return
+                if should_defer_voice_for_cursor() or _is_music_playing() or _is_tts_active():
+                    pass
+                elif not _acquire_tts_lock(r):
+                    need_redis_wait = True
+                else:
+                    try:
+                        _execute_checkin_speak(conn, last_ambient_holder, line)
+                    finally:
+                        _release_tts_lock(r)
+            if need_redis_wait:
+                # Must not hold speak_lock here — main thread may be waiting inside
+                # _wait_for_tts_lock_release while holding speak_lock (deadlock otherwise).
+                _wait_for_tts_lock_release(r, timeout=90.0)
+                if stop.is_set():
+                    return
+                with speak_lock:
+                    if stop.is_set():
+                        return
+                    if (
+                        should_defer_voice_for_cursor()
+                        or _is_music_playing()
+                        or _is_tts_active()
+                    ):
+                        pass
+                    elif _acquire_tts_lock(r):
+                        try:
+                            _execute_checkin_speak(conn, last_ambient_holder, line)
+                        finally:
+                            _release_tts_lock(r)
+        except Exception as e:
+            log.debug("checkin loop: %s", e)
+        if stop.wait(timeout=CHECKIN_INTERVAL_SEC):
+            break
 
 
 def main() -> None:
@@ -2631,12 +2921,28 @@ def main() -> None:
 
     threading.Thread(target=queue_refiller, daemon=True).start()
 
-    last_ambient = 0.0
-    speak_lock   = threading.Lock()
+    last_ambient_holder = [0.0]
+    speak_lock = threading.Lock()
+    ambient_speech_count = 0  # non-song ambient lines successfully spoken; reset when a song moment plays
+    post0, min0, max0 = _get_ambient_timing()
     log.info(
         "Ambient brain online — post_tts_gap=%.1fs min_gap=%.1fs tone=%s",
-        POST_TTS_GAP, MIN_AMBIENT_GAP, TONE,
+        post0, min0, TONE,
     )
+    threading.Thread(target=_poll_pc_agent_ambient_timing, daemon=True).start()
+
+    if CHECKIN_ENABLED:
+        threading.Thread(
+            target=_ambient_checkin_loop,
+            args=(r, conn, speak_lock, last_ambient_holder, stop_media),
+            daemon=True,
+            name="ambient-checkin",
+        ).start()
+        log.info(
+            "Check-in thread on — first ping after %.0fs, then every %.0fs (sub-agent TTS)",
+            CHECKIN_INITIAL_DELAY_SEC,
+            CHECKIN_INTERVAL_SEC,
+        )
 
     try:
         while True:
@@ -2655,168 +2961,191 @@ def main() -> None:
 
             # ── Dynamic silence gate: time since last TTS ended ────────────────
             since_tts = _seconds_since_last_tts()
-            threshold = _jitter_threshold()   # POST_TTS_GAP ± jitter
+            threshold = _jitter_threshold()   # post-TTS gap ± jitter
             if since_tts < threshold:
                 continue
 
-            # ── Ambient spacing: don't fire faster than MIN_AMBIENT_GAP ─────────
-            if time.time() - last_ambient < MIN_AMBIENT_GAP:
+            _, min_gap, _ = _get_ambient_timing()
+            # ── Ambient spacing: don't fire faster than min_gap ─────────
+            if time.time() - last_ambient_holder[0] < min_gap:
                 continue
 
+            need_redis_wait = False
             with speak_lock:
                 # Re-check cheap conditions under lock before doing anything
                 if _is_tts_active():
                     continue
                 if _seconds_since_last_tts() < threshold:
                     continue
-                if time.time() - last_ambient < MIN_AMBIENT_GAP:
+                _, min_gap2, _ = _get_ambient_timing()
+                if time.time() - last_ambient_holder[0] < min_gap2:
                     continue
 
                 # ── Acquire distributed TTS lock FIRST — before any API call ──
-                # If another process is speaking: wait for it to finish, then
-                # reset our gap timer so we don't fire immediately on top of it.
-                # (Drop the ambient turn entirely; fresh silence gap required.)
+                # If busy: set flag and exit this with-block before waiting — never
+                # call _wait_for_tts_lock_release while holding speak_lock (check-in
+                # thread needs speak_lock to finish and release Redis).
                 if not _acquire_tts_lock(r):
-                    log.debug("TTS lock held — waiting for playback to finish.")
-                    _wait_for_tts_lock_release(r)
-                    # Reset both gap clocks from "now" so the loop waits a full
-                    # silence gap before the next ambient attempt.
-                    last_ambient = time.time()
+                    need_redis_wait = True
+                else:
+                    # ── We now own the lock — generate + speak ─────────────────
                     try:
-                        TTS_TS_FILE.write_text(str(time.time()), encoding="utf-8")
-                    except OSError:
-                        pass
-                    log.debug("Playback finished — gap timer reset. Next ambient after %.1fs.", threshold)
-                    continue  # drop this turn; re-enter main wait loop
+                        mode = pick_mode()
+                        if media_state.get("want_music_comment"):
+                            media_state["want_music_comment"] = False
+                            mode = "music_comment"
 
-                # ── We now own the lock — generate + speak ─────────────────────
-                try:
-                    mode = pick_mode()
-                    if media_state.get("want_music_comment"):
-                        media_state["want_music_comment"] = False
-                        mode = "music_comment"
-
-                    # ── Song moment: speak intro, then launch music player ──────
-                    if mode == "song_moment":
-                        moment = generate_song_moment()
-                        if moment:
-                            line = moment["spoken"]
-                            # Dedup check
-                            if not _was_recently_spoken(r, line) and not _was_semantically_redundant(
-                                r, conn, line
-                            ):
-                                last_ambient = time.time()
-                                _mark_spoken(r, line)
-                                d1 = int(speak_blocking(line) * 1000)
-                                # Release TTS lock before starting music
-                                # (music uses its own PID file, not the TTS lock)
-                                _release_tts_lock(r)
-                                play_song_ambient(moment["query"], moment["seconds"])
+                        # ── After N ambient speeches, force featured song (still obeys music playing + hour) ──
+                        if (
+                            SONG_AFTER_SPEECHES > 0
+                            and ambient_speech_count >= SONG_AFTER_SPEECHES
+                            and not _is_music_playing()
+                        ):
+                            h = _user_localtime().tm_hour
+                            if 7 <= h <= 23:
+                                mode = "song_moment"
                                 log.info(
-                                    "[song] %r — playing %s for %ds",
-                                    moment["query"], moment["section"], moment["seconds"],
+                                    "[song] forcing song_moment after %d ambient speech(es)",
+                                    ambient_speech_count,
                                 )
-                                last_ambient = time.time()
+
+                        # ── Song moment: speak intro, then launch music player ──────
+                        if mode == "song_moment":
+                            moment = generate_song_moment()
+                            if moment:
+                                line = moment["spoken"]
+                                # Dedup check
+                                if not _was_recently_spoken(r, line) and not _was_semantically_redundant(
+                                    r, conn, line
+                                ):
+                                    last_ambient_holder[0] = time.time()
+                                    _mark_spoken(r, line)
+                                    d1 = int(speak_blocking(line) * 1000)
+                                    # Release TTS lock before starting music
+                                    # (music uses its own PID file, not the TTS lock)
+                                    _release_tts_lock(r)
+                                    play_song_ambient(moment["query"], moment["seconds"])
+                                    log.info(
+                                        "[song] %r — playing %s for %ds",
+                                        moment["query"], moment["section"], moment["seconds"],
+                                    )
+                                    last_ambient_holder[0] = time.time()
+                                    try:
+                                        TTS_TS_FILE.write_text(str(time.time()), encoding="utf-8")
+                                    except OSError:
+                                        pass
+                                    log_spoken(conn, line, "ambient_song", d1)
+                                    ambient_speech_count = 0
+                                continue  # lock already released above
+                            else:
+                                # Fallback to a regular funny/mixed turn if song gen failed
+                                mode = "funny"
+
+                        # ── Regular content generation ─────────────────────────────
+                        # Pop pre-generated content from queue first (queue is
+                        # filled by non-song modes only)
+                        line = None
+                        if not (mode == "cricket" and _cricket_hindi_live_ambient()):
+                            for _q_attempt in range(5):
                                 try:
-                                    TTS_TS_FILE.write_text(str(time.time()), encoding="utf-8")
-                                except OSError:
-                                    pass
-                                log_spoken(conn, line, "ambient_song", d1)
-                            continue  # lock already released above
-                        else:
-                            # Fallback to a regular funny/mixed turn if song gen failed
-                            mode = "funny"
+                                    raw = r.rpop("friday:ambient:content_queue")
+                                except Exception:
+                                    raw = None
+                                if not raw:
+                                    break
+                                parsed: dict[str, Any] | None = None
+                                if isinstance(raw, str):
+                                    try:
+                                        parsed = json.loads(raw)
+                                    except (json.JSONDecodeError, TypeError):
+                                        parsed = None
+                                if isinstance(parsed, dict) and parsed.get("line"):
+                                    qmode = str(parsed.get("mode") or "")
+                                    ql = str(parsed.get("line") or "").strip()
+                                    if qmode == "cricket" and not _ipl_speech_on:
+                                        continue
+                                    line = ql
+                                    break
+                                if isinstance(raw, str) and raw.strip():
+                                    line = raw.strip()
+                                    break
 
-                    # ── Regular content generation ─────────────────────────────
-                    # Pop pre-generated content from queue first (queue is
-                    # filled by non-song modes only)
-                    line = None
-                    if not (mode == "cricket" and _cricket_hindi_live_ambient()):
-                        for _q_attempt in range(5):
-                            try:
-                                raw = r.rpop("friday:ambient:content_queue")
-                            except Exception:
-                                raw = None
-                            if not raw:
-                                break
-                            parsed: dict[str, Any] | None = None
-                            if isinstance(raw, str):
-                                try:
-                                    parsed = json.loads(raw)
-                                except (json.JSONDecodeError, TypeError):
-                                    parsed = None
-                            if isinstance(parsed, dict) and parsed.get("line"):
-                                qmode = str(parsed.get("mode") or "")
-                                ql = str(parsed.get("line") or "").strip()
-                                if qmode == "cricket" and not _ipl_speech_on:
-                                    continue
-                                line = ql
-                                break
-                            if isinstance(raw, str) and raw.strip():
-                                line = raw.strip()
-                                break
+                        # Verbose mode: 30% of turns get longer storytelling output
+                        verbose = random.random() < VERBOSE_RATIO
 
-                    # Verbose mode: 30% of turns get longer storytelling output
-                    verbose = random.random() < VERBOSE_RATIO
+                        if mode == "music_comment" or not line:
+                            live       = get_live_data(r)
+                            music_hint = media_state.get("last_track_pretty")
+                            news       = live.get("news") if mode in ("informational", "mixed") else None
+                            _, line    = generate_line_ai(r, mode, news, music_hint, live, verbose=verbose)
 
-                    if mode == "music_comment" or not line:
-                        live       = get_live_data(r)
-                        music_hint = media_state.get("last_track_pretty")
-                        news       = live.get("news") if mode in ("informational", "mixed") else None
-                        _, line    = generate_line_ai(r, mode, news, music_hint, live, verbose=verbose)
-
-                    # Dedup: skip if spoken recently (Redis ring buffer)
-                    if _was_recently_spoken(r, line):
-                        log.debug("Dedup: skipping recently spoken line.")
-                        continue
-
-                    # Semantic dedup: skip paraphrases too close to recent ambient (Dice token overlap)
-                    if _was_semantically_redundant(r, conn, line):
-                        log.debug(
-                            "Semantic dedup: skipping line (overlap > %.0f%%).",
-                            _SIMILARITY_SKIP * 100,
-                        )
-                        continue
-
-                    # Dedup: skip if same text spoken within SPOKEN_DEDUP_SEC (SQLite, default one day)
-                    try:
-                        with _db_lock:
-                            row = conn.execute(
-                                "SELECT 1 FROM spoken_log WHERE text=? AND ts > ? LIMIT 1",
-                                (line, time.time() - SPOKEN_DEDUP_SEC),
-                            ).fetchone()
-                        if row:
-                            log.debug("SQLite dedup: skipping line spoken within dedup window.")
+                        # Dedup: skip if spoken recently (Redis ring buffer)
+                        if _was_recently_spoken(r, line):
+                            log.debug("Dedup: skipping recently spoken line.")
                             continue
-                    except Exception:
-                        pass
 
-                    # Last safety: another TTS fired while we were generating
-                    if _is_tts_active():
-                        log.debug("TTS became active mid-generate — dropping ambient line.")
-                        continue
+                        # Semantic dedup: skip paraphrases too close to recent ambient (Dice token overlap)
+                        if _was_semantically_redundant(r, conn, line):
+                            log.debug(
+                                "Semantic dedup: skipping line (overlap > %.0f%%).",
+                                _SIMILARITY_SKIP * 100,
+                            )
+                            continue
 
-                    # ── Stamp + speak ──────────────────────────────────────────
-                    last_ambient = time.time()
-                    _mark_spoken(r, line)
+                        # Dedup: skip if same text spoken within SPOKEN_DEDUP_SEC (SQLite, default one day)
+                        try:
+                            with _db_lock:
+                                row = conn.execute(
+                                    "SELECT 1 FROM spoken_log WHERE text=? AND ts > ? LIMIT 1",
+                                    (line, time.time() - SPOKEN_DEDUP_SEC),
+                                ).fetchone()
+                            if row:
+                                log.debug("SQLite dedup: skipping line spoken within dedup window.")
+                                continue
+                        except Exception:
+                            pass
 
-                    cv = _ambient_line_tts_voice(line, mode)
-                    d1 = int(speak_blocking(line, voice=cv) * 1000)
+                        # Last safety: another TTS fired while we were generating
+                        if _is_tts_active():
+                            log.debug("TTS became active mid-generate — dropping ambient line.")
+                            continue
 
-                    # Reset clocks from end of speech (gap timer starts here)
-                    last_ambient = time.time()
-                    try:
-                        TTS_TS_FILE.write_text(str(time.time()), encoding="utf-8")
-                    except OSError:
-                        pass
+                        # ── Stamp + speak ──────────────────────────────────────────
+                        last_ambient_holder[0] = time.time()
+                        _mark_spoken(r, line)
 
-                    log_spoken(conn, line, "ambient_main", d1)
-                    log_ambient_content(conn, mode, line, mode, spoken=True)
+                        cv = _ambient_line_tts_voice(line, mode)
+                        d1 = int(speak_blocking(line, voice=cv) * 1000)
 
-                finally:
-                    # Always release the lock — even if dedup skipped or an
-                    # exception was raised during generation/playback.
-                    _release_tts_lock(r)
+                        # Reset clocks from end of speech (gap timer starts here)
+                        last_ambient_holder[0] = time.time()
+                        try:
+                            TTS_TS_FILE.write_text(str(time.time()), encoding="utf-8")
+                        except OSError:
+                            pass
+
+                        log_spoken(conn, line, "ambient_main", d1)
+                        log_ambient_content(conn, mode, line, mode, spoken=True)
+                        ambient_speech_count += 1
+
+                    finally:
+                        # Always release the lock — even if dedup skipped or an
+                        # exception was raised during generation/playback.
+                        _release_tts_lock(r)
+
+            if need_redis_wait:
+                log.debug("TTS lock held — waiting for playback to finish.")
+                _wait_for_tts_lock_release(r)
+                last_ambient_holder[0] = time.time()
+                try:
+                    TTS_TS_FILE.write_text(str(time.time()), encoding="utf-8")
+                except OSError:
+                    pass
+                log.debug(
+                    "Playback finished — gap timer reset. Next ambient after %.1fs.",
+                    threshold,
+                )
+                continue
 
     except KeyboardInterrupt:
         log.info("Shutting down.")

@@ -8,6 +8,7 @@ import dotenv from 'dotenv';
 import pinoHttp from 'pino-http';
 import { rootLogger } from './log.js';
 import { runTask } from './taskRunner.js';
+import { pythonChildExecutable } from './winPython.js';
 import { prepareTextForTts } from './ttsPrep.js';
 import { piperConfigured, synthesizePiperWav } from './piperTts.js';
 import {
@@ -18,8 +19,14 @@ import {
   filteredEdgeTtsCatalogue,
   getVoiceBlockSet,
   isVoiceBlocked,
+  restoreSessionVoiceFromRedis,
 } from './edgeTts.js';
+import { getAllVoiceContexts } from './voiceRedis.js';
 import { openAiTtsApiKey, openAiTtsConfigured, synthesizeOpenAiMp3 } from './openaiTts.js';
+import { createPerceptionRouter } from './perceptionRoutes.js';
+import { createSettingsRouter } from './settingsRoutes.js';
+import { createAutomationRouter } from './automationRoutes.js';
+import { perceptionDbConfigured, perceptionDbHealth } from './perceptionDb.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, '../public');
@@ -46,6 +53,25 @@ const PORT = Number(process.env.PC_AGENT_PORT || 3847);
 
 // ── Friday startup voice ──────────────────────────────────────────────────────
 const SPEAK_SCRIPT = path.resolve(__dirname, '../../skill-gateway/scripts/friday-speak.py');
+const PLAY_SCRIPT  = path.resolve(__dirname, '../../skill-gateway/scripts/friday-play.py');
+
+function playDoneSong(log) {
+  const song = (process.env.FRIDAY_DONE_SONG || '').trim();
+  if (!song || !existsSync(PLAY_SCRIPT)) return;
+  const child = spawn(pythonChildExecutable(), [PLAY_SCRIPT, song], {
+    env: { ...process.env },
+    stdio: ['ignore', 'ignore', 'pipe'],
+    windowsHide: true,
+    detached: true,
+  });
+  child.unref();
+  child.stderr?.on('data', (buf) => {
+    const line = buf.toString().trim();
+    if (line) log?.warn({ line: line.slice(0, 400) }, 'done-song stderr');
+  });
+  child.on('error', (e) => log?.warn({ err: String(e.message) }, 'done-song spawn failed'));
+  log?.info({ song }, 'done-song: spawned friday-play.py');
+}
 
 function pcAgentStartupGreetingPhrase() {
   const n = (process.env.FRIDAY_USER_NAME || 'Raj').trim() || 'Raj';
@@ -72,7 +98,7 @@ function greetingTtsRatePitch() {
   const raw = (process.env.FRIDAY_TTS_JARVIS_RANDOM || 'true').toLowerCase();
   if (off.includes(raw)) {
     return {
-      FRIDAY_TTS_RATE: process.env.FRIDAY_TTS_JARVIS_RATE || '+7.5%',
+      FRIDAY_TTS_RATE: process.env.FRIDAY_TTS_JARVIS_RATE || '+10%',
       FRIDAY_TTS_PITCH: process.env.FRIDAY_TTS_JARVIS_PITCH || '+2Hz',
     };
   }
@@ -244,9 +270,48 @@ voiceRouter.post('/command', async (req, res, next) => {
   try {
     const out = await runTask(req.body, req.log);
     res.status(out.status).json(out.json);
+    if (out.json?.ok) playDoneSong(req.log);
   } catch (e) {
     next(e);
   }
+});
+
+/** Speak text asynchronously via friday-speak.py with Jarvis voice settings (fire-and-forget).
+ * Used for incoming messages (WhatsApp, email, etc.) to auto-speak responses.
+ */
+voiceRouter.post('/speak-async', (req, res) => {
+  const text = String(req.body?.text || '').trim();
+  if (!text) {
+    return res.status(400).json({ error: 'Missing text in body: { "text": "Hello" }' });
+  }
+  if (!existsSync(SPEAK_SCRIPT)) {
+    return res.status(503).json({ error: 'friday-speak.py not found', hint: 'Install skill-gateway scripts.' });
+  }
+
+  // Fire-and-forget: spawn async, return immediately
+  const delivery = greetingTtsRatePitch();
+  const child = spawn('python', [SPEAK_SCRIPT, text], {
+    env: {
+      ...process.env,
+      FRIDAY_TTS_VOICE:  process.env.FRIDAY_TTS_VOICE  || 'en-US-EmmaMultilingualNeural',
+      FRIDAY_TTS_DEVICE: process.env.FRIDAY_TTS_DEVICE || 'default',
+      FRIDAY_TTS_PRIORITY: '1',
+      // Always audible: listen UI and integrations use this for assistant replies (Cursor focus must not mute).
+      FRIDAY_TTS_BYPASS_CURSOR_DEFER: 'true',
+      ...delivery,
+    },
+    detached: true,
+    stdio: ['ignore', 'ignore', 'pipe'],
+    windowsHide: true,
+  });
+
+  // Log errors but don't block response
+  child.stderr?.on('data', (buf) => {
+    const line = buf.toString().trim();
+    if (line) req.log?.warn({ fridaySpeak: line }, '/voice/speak-async stderr');
+  });
+
+  res.json({ ok: true, text: text.slice(0, 60) });
 });
 
 /** Free local neural TTS (Piper) → WAV; optional paid OpenAI (set FRIDAY_TTS_OPENAI=true). Else client uses browser. */
@@ -366,7 +431,18 @@ voiceRouter.get('/voices', (_req, res) => {
   });
 });
 
-/** Set the active Edge TTS voice for this server session (resets on restart). */
+/** Return live status of every tracked voice context from Redis. */
+voiceRouter.get('/status', async (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    const contexts = await getAllVoiceContexts();
+    res.json({ ok: true, contexts });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: String(err.message || err) });
+  }
+});
+
+/** Set the active Edge TTS voice for this server session (persisted to Redis). */
 voiceRouter.post('/set-voice', (req, res) => {
   const { voice } = req.body || {};
   if (!voice || typeof voice !== 'string') {
@@ -387,8 +463,12 @@ voiceRouter.post('/set-voice', (req, res) => {
 
 app.use('/voice', voiceRouter);
 
-app.get('/health', (_req, res) => {
-  res.json({ ok: true, service: 'openclaw-pc-agent' });
+app.get('/health', async (_req, res) => {
+  const body = { ok: true, service: 'openclaw-pc-agent' };
+  if (perceptionDbConfigured()) {
+    body.postgres = await perceptionDbHealth();
+  }
+  res.json(body);
 });
 
 app.get('/', (_req, res) => {
@@ -417,6 +497,18 @@ app.get('/friday/listen', (_req, res) => {
   res.sendFile(path.join(publicDir, 'listen.html'));
 });
 
+app.get('/listen.css', (_req, res) => {
+  res.setHeader('Content-Type', 'text/css');
+  res.setHeader('Cache-Control', 'public, max-age=3600');
+  res.sendFile(path.join(publicDir, 'listen.css'));
+});
+
+app.get('/listen.js', (_req, res) => {
+  res.setHeader('Content-Type', 'application/javascript');
+  res.setHeader('Cache-Control', 'public, max-age=3600');
+  res.sendFile(path.join(publicDir, 'listen.js'));
+});
+
 app.get('/jarvis', (_req, res) => {
   res.redirect(302, '/friday');
 });
@@ -429,6 +521,10 @@ app.post('/task', auth, async (req, res, next) => {
     next(e);
   }
 });
+
+app.use('/perception', createPerceptionRouter(auth));
+app.use('/settings', createSettingsRouter(auth));
+app.use('/automation', createAutomationRouter(auth));
 
 app.use((err, req, res, _next) => {
   req.log?.error({ err }, 'unhandled route error');
@@ -504,6 +600,8 @@ server = app.listen(PORT, BIND, () => {
   );
 
   broadcastEvent('server_start', { text: 'PC Agent online. All systems go.' });
+  // Restore the last API session voice from Redis so it survives restarts
+  restoreSessionVoiceFromRedis().catch(() => {});
   speakStartup();
 });
 server.on('error', (err) => {

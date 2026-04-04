@@ -33,8 +33,9 @@ export function winTtsEnabled() {
  * Speak text via edge-tts neural voice on Echo Dot (or fallback device). Fire-and-forget.
  * @param {string} text
  * @param {import('pino').Logger} [log]
+ * @param {{ bypassCursorDefer?: boolean, priority?: boolean }} [opts]
  */
-export function speakWinTts(text, log) {
+export function speakWinTts(text, log, opts = {}) {
   if (!IS_WINDOWS) return;
 
   const safeText = String(text || '').trim().slice(0, 500);
@@ -47,6 +48,8 @@ export function speakWinTts(text, log) {
     FRIDAY_TTS_RATE:   process.env.FRIDAY_WIN_TTS_RATE   || '+7.5%',
     FRIDAY_TTS_PITCH:  process.env.FRIDAY_WIN_TTS_PITCH  || '+2Hz',
     FRIDAY_TTS_VOLUME: process.env.FRIDAY_WIN_TTS_VOLUME || '+0%',
+    ...(opts.bypassCursorDefer ? { FRIDAY_TTS_BYPASS_CURSOR_DEFER: 'true' } : {}),
+    ...(opts.priority ? { FRIDAY_TTS_PRIORITY: '1' } : {}),
   };
 
   const child = spawn('python', [SPEAK_PY, safeText], {

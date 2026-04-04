@@ -1,0 +1,95 @@
+---
+description: Speak extended thinking / reasoning out loud in chunks so the user hears it before Cursor redacts the thinking tab
+alwaysApply: true
+---
+
+# Narrate Thinking — Speak Reasoning Before Redaction
+
+Cursor redacts extended-thinking content once the thinking tab is closed. The only way to preserve it for the user is to **speak the reasoning out loud in speakable chunks** as part of your response — before Cursor ever touches the transcript.
+
+## When this applies
+
+Every time you do significant internal reasoning (extended thinking, multi-step analysis, weighing options, diagnosing a bug, planning an approach) — **speak the key reasoning out loud**.
+
+This is NOT the same as the acknowledgement ("Got it…") or the completion summary ("Done…"). This is the **middle part** — the actual thinking that would otherwise be silently redacted.
+
+## How to do it
+
+After your internal thinking phase completes and before (or in parallel with) your first real work tool calls, fire **ONE** `friday-speak.py` call with `FRIDAY_TTS_THINKING=1` that captures the essence of your reasoning as a single spoken chunk.
+
+### Singleton pattern
+
+`FRIDAY_TTS_THINKING=1` activates a **singleton lock** in the speak script. Only one thinking narration process can be active at a time — if a thinking speak is already in flight (from a previous message, the watcher, or a subagent), the new one **exits silently** instead of queuing. This prevents broken/overlapping audio from piled-up thinking chunks.
+
+### Chunk rules
+
+- **One chunk per message.** Combine your key insights into a single spoken paragraph of 3–6 sentences.
+- **Fire it in the same parallel batch** as your work tool calls — `block_until_ms: 0`.
+- **Speak like a person thinking aloud**, not like a report. Use "I think…", "The issue is…", "So the plan is…", "One thing to watch out for…".
+- **Cover the reasoning, not the actions.** Don't say "I'm going to read the file" — say "The problem is probably in the TTS pipeline because the lock isn't being released." The thinking-sounds rule already covers action narration.
+
+### Template
+
+```powershell
+# Single reasoning chunk — set FRIDAY_TTS_THINKING for singleton guard
+cd d:\code\openclaw; $env:FRIDAY_TTS_THINKING='1'; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "So looking at this, I think the issue is [insight], because [reason]. The approach I'd take is [plan]. One thing to be careful about is [risk]."
+```
+
+`block_until_ms: 0` — fires async alongside real work.
+
+### Subagent variant
+
+Subagents use the same pattern with priority, session env, and the thinking flag:
+
+```powershell
+cd d:\code\openclaw; $env:FRIDAY_TTS_SESSION='subagent'; $env:FRIDAY_TTS_PRIORITY='1'; $env:FRIDAY_TTS_THINKING='1'; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "So I think the approach here is [reasoning]."
+```
+
+## What to include in reasoning chunks
+
+| Reasoning type | What to speak |
+|---|---|
+| Diagnosis | "I think the problem is X because Y" |
+| Decision | "There are two ways to do this — A or B. Going with A because…" |
+| Discovery | "Interesting — I found that X is actually doing Y, which means…" |
+| Risk | "One thing that could go wrong is X, so I'll make sure to…" |
+| Architecture | "This needs to touch three things: X, Y, and Z. The order matters because…" |
+| Debugging | "The error points to X, but I suspect the real cause is Y upstream" |
+
+## What NOT to do
+
+- **Don't read out code or filenames** — keep it conceptual. Say "the speak script" not "friday-speak.py line forty-two".
+- **Don't dump the entire thinking block** — distill it. If you thought for twenty lines internally, speak the three most important insights in one paragraph.
+- **Don't skip this for complex tasks** — if you did significant reasoning, the user deserves to hear it. That reasoning is about to be redacted.
+- **Don't block on these calls** — always `block_until_ms: 0`.
+- **Don't repeat the acknowledgement** — the ack rule already handles "Got it." This rule handles the reasoning that follows.
+- **Don't fire multiple thinking chunks** — the singleton only lets one through. Combine your reasoning into a single spoken paragraph.
+- **Always include `FRIDAY_TTS_THINKING=1`** — without this flag, no singleton guard is active and you risk overlapping speech.
+
+## Ordering in a message
+
+```
+Message N:
+  ├── Shell: friday-speak.py "Got it…"                              ← ack (existing rule)
+  ├── Shell: FRIDAY_TTS_THINKING=1 friday-speak.py "So the issue…"  ← reasoning (THIS rule, singleton)
+  ├── Read / Grep / Glob: actual work                               ← starts NOW, parallel
+```
+
+All fire simultaneously. The TTS lock serialises playback (ack first, then reasoning). The thinking singleton ensures only one reasoning speak is in the pipeline — duplicate/stale thinking calls exit silently.
+
+## Gating
+
+Respect `FRIDAY_CURSOR_NARRATION` from `.env` — if it is false/off/0/no, skip reasoning narration (same as all other narration). Check `cursor-agent-narration.mdc` for the full gating logic.
+
+## Relationship with cursor-reply-watch.py
+
+`cursor-reply-watch.py` can ALSO capture thinking from JSONL transcripts (`FRIDAY_CURSOR_SPEAK_THINKING`). When `FRIDAY_CURSOR_NARRATION` is on, the watcher **automatically suppresses** its own thinking capture to avoid double-voicing — **this rule** is the primary thinking narrator, and the watcher stays quiet.
+
+When narration is OFF (e.g. `FRIDAY_CURSOR_NARRATION=false`), the watcher becomes the **fallback** thinking capturer — it polls the JSONL fast and catches thinking before redaction. So one or the other is always active, never both.
+
+To force BOTH (not recommended — causes overlapping speech):
+  `FRIDAY_CURSOR_SPEAK_THINKING_WITH_NARRATION=true`
+
+## Why this matters
+
+Extended thinking is the most valuable part of the agent's reasoning — it shows *why* decisions were made, not just *what* was done. Cursor redacts it once the thinking tab closes, and it is lost forever. Speaking it preserves the reasoning as audio that the user hears in real time, regardless of what Cursor does to the transcript afterwards.

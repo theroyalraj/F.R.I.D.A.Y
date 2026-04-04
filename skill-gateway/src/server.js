@@ -490,7 +490,7 @@ app.post('/internal/last-result', async (req, res, next) => {
       if (fridaySpeakEnabled()) {
         speakTaskDone(speakSummary, req.log);
       } else {
-        speakWinTts(speakSummary, req.log);
+        speakWinTts(speakSummary, req.log, { bypassCursorDefer: true, priority: true });
       }
     }
 
@@ -603,9 +603,9 @@ app.post('/internal/speak', async (req, res) => {
   res.json({ ok: true });
   // Fire-and-forget — don't block the response
   if (fridaySpeakEnabled()) {
-    speakFridayPy(text.trim()).catch(() => {});
+    speakFridayPy(text.trim(), req.log, { bypassCursorDefer: true, priority: true });
   } else if (winTtsEnabled()) {
-    speakWinTts(text.trim()).catch(() => {});
+    speakWinTts(text.trim(), req.log, { bypassCursorDefer: true });
   }
 });
 

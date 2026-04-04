@@ -1,11 +1,12 @@
 import { matchOpenIntent, openApp } from './open.js';
+import { matchPlayMusicIntent, playMusicSearch } from './playMusic.js';
 import { runClaude } from './claude.js';
 import { callClaudeApi, isApiKeyAvailable } from './claudeApi.js';
 import { inferClaudeModelForTask, isAutoModelEnabled } from './claudeRouter.js';
 import { sanitizeClaudeModel } from './claudeModel.js';
 
 // Sources that need fast conversational responses — use direct API, not CLI
-const FAST_SOURCES = new Set(['mic-daemon', 'voice', 'friday-mic-daemon']);
+const FAST_SOURCES = new Set(['mic-daemon', 'voice', 'friday-mic-daemon', 'whatsapp']);
 
 /**
  * Shared command path for Alexa→N8N→/task and Jarvis voice UI→/voice/command.
@@ -52,6 +53,37 @@ export async function runTask(body, reqLog, options = {}) {
     };
   }
 
+  if (action === 'play_music' && typeof body?.query === 'string' && body.query.trim()) {
+    const r = await playMusicSearch(body.query.trim());
+    reqLog.info({ mode: 'play_music', ok: r.ok, ms: Date.now() - t0 }, 'task done');
+    return {
+      status: 200,
+      json: {
+        ok: r.ok,
+        mode: 'play_music',
+        userId,
+        correlationId,
+        summary: r.detail,
+      },
+    };
+  }
+
+  const playQuery = t ? matchPlayMusicIntent(t) : null;
+  if (playQuery) {
+    const r = await playMusicSearch(playQuery);
+    reqLog.info({ mode: 'play_music', query: playQuery, ok: r.ok, ms: Date.now() - t0 }, 'task done');
+    return {
+      status: 200,
+      json: {
+        ok: r.ok,
+        mode: 'play_music',
+        userId,
+        correlationId,
+        summary: r.detail,
+      },
+    };
+  }
+
   const key = t ? matchOpenIntent(t) : null;
   if (key) {
     const r = await openApp(key);
@@ -88,11 +120,13 @@ export async function runTask(body, reqLog, options = {}) {
 
   if (useFastApi) {
     const apiModel = (claudeModel === 'sonnet') ? 'sonnet' : 'haiku';
-    reqLog.info({ mode: 'api', apiModel }, 'invoking claude api (fast path)');
+    const apiTimeoutMs =
+      src === 'whatsapp' ? Math.min(TIMEOUT, 180_000) : Math.min(TIMEOUT, 20_000);
+    reqLog.info({ mode: 'api', apiModel, apiTimeoutMs }, 'invoking claude api (fast path)');
     try {
       const result = await callClaudeApi(t, {
         model:     apiModel,
-        timeoutMs: Math.min(TIMEOUT, 20_000),
+        timeoutMs: apiTimeoutMs,
         log:       reqLog,
       });
       reqLog.info({ mode: 'api', ok: result.ok, ms: result.ms, model: result.model }, 'task done');

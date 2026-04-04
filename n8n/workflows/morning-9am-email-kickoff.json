@@ -1,0 +1,125 @@
+{
+  "name": "Openclaw — 9 AM Morning Email + WhatsApp Kickoff",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 9 * * *" }]
+        }
+      },
+      "id": "m9a00001-0000-4000-8000-000000000001",
+      "name": "Schedule 9 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.GATEWAY_INTERNAL_URL }}/internal/speak",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "X-Openclaw-Secret", "value": "={{ $env.N8N_WEBHOOK_SECRET }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { text: 'Good morning. Pulling your Gmail snapshot for the nine A M brief.' } }}",
+        "options": { "timeout": 15000, "ignore404": true }
+      },
+      "id": "m9a00002-0000-4000-8000-000000000002",
+      "name": "Alarm Speak",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [260, 0],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:3847/automation/gmail-snapshot",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.PC_AGENT_SECRET }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { unreadCount: 20, recentCount: 15 } }}",
+        "options": { "timeout": 120000 }
+      },
+      "id": "m9a00003-0000-4000-8000-000000000003",
+      "name": "Gmail Snapshot",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [520, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "const j = $input.first().json;\nconst inst = $env.EVOLUTION_INSTANCE || 'openclaw';\nconst number = String($env.WHATSAPP_NOTIFY_NUMBER || '').trim();\nif (!number) {\n  throw new Error('WHATSAPP_NOTIFY_NUMBER is empty — set it in .env for the n8n container');\n}\nif (!j.ok) {\n  const err = j.error || 'unknown error';\n  return [\n    {\n      json: {\n        whatsappText: `OpenClaw could not read Gmail: ${err}`,\n        speakLine:\n          'Gmail snapshot failed. Check GMAIL_ADDRESS and GMAIL_APP_PWD on the machine running pc-agent.',\n        instance: inst,\n        number,\n      },\n    },\n  ];\n}\nconst name = ($env.FRIDAY_USER_NAME || 'there').trim() || 'there';\nconst unread = Array.isArray(j.unread) ? j.unread : [];\nconst recent = Array.isArray(j.recent) ? j.recent : [];\nfunction lines(list, n) {\n  return list\n    .slice(0, n)\n    .map((x) => `• ${x.subject} — from ${x.from} (${x.date})`)\n    .join('\\n');\n}\nconst ur = lines(unread, 10);\nconst rc = recent.length ? '\\nLatest in inbox:\\n' + lines(recent, 6) : '';\nconst whatsappText = `Good morning ${name} — nine A M inbox snapshot.\\nUnread (up to ${unread.length}):\\n${\n  ur || 'No unread in snapshot.'\n}${rc}`.slice(0, 3900);\nconst speakLine = `Good morning ${name}. Snapshot shows about ${unread.length} unread in this batch. Details are on WhatsApp.`;\nreturn [{ json: { whatsappText, speakLine, instance: inst, number } }];\n"
+      },
+      "id": "m9a00004-0000-4000-8000-000000000004",
+      "name": "BuildBrief",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [780, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://evolution-api:8080/message/sendText/{{ $json.instance }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "apikey", "value": "={{ $env.EVOLUTION_API_KEY }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { number: $json.number, text: $json.whatsappText } }}",
+        "options": {}
+      },
+      "id": "m9a00005-0000-4000-8000-000000000005",
+      "name": "Send WhatsApp",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1040, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.GATEWAY_INTERNAL_URL }}/internal/speak",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "X-Openclaw-Secret", "value": "={{ $env.N8N_WEBHOOK_SECRET }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { text: $('BuildBrief').first().json.speakLine } }}",
+        "options": { "timeout": 15000, "ignore404": true }
+      },
+      "id": "m9a00006-0000-4000-8000-000000000006",
+      "name": "Speak Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1300, 0],
+      "continueOnFail": true
+    }
+  ],
+  "connections": {
+    "Schedule 9 AM": { "main": [[{ "node": "Alarm Speak", "type": "main", "index": 0 }]] },
+    "Alarm Speak": { "main": [[{ "node": "Gmail Snapshot", "type": "main", "index": 0 }]] },
+    "Gmail Snapshot": { "main": [[{ "node": "BuildBrief", "type": "main", "index": 0 }]] },
+    "BuildBrief": { "main": [[{ "node": "Send WhatsApp", "type": "main", "index": 0 }]] },
+    "Send WhatsApp": { "main": [[{ "node": "Speak Summary", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" }
+}

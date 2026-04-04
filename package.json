@@ -18,15 +18,19 @@
     "heartbeat": "powershell -ExecutionPolicy Bypass -File scripts/openclaw-heartbeat.ps1",
     "start:all": "node scripts/start.mjs",
     "restart:local": "powershell -ExecutionPolicy Bypass -File scripts/restart-local.ps1",
-    "restart:local:redis": "powershell -ExecutionPolicy Bypass -File scripts/restart-local.ps1 -RestartRedis",
     "restart:skip": "powershell -ExecutionPolicy Bypass -File scripts/restart-local.ps1 -SkipDocker -NoKill",
-    "docker:redis:restart": "docker compose restart redis",
+    "docker:postgres:up": "docker compose up -d openclaw-postgres",
     "test:notify": "node scripts/test-task-complete-notify.mjs",
+    "test:mandatory-tts": "node scripts/test-mandatory-tts.mjs",
+    "test:ambient-voices": "python scripts/test-ambient-voices.py",
+    "test:ambient-checkin": "python scripts/test-ambient-checkin.py",
     "voice:daemon": "python scripts/friday-listen.py",
     "start:ambient": "python scripts/friday-ambient.py",
+    "start:cursor-reply": "python scripts/cursor-reply-watch.py",
     "setup:alexa": "node scripts/setup-alexa-cookie.mjs",
     "play": "python skill-gateway/scripts/friday-play.py",
     "clear:locks": "python skill-gateway/scripts/clear_friday_locks.py",
-    "install:all": "npm install"
+    "install:all": "npm install",
+    "test:friday-page": "node scripts/smoke-friday-page.mjs"
   }
 }

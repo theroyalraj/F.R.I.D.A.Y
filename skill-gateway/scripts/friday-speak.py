@@ -49,10 +49,12 @@ Latency notes:
   • Semantic cache: text is normalised before hashing so near-identical phrases
     ("Done. sir." / "done, sir") share the same cached MP3.
 """
+import atexit
 import asyncio
 import hashlib
 import io
 import os
+import unicodedata
 import re
 import signal as _signal
 import subprocess
@@ -104,7 +106,8 @@ VOICE  = os.environ.get("FRIDAY_TTS_VOICE",  "en-US-EmmaMultilingualNeural")
 
 # Session-sticky voice: .session-voice.json overrides the env default above
 # unless FRIDAY_TTS_USE_SESSION_STICKY_VOICE is false (ambient alternate voice).
-# FRIDAY_TTS_SESSION=subagent → use subagent_voice (teen pool; pick-session-voice --subagent).
+# FRIDAY_TTS_SESSION=subagent → use subagent_voice (pick-session-voice --subagent).
+# FRIDAY_TTS_SESSION=cursor-reply → use cursor_reply_voice (pick-session-voice --cursor-reply).
 _SESSION_KIND = os.environ.get("FRIDAY_TTS_SESSION", "").strip().lower()
 _SESSION_STICKY = os.environ.get("FRIDAY_TTS_USE_SESSION_STICKY_VOICE", "true").strip().lower() not in (
     "0", "false", "no", "off",
@@ -115,10 +118,26 @@ try:
     _sv = _json.loads(_SESSION_VOICE_FILE.read_text(encoding="utf-8"))
     if _SESSION_KIND == "subagent" and _sv.get("subagent_voice"):
         VOICE = _sv["subagent_voice"]
+    elif _SESSION_KIND == "cursor-reply" and _sv.get("cursor_reply_voice"):
+        VOICE = _sv["cursor_reply_voice"]
     elif _sv.get("voice") and _SESSION_STICKY:
         VOICE = _sv["voice"]
 except Exception:
     pass
+
+_blocked_tts = {v.strip() for v in os.environ.get("FRIDAY_TTS_VOICE_BLOCK", "").split(",") if v.strip()}
+_blocked_tts |= {
+    "en-AU-WilliamNeural",
+    "en-AU-WilliamMultilingualNeural",
+    "en-GB-RyanNeural",
+    "en-GB-ThomasNeural",
+}
+if VOICE in _blocked_tts:
+    _pref = os.environ.get("FRIDAY_TTS_VOICE", "en-US-EmmaMultilingualNeural").strip() or "en-US-EmmaMultilingualNeural"
+    if _pref not in _blocked_tts:
+        VOICE = _pref
+    else:
+        VOICE = "en-US-EmmaMultilingualNeural"
 
 RATE   = os.environ.get("FRIDAY_TTS_RATE",   "+7.5%")
 PITCH  = os.environ.get("FRIDAY_TTS_PITCH",  "+2Hz")
@@ -143,6 +162,8 @@ TTS_TS_FILE     = Path(tempfile.gettempdir()) / "friday-tts-ts"
 TTS_ACTIVE_FILE = Path(tempfile.gettempdir()) / "friday-tts-active"  # exists while speech is playing
 # Written by friday-ambient speak_blocking while a line is playing (for priority replay).
 AMBIENT_SPEAKING_FILE = Path(tempfile.gettempdir()) / "friday-ambient-speaking.txt"
+# Thinking singleton — at most one thinking-narration speak in the pipeline at a time.
+THINKING_SINGLETON_FILE = Path(tempfile.gettempdir()) / "friday-thinking-singleton"
 
 
 def _write_last_spoken_ts() -> None:
@@ -170,6 +191,32 @@ def _n2w(n: str) -> str:
     return n
 
 
+def _strip_redacted_placeholders(text: str) -> str:
+    """Remove privacy / tool-result tokens so Edge never speaks the word redacted."""
+    if not text:
+        return text
+    t = text
+    # Unicode-normalise (homoglyph tricks in logs)
+    try:
+        t = unicodedata.normalize("NFKC", t)
+    except Exception:
+        pass
+    subs = (
+        r"(?i)\*+\s*redacted\s*\*+",
+        r"(?i)`\s*redacted\s*`",
+        r"(?i)<\s*redacted[^>]*>",
+        r"(?i)\[\s*redacted\s*\]",
+        r"(?i)\{\s*redacted\s*\}",
+        r"(?i)\(\s*redacted\s*\)",
+        r"(?i)\bredacted\s*[:;.,!?…]+\s*",
+        r"(?i)\bredacted\b",
+        r"(?i)\bREDACTED\b",
+    )
+    for pat in subs:
+        t = re.sub(pat, " ", t)
+    return re.sub(r"\s{2,}", " ", t).strip()
+
+
 def normalize_for_speech(text: str) -> str:
     """
     Convert any text to clean, speakable English before handing it to edge-tts.
@@ -179,7 +226,7 @@ def normalize_for_speech(text: str) -> str:
     """
     if not text:
         return text
-    t = text
+    t = _strip_redacted_placeholders(text)
 
     # Devanagari (Hindi, etc.): skip English-centric rewrites — they garble TTS.
     if re.search(r"[\u0900-\u097F]", t):
@@ -191,7 +238,8 @@ def normalize_for_speech(text: str) -> str:
         t = re.sub(r"\s{2,}", " ", t).strip()
         if len(t) > 3800:
             t = t[:3800] + "."
-        return t or "Done."
+        t = _strip_redacted_placeholders(t)
+        return t.strip()
 
     # Code blocks and inline code
     t = re.sub(r"```[\s\S]*?```", " ", t)
@@ -293,7 +341,9 @@ def normalize_for_speech(text: str) -> str:
     if len(t) > 3800:
         t = t[:3800] + "."
 
-    return t or "Done."
+    t = _strip_redacted_placeholders(t)
+    t = re.sub(r"\s{2,}", " ", t).strip()
+    return t
 
 
 # ── Semantic / normalised cache key ───────────────────────────────────────────
@@ -610,6 +660,85 @@ def _try_break_redis_tts_lock() -> None:
         pass
 
 
+def _release_own_tts_lock() -> None:
+    """
+    Remove TTS_ACTIVE_FILE only if this process is the recorded holder.
+    Safe to call multiple times; no-ops if the file is absent or owned by
+    a different PID.  Called from both the speak() finally-block AND atexit
+    so the lock is always released even when the process is killed (SIGTERM).
+    """
+    try:
+        raw = TTS_ACTIVE_FILE.read_text(encoding="utf-8").strip()
+        if raw and int(raw) == os.getpid():
+            TTS_ACTIVE_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+atexit.register(_release_own_tts_lock)
+atexit.register(_release_thinking_singleton)
+
+
+def _sigterm_handler(*_args) -> None:
+    """Convert SIGTERM into a normal Python exit so atexit handlers fire."""
+    sys.exit(0)
+
+
+try:
+    _signal.signal(_signal.SIGTERM, _sigterm_handler)
+except (OSError, ValueError):
+    # Can fail if not the main thread or on unsupported platforms — safe to ignore.
+    pass
+
+
+_THINKING_SINGLETON_TTL = 45.0  # seconds — auto-expire stale singleton
+
+
+def _try_acquire_thinking_singleton() -> bool:
+    """Atomic try-acquire for thinking narration. Returns True if this process won."""
+    try:
+        fd = os.open(str(THINKING_SINGLETON_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        try:
+            os.write(fd, f"{os.getpid()}\n{time.time()}".encode())
+        finally:
+            os.close(fd)
+        return True
+    except FileExistsError:
+        pass
+    # Check if stale (holder dead or TTL expired)
+    try:
+        raw = THINKING_SINGLETON_FILE.read_text(encoding="utf-8").strip()
+        lines = raw.split("\n", 1)
+        holder_pid = int(lines[0])
+        created_at = float(lines[1]) if len(lines) > 1 else 0.0
+        stale = (time.time() - created_at) > _THINKING_SINGLETON_TTL
+        if stale or not _pid_alive(holder_pid):
+            THINKING_SINGLETON_FILE.unlink(missing_ok=True)
+            try:
+                fd = os.open(str(THINKING_SINGLETON_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                try:
+                    os.write(fd, f"{os.getpid()}\n{time.time()}".encode())
+                finally:
+                    os.close(fd)
+                return True
+            except FileExistsError:
+                return False
+    except Exception:
+        pass
+    return False
+
+
+def _release_thinking_singleton() -> None:
+    """Release the thinking singleton only if this process owns it."""
+    try:
+        raw = THINKING_SINGLETON_FILE.read_text(encoding="utf-8").strip()
+        pid_str = raw.split("\n", 1)[0]
+        if int(pid_str) == os.getpid():
+            THINKING_SINGLETON_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def _read_preempted_ambient_line() -> str | None:
     """If ambient was speaking, grab its line for an apology replay; clear the file."""
     if not AMBIENT_SPEAKING_FILE.exists():
@@ -666,16 +795,33 @@ def _play_priority_followup(ambient_line: str) -> None:
 
 
 # ── SAPI fallback ──────────────────────────────────────────────────────────────
+def _sapi_voice_setup_ps() -> str:
+    """PowerShell fragment: SelectVoice(name) or gender hint. Matches FRIDAY_WIN_TTS_* in .env."""
+    win_voice = os.environ.get("FRIDAY_WIN_TTS_VOICE", "").strip()
+    gender_raw = os.environ.get("FRIDAY_WIN_TTS_GENDER", "").strip().lower()
+    if win_voice:
+        esc = win_voice.replace("`", "``").replace('"', '`"')
+        return f'$s.SelectVoice("{esc}"); '
+    if gender_raw == "male":
+        return "$s.SelectVoiceByHints([System.Speech.Synthesis.VoiceGender]::Male); "
+    # Default female — aligns with default Edge voice (Emma) when offline
+    return "$s.SelectVoiceByHints([System.Speech.Synthesis.VoiceGender]::Female); "
+
+
 def _sapi_speak() -> None:
     try:
         safe = TEXT.replace("'", " ").replace('"', " ")[:400]
-        print(f"[friday-speak] SAPI fallback: {safe[:60]}", flush=True)
+        win_voice = os.environ.get("FRIDAY_WIN_TTS_VOICE", "").strip()
+        gend = os.environ.get("FRIDAY_WIN_TTS_GENDER", "").strip().lower() or "(default female hint)"
+        who = win_voice if win_voice else gend
+        print(f"[friday-speak] SAPI fallback (Edge offline): voice={who!r} text={safe[:60]!r}...", flush=True)
+        voice_ps = _sapi_voice_setup_ps()
         subprocess.run(
             ["powershell", "-NoProfile", "-Command",
-             f"Add-Type -AssemblyName System.Speech; "
-             f"$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
-             f"$s.SelectVoiceByHints([System.Speech.Synthesis.VoiceGender]::Male); "
-             f"$s.Speak('{safe}')"],
+             "Add-Type -AssemblyName System.Speech; "
+             "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+             + voice_ps
+             + f"$s.Speak('{safe}')"],
             timeout=30,
         )
         _write_last_spoken_ts()
@@ -722,9 +868,18 @@ def _pid_alive(pid: int) -> bool:
 async def speak():
     global TEXT
     TEXT = normalize_for_speech(_RAW_TEXT)
-    if not TEXT:
-        print("friday-speak: no text provided", file=sys.stderr)
-        sys.exit(1)
+    _raw_stripped = (_RAW_TEXT or "").strip()
+    if not TEXT or not TEXT.strip():
+        if not _raw_stripped:
+            print("friday-speak: no text provided", file=sys.stderr)
+            sys.exit(1)
+        print("[friday-speak] skipping - no speakable text after sanitise", flush=True)
+        sys.exit(0)
+    # Leftover noise only (e.g. every token was a placeholder)
+    _letters_digits = re.sub(r"[^a-zA-Z0-9\u0900-\u097F]", "", TEXT)
+    if len(_letters_digits) < 2:
+        print("[friday-speak] skipping - text too short after sanitise", flush=True)
+        sys.exit(0)
 
     # For playback (not --output/--stdout) signal to ambient that TTS is active.
     is_playback = not (OUTPUT or STDOUT)
@@ -734,15 +889,20 @@ async def speak():
         "yes",
         "on",
     )
+    _is_thinking = os.environ.get("FRIDAY_TTS_THINKING", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
     preempted_replay: str | None = None
     if is_playback:
         # Cursor / IDE voice: do not play TTS over the same session as dictation.
         _bypass = os.environ.get("FRIDAY_TTS_BYPASS_CURSOR_DEFER", "").strip().lower() in (
             "1", "true", "yes", "on",
         )
+        # Priority replies (task results, urgent notify) must never be swallowed by IDE focus.
         _ds = os.environ.get("FRIDAY_DEFER_SPEAK_WHEN_CURSOR", "true").strip().lower()
         if (
             not _bypass
+            and not _priority
             and _ds not in ("0", "false", "no", "off")
             and platform.system() == "Windows"
         ):
@@ -760,6 +920,12 @@ async def speak():
                     sys.exit(0)
             except Exception:
                 pass
+        # ── Thinking singleton: at most one thinking narration in the pipeline ──
+        if _is_thinking:
+            if not _try_acquire_thinking_singleton():
+                print("[friday-speak] thinking singleton busy — skipping (another thinking speak is active)", flush=True)
+                sys.exit(0)
+
         if _priority:
             # User-facing reply: cut over ambient / stuck TTS instead of waiting behind it.
             preempted_replay = _preempt_for_priority_tts()
@@ -824,10 +990,9 @@ async def speak():
         await _speak_inner()
     finally:
         if is_playback:
-            try:
-                TTS_ACTIVE_FILE.unlink(missing_ok=True)
-            except OSError:
-                pass
+            _release_own_tts_lock()
+            if _is_thinking:
+                _release_thinking_singleton()
 
     if is_playback and _priority and preempted_replay:
         _play_priority_followup(preempted_replay)
@@ -920,6 +1085,13 @@ async def _speak_inner():
             print(f"[friday-speak] retry ok via {VOICE}", flush=True)
         except Exception as retry_exc:
             print(f"friday-speak: edge-tts retry failed — {retry_exc}", file=sys.stderr, flush=True)
+            print(
+                "[friday-speak] Cannot reach Microsoft Edge TTS (speech.platform.bing.com). "
+                "Check network, VPN, firewall, or DNS — falling back to Windows SAPI. "
+                "Set FRIDAY_WIN_TTS_VOICE (e.g. Microsoft Zira Desktop) or FRIDAY_WIN_TTS_GENDER.",
+                file=sys.stderr,
+                flush=True,
+            )
             switch_done.wait(timeout=2)
             _restore_device(device_result)
             _sapi_speak()

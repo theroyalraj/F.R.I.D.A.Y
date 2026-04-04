@@ -84,6 +84,28 @@ Ambient chatter: `scripts/friday-ambient.py` — fires every 60–120 seconds (a
 
 ---
 
+## Cursor reply TTS (Composer JSONL)
+
+Script: `scripts/cursor-reply-watch.py` — tails `agent-transcripts/*/*.jsonl`, speaks **assistant prose only** (code fences and tool calls stripped before TTS).
+
+- Main Composer lines use `FRIDAY_TTS_SESSION=cursor-reply` and a third voice from `pick-session-voice.py --cursor-reply`.
+- Other transcript UUIDs use the sticky subagent voice + priority.
+- **Thinking capture** (`FRIDAY_CURSOR_SPEAK_THINKING=true`): catches extended-thinking content from the JSONL before Cursor replaces it with `[REDACTED]`. Uses adaptive fast-polling (150ms when active) and content-hash deduplication so thinking is spoken once and not re-spoken after redaction rewrites the file. Speaks via the subagent voice with priority.
+
+Env in `.env`: `FRIDAY_CURSOR_SPEAK_REPLY`, `FRIDAY_CURSOR_SPEAK_SUBAGENT_REPLY` (default on), `FRIDAY_CURSOR_SPEAK_THINKING` (default on), optional `FRIDAY_CURSOR_REPLY_VOICE`, `CURSOR_TRANSCRIPTS_DIR`.
+
+```powershell
+npm run start:cursor-reply
+# or
+python scripts/cursor-reply-watch.py
+```
+
+`npm run restart:local` / `scripts/start.mjs` also starts this watcher when any of `FRIDAY_CURSOR_SPEAK_REPLY`, `FRIDAY_CURSOR_SPEAK_SUBAGENT_REPLY`, or `FRIDAY_CURSOR_SPEAK_THINKING` is enabled. Set all to `false` to skip.
+
+Requires `chat_id` in repo `.session-voice.json` (from normal `pick-session-voice.py` / Composer use). Optional silent seed: set `FRIDAY_PICK_SESSION_NO_WELCOME=true` when invoking pick-session-voice once.
+
+---
+
 ## pc-agent endpoints
 
 Base: `http://127.0.0.1:3847`

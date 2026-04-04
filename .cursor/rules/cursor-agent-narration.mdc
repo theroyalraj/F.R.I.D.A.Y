@@ -1,0 +1,18 @@
+---
+description: Master switch — when FRIDAY_CURSOR_NARRATION is false in .env, Cursor must not call friday-speak or pick-session-voice for agent narration
+alwaysApply: true
+---
+
+# Cursor agent narration (overrides other voice rules)
+
+**Check every turn:** read `FRIDAY_CURSOR_NARRATION` from `d:\code\openclaw\.env`.
+
+If the value is **false**, **0**, **off**, or **no** (case-insensitive):
+
+- **Do not** run `pick-session-voice.py` for this chat.
+- **Do not** run `friday-speak.py` for acknowledgements, mid-task status, completion summaries, WIP checkpoint announcements, or questions — **text replies only**.
+- Ignore the mandatory narration instructions in `friday-narrate.mdc`, `acknowledge-before-planning.mdc`, and spoken steps in `completion-read-memory.mdc` / `wip-safety-commit.mdc` for those cases.
+
+If the variable is **missing**, or is **true**, **1**, **on**, or **yes** (case-insensitive), follow the other Friday narration rules as written.
+
+**Unchanged:** voice listen/ambient daemons, Alexa, WhatsApp, skill-gateway or pc-agent task-complete TTS, and when the **user** explicitly asks you to speak something.

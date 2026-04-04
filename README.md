@@ -84,7 +84,7 @@ cp .env.example .env
 npm run restart:local
 ```
 
-This brings up Docker (n8n + Redis), kills any stale gateway/agent processes, and starts both servers with hot-reload.
+This reconciles Docker (n8n + Redis Insight), does **not** start or restart the Redis container, kills stale gateway/agent processes, and starts both Node servers with hot-reload. Start Redis once with `docker compose up -d redis` if it is not already running.
 
 ### 4. Verify
 
@@ -242,8 +242,9 @@ Uses [Evolution API](https://github.com/EvolutionAPI/evolution-api) (self-hosted
 EVOLUTION_API_KEY=<your-key>
 EVOLUTION_INSTANCE=openclaw
 EVOLUTION_PORT=8181
-WHATSAPP_ALLOWED_NUMBERS=91XXXXXXXXXX   # comma-separated, digits only
-WHATSAPP_NOTIFY_NUMBER=91XXXXXXXXXX     # always forward Jarvis replies here
+WHATSAPP_ALLOWED_NUMBERS=91XXXXXXXXXX   # comma-separated, digits only — who may command
+WHATSAPP_ALWAYS_REPLY_NUMBERS=91...,91...  # optional — send every reply to ALL these numbers
+WHATSAPP_NOTIFY_NUMBER=91XXXXXXXXXX     # other workflows (e.g. reminders); intake uses ALWAYS_REPLY when set
 ```
 
 ---

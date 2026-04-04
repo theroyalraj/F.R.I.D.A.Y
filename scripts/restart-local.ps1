@@ -7,10 +7,6 @@
 .PARAMETER SkipDocker
   Skip Docker steps; only free ports and start Node/Python services.
 
-.PARAMETER RestartRedis
-  Restart the Redis container (docker compose restart redis). Default: never touch a running Redis —
-  only n8n + redis-insight are reconciled so local app restarts do not bounce Redis.
-
 .PARAMETER NoKill
   Do not stop ffplay, friday-play, voice daemon, or free ports 3847/3848.
   If gateway + agent already respond on /health, exits without starting anything.
@@ -20,11 +16,9 @@
   pwsh -File scripts/restart-local.ps1
   pwsh -File scripts/restart-local.ps1 -SkipDocker
   pwsh -File scripts/restart-local.ps1 -SkipDocker -NoKill
-  pwsh -File scripts/restart-local.ps1 -RestartRedis   # only when you want Redis bounced
 #>
 param(
   [switch] $SkipDocker,
-  [switch] $RestartRedis,
   [switch] $NoKill
 )
 
@@ -115,6 +109,20 @@ if ($NoKill) {
     }
 
   Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -like '*cursor-reply-watch*' } |
+    ForEach-Object {
+      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+      Write-Host "  killed old cursor-reply watcher (PID $($_.ProcessId))"
+    }
+
+  Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -like '*friday-music-scheduler*' } |
+    ForEach-Object {
+      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+      Write-Host "  killed old music scheduler (PID $($_.ProcessId))"
+    }
+
+  Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
     Where-Object { $_.CommandLine -like '*friday-speak*' } |
     ForEach-Object {
       Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
@@ -130,48 +138,20 @@ if ($NoKill) {
 }
 
 # -- 3. Docker (optional) ----------------------------------------------------
-# Never run bare `docker compose up -d` — it can recreate Redis when the project reconciles.
-# Default: Redis is started only if missing or stopped (compose start or up -d redis); running Redis is never restarted.
-if (-not $SkipDocker) {
+# Policy: never start, stop, or restart the Redis container from this script (no cache bounce,
+# no n8n disconnect storm). Ensure Redis is up yourself: docker compose up -d redis
+if ($SkipDocker) {
+  Write-Host "Skipping Docker (-SkipDocker)."
+}
+else {
   Push-Location $root
-  if ($RestartRedis) {
-    Write-Host "Docker: -RestartRedis — docker compose restart redis ..." -ForegroundColor Cyan
-    docker compose restart redis
-    if ($LASTEXITCODE -ne 0) {
-      Write-Warning "docker compose restart redis failed (exit $LASTEXITCODE)."
-    }
-  } else {
-    $redisId = (docker compose ps -q redis 2>$null | Select-Object -First 1).Trim()
-    if ([string]::IsNullOrWhiteSpace($redisId)) {
-      Write-Host "Docker: no redis container yet — docker compose up -d redis ..." -ForegroundColor Cyan
-      docker compose up -d redis
-      if ($LASTEXITCODE -ne 0) {
-        Write-Warning "docker compose up -d redis failed (exit $LASTEXITCODE)."
-      }
-    } else {
-      $running = (docker inspect -f '{{.State.Running}}' $redisId 2>$null).Trim().ToLowerInvariant()
-      if ($running -ne 'true') {
-        Write-Host "Docker: redis container stopped — starting (not recreating) ..." -ForegroundColor Cyan
-        docker compose start redis 2>$null
-        if ($LASTEXITCODE -ne 0) {
-          docker compose up -d redis
-        }
-        if ($LASTEXITCODE -ne 0) {
-          Write-Warning "Could not start redis (exit $LASTEXITCODE)."
-        }
-      } else {
-        Write-Host "Docker: redis already running — left untouched (use -RestartRedis to bounce it)." -ForegroundColor DarkGray
-      }
-    }
-  }
+  Write-Host "Docker: Redis container not touched by restart-local." -ForegroundColor DarkGray
   Write-Host "Docker: compose up -d n8n redis-insight ..."
   docker compose up -d n8n redis-insight
   if ($LASTEXITCODE -ne 0) {
     Write-Warning "docker compose up -d n8n redis-insight failed (exit $LASTEXITCODE)."
   }
   Pop-Location
-} else {
-  Write-Host "Skipping Docker (-SkipDocker)."
 }
 
 # -- 4. NoKill: if core HTTP services already healthy, skip spawn -------------
