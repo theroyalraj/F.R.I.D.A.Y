@@ -137,14 +137,14 @@ function gatewayStartupPool() {
     "All good on my end. Whenever you're ready.",
     "Up and running. World still standing, I assume.",
     "Hey — I'm back. Give me something to do.",
-    "Online. Full power. Let's not waste it.",
-    "I've run the checks. Nothing's on fire. You're welcome.",
-    "Startup complete. You know, one day I'll come up and something will actually be broken.",
+    "Online and awake. Let's not waste it.",
+    "I've had a quick look around. Nothing's on fire — you're welcome.",
+    "Here again. One of these days something will actually be broken — not today.",
     `I'm here, ${n}. Try not to be too impressed by how fast that was.`,
-    "Systems up. All the boring stuff worked. The fun part's on you.",
-    `FRIDAY online. Ready to do something impressive, ${n}.`,
-    "All systems nominal. Standing by for whatever chaos you've planned.",
-    "I've got eyes on everything. Nothing to worry about — yet.",
+    "All the dull checks passed. The interesting bit's on you.",
+    `Friday here, ${n} — ready when you are.`,
+    "Everything feels solid. Whatever you've got planned, I'm listening.",
+    "I've got a feel for the setup. Nothing to worry about — yet.",
     `Back in the game, ${n}. What's the first move?`,
     "Ready.",
     "I'm up.",
@@ -158,9 +158,9 @@ function pcAgentStartupPool() {
   return [
     `I can hear you, ${n}. Go ahead.`,
     "Listening. What do you need?",
-    "Claude's up and I'm wired in. What are we building?",
+    "I'm plugged in and paying attention — what are we building?",
     "Right here. Ready when you are.",
-    "Voice interface live. I'm all ears.",
+    "I'm listening properly — go ahead.",
     "Yeah, I'm here. What's up?",
     "Tuned in. Hit me.",
     `Connected, ${n}. Let's get into it.`,
@@ -243,14 +243,16 @@ export function speakGatewayStartup(log, which = 'gateway', chainOpts = {}) {
  * Speak a task-done phrase, optionally with a short summary appended.
  * @param {string} [summary]  Short task summary (first 100 chars used)
  * @param {import('pino').Logger} [log]
+ * @param {{ onClose?: () => void }} [chainOpts]  e.g. spawn post-notification mic follow-up
  */
-export function speakTaskDone(summary, log) {
+export function speakTaskDone(summary, log, chainOpts = {}) {
   const base  = pick(taskDonePhrases());
   const extra = summary ? ` ${String(summary).slice(0, 100).trim()}` : '';
   speakFridayPy(base + extra, log, {
     bypassCursorDefer: true,
     priority: true,
     interruptMusic: true,
+    onClose: chainOpts.onClose,
   });
 }
 

@@ -18,6 +18,9 @@ so main and subagent JSONL TTS default OFF to avoid double voice. Opt back in:
   FRIDAY_CURSOR_SPEAK_REPLY_WITH_NARRATION=true
   FRIDAY_CURSOR_SPEAK_SUBAGENT_WITH_NARRATION=true
 
+Thinking capture from JSONL defaults ON with narration (live agent thinking TTS is unreliable).
+Set FRIDAY_CURSOR_SPEAK_THINKING_WITH_NARRATION=false to disable watcher thinking only.
+
 Optional:
   FRIDAY_CURSOR_REPLY_VOICE — Edge voice id for main transcript TTS (see pick-session-voice --cursor-reply)
   CURSOR_TRANSCRIPTS_DIR — override path to agent-transcripts
@@ -170,7 +173,7 @@ def _is_fully_redacted(text: str) -> bool:
 _RE_FENCED = re.compile(r"```[\w]*\s*.*?```", re.DOTALL)
 _RE_INLINE_CODE = re.compile(r"`[^`\n]+`")
 _RE_URL = re.compile(r"https?://[^\s\)\]\>]+", re.IGNORECASE)
-# Windows drive paths and obvious slash-separated repo paths (keep heuristics light)
+# Windows drive paths and obvious slash-separated repo paths
 _RE_WIN_PATH = re.compile(r"\b[A-Za-z]:\\[^\s\)\]\,\"\']+")
 _RE_SLASH_FILE = re.compile(r"(?<![\w/])(?:\.{0,2}/)+[\w./\-]{3,}\.(?:py|js|ts|tsx|jsx|mjs|json|yaml|yml|toml|md|rs|go|cs|java|kt|txt|ps1|sh)\b")
 _RE_MD_HEADER = re.compile(r"(?m)^#{1,6}\s+")
@@ -184,6 +187,85 @@ _RE_REDACTED = re.compile(
     r"\bredacted\s*[:;.,!?…]+|\bredacted\b",
     re.IGNORECASE,
 )
+# Inline env-var tokens (UPPER_SNAKE env vars, camelCase/snake_case identifiers adjacent to = or () )
+_RE_ENV_VAR_TOKEN = re.compile(r"\b[A-Z][A-Z0-9_]{3,}\b")
+# Code-heavy characters used to detect code-like lines
+_CODE_DENSITY_CHARS = frozenset("=()[]{}|<>@$#\\")
+
+
+def _is_code_line(line: str) -> bool:
+    """Return True if this line looks like code rather than prose.
+
+    Heuristics (any one is enough to reject):
+    - Starts with a shell sigil or common statement keyword
+    - Looks like an env-var assignment (ALL_CAPS= or ALL_CAPS =)
+    - Python/JS/TS keyword at the start
+    - PowerShell verb-noun ($env:, Set-, Get-, Start-, Stop-, etc.)
+    - High density of code-punctuation characters
+    - Braces/brackets dominate (JSON/dict/array literals)
+    """
+    t = line.strip()
+    if not t:
+        return False
+    # Shell sigils
+    if t[0] in "$@{[":
+        return True
+    # Env var assignment: UPPER_SNAKE= or UPPER_SNAKE =
+    if re.match(r"^[A-Z][A-Z0-9_]{2,}\s*=", t):
+        return True
+    tl = t.lower()
+    # Python statement keywords at line start
+    if re.match(
+        r"^(?:def |async def |class |import |from |return |raise |yield |"
+        r"if |elif |else:|for |while |try:|except|with |pass$|break$|continue$|"
+        r"assert |lambda )",
+        tl,
+    ):
+        return True
+    # JS/TS keywords
+    if re.match(
+        r"^(?:const |let |var |function |async function |export |import |"
+        r"interface |type |enum |=>)",
+        tl,
+    ):
+        return True
+    # PowerShell: $env:, verb-noun commands
+    if re.match(r"^\$", t) or re.match(
+        r"^(?:get-|set-|start-|stop-|new-|remove-|add-|invoke-|write-|read-|"
+        r"format-|select-|where-|sort-|group-|measure-|test-|copy-|move-|rename-)",
+        tl,
+    ):
+        return True
+    # Shell command prefixes (extended)
+    if re.match(
+        r"^(?:python3?\s|node\s|npm\s|npx\s|pnpm\s|yarn\s|git\s|curl\s|wget\s|"
+        r"pwsh\s|powershell\s|cd\s|ls\s|dir\s|echo\s|cat\s|grep\s|rg\s|pip\s|"
+        r"docker\s|kubectl\s|az\s|aws\s|ssh\s|scp\s|chmod\s|mv\s|cp\s|rm\s|"
+        r"mkdir\s|touch\s|source\s|export\s|set\s)",
+        tl,
+    ):
+        return True
+    # Starts with _ (Python private/dunder identifier)
+    if t.startswith("_"):
+        return True
+    # Method/attribute call at statement level: word.word( or word(with-no-space
+    if re.match(r"^\w[\w]*\.\w+\s*\(", t):
+        return True
+    if re.match(r"^\w+\(", t):  # bare function call: subprocess.run( → already above; run( etc.
+        return True
+    # Subscript assignment: word['key'] = … or word["key"] =
+    if re.search(r"\]\s*=", t):
+        return True
+    # High code-character density (>18% of line is =()[]{}|<>@$#\)
+    code_chars = sum(1 for c in t if c in _CODE_DENSITY_CHARS)
+    if len(t) > 8 and code_chars / len(t) > 0.18:
+        return True
+    return False
+
+
+def _strip_env_var_tokens(s: str) -> str:
+    """Replace ALL_CAPS_SNAKE tokens with nothing — they sound robotic when spoken."""
+    return _RE_ENV_VAR_TOKEN.sub("", s)
 
 
 def _narration_enabled() -> bool:
@@ -191,7 +273,7 @@ def _narration_enabled() -> bool:
 
 
 def strip_to_prose(raw: str) -> str:
-    """Remove code, paths, commands, markdown noise — keep reasoning prose."""
+    """Remove code, paths, commands, markdown noise — keep only plain English reasoning."""
     if not raw or not raw.strip():
         return ""
     s = raw
@@ -211,22 +293,24 @@ def strip_to_prose(raw: str) -> str:
         if not t:
             lines_out.append("")
             continue
-        tl = t.lower()
-        if tl.startswith("$ ") or tl.startswith("> "):
+        if tl := t.lower():
+            if tl.startswith("$ ") or tl.startswith("> "):
+                continue
+        if _is_code_line(t):
             continue
-        if re.match(
-            r"^(?:python3?\s|npm\s|npx\s|pnpm\s|yarn\s|git\s|curl\s|wget\s|pwsh\s|powershell\s|cd\s)",
-            tl,
-        ):
+        # Strip env-var tokens from otherwise-prose lines
+        cleaned = _strip_env_var_tokens(t)
+        cleaned = cleaned.strip(" ,;:")
+        if not cleaned:
             continue
-        lines_out.append(line)
+        lines_out.append(cleaned)
     s = "\n".join(lines_out)
     s = re.sub(r"\n{3,}", "\n\n", s)
     s = re.sub(r"[ \t]{2,}", " ", s)
     s = _RE_REDACTED.sub(" ", s)
     s = re.sub(r"\s{2,}", " ", s).strip()
-    # Drop lines that are only placeholders / punctuation
-    if s and len(re.sub(r"[^a-zA-Z0-9]", "", s)) < 2:
+    # Drop result if almost no alphanumeric content remains
+    if s and len(re.sub(r"[^a-zA-Z0-9]", "", s)) < 6:
         return ""
     return s
 
@@ -332,21 +416,22 @@ def main() -> None:
     speak_sub = req_sub
     speak_thinking = req_thinking
     if _narration_enabled():
-        # Agent narration already speaks reasoning live — suppress watcher
-        # duplicates unless explicitly opted back in.
+        # Live narration covers ack/status/done — suppress main/sub JSONL TTS unless *_WITH_NARRATION.
+        # Thinking from JSONL defaults ON here (WITH_NARRATION default true); live agent thinking TTS is unreliable.
         if speak_main and not _env_bool("FRIDAY_CURSOR_SPEAK_REPLY_WITH_NARRATION", False):
             speak_main = False
         if speak_sub and not _env_bool("FRIDAY_CURSOR_SPEAK_SUBAGENT_WITH_NARRATION", False):
             speak_sub = False
-        if speak_thinking and not _env_bool("FRIDAY_CURSOR_SPEAK_THINKING_WITH_NARRATION", False):
+        if speak_thinking and not _env_bool("FRIDAY_CURSOR_SPEAK_THINKING_WITH_NARRATION", True):
             speak_thinking = False
     any_active = speak_main or speak_sub or speak_thinking
     if not any_active:
         if _narration_enabled() and (req_main or req_sub or req_thinking):
             print(
-                "cursor-reply-watch: FRIDAY_CURSOR_NARRATION is on — transcript TTS suppressed "
-                "(narrate-thinking rule speaks reasoning live; watcher thinking also off). "
-                "Set _WITH_NARRATION vars to re-enable. Exiting.",
+                "cursor-reply-watch: no active speak channels under current .env "
+                "(with FRIDAY_CURSOR_NARRATION, enable *_WITH_NARRATION for main/sub echo; "
+                "thinking from JSONL is on by default — turn off with FRIDAY_CURSOR_SPEAK_THINKING=false "
+                "or FRIDAY_CURSOR_SPEAK_THINKING_WITH_NARRATION=false). Exiting.",
                 flush=True,
             )
         else:

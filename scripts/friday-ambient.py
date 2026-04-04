@@ -87,7 +87,7 @@ if not _env_bool("FRIDAY_AMBIENT", False):
 _SCRIPTS = Path(__file__).resolve().parent
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
-from friday_win_focus import should_defer_voice_for_cursor  # noqa: E402
+from friday_win_focus import should_defer_ambient_for_cursor  # noqa: E402
 
 _SG_SCRIPTS = ROOT / "skill-gateway" / "scripts"
 if str(_SG_SCRIPTS) not in sys.path:
@@ -2427,7 +2427,7 @@ def speak_blocking(text: str, voice: str | None = None) -> float:
     t0 = time.perf_counter()
     if not text.strip():
         return 0.0
-    if should_defer_voice_for_cursor():
+    if should_defer_ambient_for_cursor():
         return 0.0
     resolved_voice = voice
     if not resolved_voice and not _ambient_main_voice_only():
@@ -2513,7 +2513,7 @@ def speak_subagent_blocking(text: str) -> float:
     t0 = time.perf_counter()
     if not text.strip():
         return 0.0
-    if should_defer_voice_for_cursor():
+    if should_defer_ambient_for_cursor():
         return 0.0
     subv = os.environ.get("FRIDAY_AMBIENT_SUB_TTS_VOICE", "").strip() or None
     line = text.strip()[:4000]
@@ -2550,7 +2550,7 @@ def speak_child(text: str | None = None) -> None:
     phrase = text or random.choice(_SUB_VOICE_PHRASES)
     if not phrase.strip():
         return
-    if should_defer_voice_for_cursor():
+    if should_defer_ambient_for_cursor():
         return
     voice = None
     rate = None
@@ -2819,7 +2819,7 @@ def _ambient_checkin_loop(
         return
     while not stop.is_set():
         try:
-            if should_defer_voice_for_cursor():
+            if should_defer_ambient_for_cursor():
                 if stop.wait(timeout=30.0):
                     break
                 continue
@@ -2846,7 +2846,7 @@ def _ambient_checkin_loop(
             with speak_lock:
                 if stop.is_set():
                     return
-                if should_defer_voice_for_cursor() or _is_music_playing() or _is_tts_active():
+                if should_defer_ambient_for_cursor() or _is_music_playing() or _is_tts_active():
                     pass
                 elif not _acquire_tts_lock(r):
                     need_redis_wait = True
@@ -2865,7 +2865,7 @@ def _ambient_checkin_loop(
                     if stop.is_set():
                         return
                     if (
-                        should_defer_voice_for_cursor()
+                        should_defer_ambient_for_cursor()
                         or _is_music_playing()
                         or _is_tts_active()
                     ):
@@ -2948,7 +2948,7 @@ def main() -> None:
         while True:
             time.sleep(1.5)
 
-            if should_defer_voice_for_cursor():
+            if should_defer_ambient_for_cursor():
                 continue
 
             # Do not talk over friday-play background music (summaries fade/stop it via friday-speak)

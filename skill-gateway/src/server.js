@@ -32,6 +32,7 @@ import {
 } from './alexaProactive.js';
 import { winTtsEnabled, speakWinTts } from './winTts.js';
 import { fridaySpeakEnabled, speakFridayPy, speakGatewayStartup, speakTaskDone, speakAlexaLaunch, speakAlexaCommand } from './fridaySpeak.js';
+import { notifyFollowupListenEnabled, spawnNotifyFollowupListen } from './notifyFollowupListen.js';
 import { alexaMusicConfigured, alexaPlayMusic, alexaStopMusic } from './alexaMusic.js';
 import { playLocalSong } from './fridayPlay.js';
 
@@ -487,10 +488,17 @@ app.post('/internal/last-result', async (req, res, next) => {
           req.log.warn({ err: String(e.message || e) }, 'speak: AI summary failed, using raw snippet');
         }
       }
+      const chainListen = notifyFollowupListenEnabled()
+        ? () => spawnNotifyFollowupListen(req.log)
+        : undefined;
       if (fridaySpeakEnabled()) {
-        speakTaskDone(speakSummary, req.log);
-      } else {
-        speakWinTts(speakSummary, req.log, { bypassCursorDefer: true, priority: true });
+        speakTaskDone(speakSummary, req.log, { onClose: chainListen });
+      } else if (winTtsEnabled()) {
+        speakWinTts(speakSummary, req.log, {
+          bypassCursorDefer: true,
+          priority: true,
+          onClose: chainListen,
+        });
       }
     }
 
@@ -602,10 +610,17 @@ app.post('/internal/speak', async (req, res) => {
   }
   res.json({ ok: true });
   // Fire-and-forget — don't block the response
+  const chainListen = notifyFollowupListenEnabled()
+    ? () => spawnNotifyFollowupListen(req.log)
+    : undefined;
   if (fridaySpeakEnabled()) {
-    speakFridayPy(text.trim(), req.log, { bypassCursorDefer: true, priority: true });
+    speakFridayPy(text.trim(), req.log, {
+      bypassCursorDefer: true,
+      priority: true,
+      onClose: chainListen,
+    });
   } else if (winTtsEnabled()) {
-    speakWinTts(text.trim(), req.log, { bypassCursorDefer: true });
+    speakWinTts(text.trim(), req.log, { bypassCursorDefer: true, onClose: chainListen });
   }
 });
 

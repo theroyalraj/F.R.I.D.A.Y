@@ -34,6 +34,11 @@ Env vars (all optional):
                      mode in the IDE is not doubled with Jarvis TTS.
   FRIDAY_TTS_BYPASS_CURSOR_DEFER  When true, play anyway (startup greetings, Cursor
                      agent narration, etc.). Set by fridaySpeak.js for gateway boot.
+  FRIDAY_TTS_MAX_PLAYBACK_SEC  Hard cap on ffplay seconds per utterance for every session
+                     when set (0 or false = no limit). When unset: no cap for normal TTS;
+                     for FRIDAY_TTS_SESSION=cursor-reply or subagent (long transcript reads),
+                     caps at FRIDAY_TTS_QUERY_MAX_PLAYBACK_SEC (default 60). On cap: kill
+                     player only — no spoken line (avoid mixer volume tricks that garble later plays).
 
 Good voices (respect FRIDAY_TTS_VOICE_BLOCK in .env — blocked ids are never used):
   en-US-EmmaMultilingualNeural  US female multilingual — repo default when env unset
@@ -448,6 +453,83 @@ def _fix_ffplay_volume(pid: int, target: float = 1.0, timeout: float = 2.0) -> N
         pass
 
 
+# ── SAPI helpers (playback-timeout hint + Edge-offline fallback) ───────────────
+def _sapi_voice_setup_ps() -> str:
+    """PowerShell fragment: SelectVoice(name) or gender hint. Matches FRIDAY_WIN_TTS_* in .env."""
+    win_voice = os.environ.get("FRIDAY_WIN_TTS_VOICE", "").strip()
+    gender_raw = os.environ.get("FRIDAY_WIN_TTS_GENDER", "").strip().lower()
+    if win_voice:
+        esc = win_voice.replace("`", "``").replace('"', '`"')
+        return f'$s.SelectVoice("{esc}"); '
+    if gender_raw == "male":
+        return "$s.SelectVoiceByHints([System.Speech.Synthesis.VoiceGender]::Male); "
+    # Default female — aligns with default Edge voice (Emma) when offline
+    return "$s.SelectVoiceByHints([System.Speech.Synthesis.VoiceGender]::Female); "
+
+
+def _sapi_speak_short(message: str) -> None:
+    """Brief Windows SAPI line (no Edge) — avoids network loop when capping playback."""
+    try:
+        safe = (message or "").replace("'", " ").replace('"', " ")[:200]
+        if not safe.strip():
+            return
+        print(f"[friday-speak] SAPI short: {safe[:80]!r}...", flush=True)
+        voice_ps = _sapi_voice_setup_ps()
+        _kwargs: dict = {"timeout": 15, "capture_output": True}
+        if platform.system() == "Windows":
+            _kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Add-Type -AssemblyName System.Speech; "
+             "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+             + voice_ps
+             + f"$s.Speak('{safe}')"],
+            **_kwargs,
+        )
+        _write_last_spoken_ts()
+    except Exception as exc:
+        print(f"friday-speak: SAPI short failed — {exc}", file=sys.stderr)
+
+
+# ── Playback duration cap (wall-clock ffplay time per utterance) ───────────────
+def _get_max_playback_sec() -> float:
+    """0 = no limit. Explicit FRIDAY_TTS_MAX_PLAYBACK_SEC wins; else session defaults."""
+    raw = os.environ.get("FRIDAY_TTS_MAX_PLAYBACK_SEC", "").strip().lower()
+    if raw:
+        if raw in ("0", "false", "off", "no", "none"):
+            return 0.0
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            return 0.0
+    if _SESSION_KIND in ("cursor-reply", "subagent"):
+        q_raw = os.environ.get("FRIDAY_TTS_QUERY_MAX_PLAYBACK_SEC", "60").strip().lower()
+        if q_raw in ("0", "false", "off", "no", "none"):
+            return 0.0
+        try:
+            return max(0.0, float(q_raw))
+        except ValueError:
+            return 60.0
+    return 0.0
+
+
+def _terminate_playback_proc(proc: subprocess.Popen) -> None:
+    try:
+        proc.kill()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=8)
+    except Exception:
+        pass
+
+
+def _stop_playback_after_cap(proc: subprocess.Popen) -> None:
+    """Kill ffplay when playback budget exceeded; update ts — no TTS, no mixer ducking."""
+    _terminate_playback_proc(proc)
+    _write_last_spoken_ts()
+
+
 # ── ffplay (plays from bytes via temp file) ────────────────────────────────────
 def _play_ffplay(mp3_data: bytes) -> None:
     with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
@@ -468,7 +550,16 @@ def _play_ffplay(mp3_data: bytes) -> None:
             **kwargs,
         )
         threading.Thread(target=_fix_ffplay_volume, args=(proc.pid,), daemon=True).start()
-        proc.wait()
+        max_pb = _get_max_playback_sec()
+        if max_pb > 0:
+            try:
+                proc.wait(timeout=max_pb)
+            except subprocess.TimeoutExpired:
+                print("[friday-speak] playback timed out — stopping player (silent)", flush=True)
+                _stop_playback_after_cap(proc)
+                return
+        else:
+            proc.wait()
         if proc.returncode not in (0, None):
             raise subprocess.CalledProcessError(proc.returncode, "ffplay")
         _write_last_spoken_ts()
@@ -529,11 +620,30 @@ async def _stream_and_play(switch_done: threading.Event) -> None:
         **kwargs,
     )
     threading.Thread(target=_fix_ffplay_volume, args=(proc.pid,), daemon=True).start()
+    play_start = time.monotonic()
+    max_pb = _get_max_playback_sec()
 
+    def _remaining_play() -> float | None:
+        if max_pb <= 0:
+            return None
+        return max_pb - (time.monotonic() - play_start)
+
+    timed_out = False
     pipe_ok = True
     try:
         while True:
-            data = await audio_q.get()
+            rem = _remaining_play()
+            if rem is not None and rem <= 0:
+                timed_out = True
+                break
+            try:
+                if rem is not None:
+                    data = await asyncio.wait_for(audio_q.get(), timeout=rem)
+                else:
+                    data = await audio_q.get()
+            except asyncio.TimeoutError:
+                timed_out = True
+                break
             if data is None:
                 break
             cache_buf.write(data)
@@ -549,10 +659,35 @@ async def _stream_and_play(switch_done: threading.Event) -> None:
         except OSError:
             pass
 
-    await loop.run_in_executor(None, proc.wait)
+    if timed_out:
+        producer.cancel()
+        try:
+            await producer
+        except asyncio.CancelledError:
+            pass
+        print("[friday-speak] streaming cut off — playback budget exceeded (silent)", flush=True)
+        _stop_playback_after_cap(proc)
+        return
+
+    await producer
+
+    rem_fin = _remaining_play()
+    if max_pb > 0 and rem_fin is not None and rem_fin <= 0:
+        _stop_playback_after_cap(proc)
+        return
+
+    try:
+        if max_pb > 0 and rem_fin is not None:
+            await loop.run_in_executor(None, lambda rf=rem_fin: proc.wait(timeout=rf))
+        else:
+            await loop.run_in_executor(None, proc.wait)
+    except subprocess.TimeoutExpired:
+        print("[friday-speak] streaming playback timed out after stdin closed (silent)", flush=True)
+        _stop_playback_after_cap(proc)
+        return
+
     _write_last_spoken_ts()
 
-    # Re-raise any producer error after playback so caller can SAPI-fallback
     if produce_exc:
         raise produce_exc[0]
 
@@ -560,9 +695,6 @@ async def _stream_and_play(switch_done: threading.Event) -> None:
     if len(audio_data) > 100:
         _save_cache(audio_data)
         print(f"[friday-speak] cached {len(audio_data)} bytes for next time", flush=True)
-
-    # Ensure producer task is fully awaited (it should be done by now)
-    await producer
 
 
 # ── Music fade-out ─────────────────────────────────────────────────────────────
@@ -650,12 +782,104 @@ def _kill_friday_player_processes() -> None:
 
 def _try_break_redis_tts_lock() -> None:
     """Release ambient's distributed lock so a priority speak can proceed."""
-    url = os.environ.get("FRIDAY_AMBIENT_REDIS_URL", "").strip() or "redis://127.0.0.1:6379"
+    r = _get_redis_client()
+    if r is None:
+        return
     try:
-        import redis as _redis  # type: ignore
-
-        r = _redis.Redis.from_url(url, decode_responses=True)
         r.delete("friday:tts:lock")
+    except Exception:
+        pass
+
+
+# ── Redis client (lazy, shared) ──────────────────────────────────────────────
+_redis_c = None
+_redis_c_tried = False
+
+def _get_redis_client():
+    global _redis_c, _redis_c_tried
+    if _redis_c_tried:
+        return _redis_c
+    _redis_c_tried = True
+    url = os.environ.get("OPENCLAW_REDIS_URL", "").strip() or os.environ.get("FRIDAY_AMBIENT_REDIS_URL", "").strip() or "redis://127.0.0.1:6379"
+    try:
+        import redis as _redis
+        _redis_c = _redis.Redis.from_url(url, decode_responses=True, socket_timeout=2)
+        _redis_c.ping()
+    except Exception:
+        _redis_c = None
+    return _redis_c
+
+
+# ── Redis distributed TTS lock ───────────────────────────────────────────────
+_REDIS_TTS_LOCK_KEY = "friday:tts:lock"
+_REDIS_TTS_LOCK_TTL = 90
+_TTS_ACTIVE_LOCK_TTL = 120.0  # seconds — auto-expire file lock if process dies without cleanup
+_own_redis_token: str | None = None
+
+def _acquire_redis_tts_lock(priority: bool = False, timeout: float = 60.0) -> bool:
+    """Acquire Redis lock before speaking.  Returns True when safe to proceed."""
+    global _own_redis_token
+    r = _get_redis_client()
+    if r is None:
+        return True  # fail-open
+    import uuid as _uuid
+    token = f"{os.getpid()}:{_uuid.uuid4().hex[:8]}"
+    if priority:
+        try:
+            r.delete(_REDIS_TTS_LOCK_KEY)
+        except Exception:
+            pass
+        time.sleep(0.05)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            if r.set(_REDIS_TTS_LOCK_KEY, token, nx=True, ex=_REDIS_TTS_LOCK_TTL):
+                _own_redis_token = token
+                return True
+        except Exception:
+            return True
+        time.sleep(0.08)
+    return False
+
+def _release_redis_tts_lock() -> None:
+    global _own_redis_token
+    if not _own_redis_token:
+        return
+    r = _get_redis_client()
+    if r is None:
+        return
+    try:
+        holder = r.get(_REDIS_TTS_LOCK_KEY)
+        if holder == _own_redis_token:
+            r.delete(_REDIS_TTS_LOCK_KEY)
+    except Exception:
+        pass
+    _own_redis_token = None
+
+
+# ── Edge TTS rate-limit guard ────────────────────────────────────────────────
+_REDIS_TTS_LAST_KEY = "friday:tts:last_call"
+_MIN_TTS_GAP_SEC = 0.15
+
+def _rate_limit_ok() -> bool:
+    """Return True if enough time has passed since the last TTS call."""
+    r = _get_redis_client()
+    if r is None:
+        return True
+    try:
+        last = r.get(_REDIS_TTS_LAST_KEY)
+        if last and (time.time() - float(last)) < _MIN_TTS_GAP_SEC:
+            return False
+    except Exception:
+        pass
+    return True
+
+def _stamp_tts_call() -> None:
+    r = _get_redis_client()
+    if r is None:
+        return
+    try:
+        r.set(_REDIS_TTS_LAST_KEY, str(time.time()), ex=300)
     except Exception:
         pass
 
@@ -668,15 +892,15 @@ def _release_own_tts_lock() -> None:
     so the lock is always released even when the process is killed (SIGTERM).
     """
     try:
-        raw = TTS_ACTIVE_FILE.read_text(encoding="utf-8").strip()
-        if raw and int(raw) == os.getpid():
+        pid, _ = _read_tts_lock_info()
+        if pid is not None and pid == os.getpid():
             TTS_ACTIVE_FILE.unlink(missing_ok=True)
     except Exception:
         pass
+    _release_redis_tts_lock()
 
 
 atexit.register(_release_own_tts_lock)
-atexit.register(_release_thinking_singleton)
 
 
 def _sigterm_handler(*_args) -> None:
@@ -739,6 +963,9 @@ def _release_thinking_singleton() -> None:
         pass
 
 
+atexit.register(_release_thinking_singleton)
+
+
 def _read_preempted_ambient_line() -> str | None:
     """If ambient was speaking, grab its line for an apology replay; clear the file."""
     if not AMBIENT_SPEAKING_FILE.exists():
@@ -795,19 +1022,6 @@ def _play_priority_followup(ambient_line: str) -> None:
 
 
 # ── SAPI fallback ──────────────────────────────────────────────────────────────
-def _sapi_voice_setup_ps() -> str:
-    """PowerShell fragment: SelectVoice(name) or gender hint. Matches FRIDAY_WIN_TTS_* in .env."""
-    win_voice = os.environ.get("FRIDAY_WIN_TTS_VOICE", "").strip()
-    gender_raw = os.environ.get("FRIDAY_WIN_TTS_GENDER", "").strip().lower()
-    if win_voice:
-        esc = win_voice.replace("`", "``").replace('"', '`"')
-        return f'$s.SelectVoice("{esc}"); '
-    if gender_raw == "male":
-        return "$s.SelectVoiceByHints([System.Speech.Synthesis.VoiceGender]::Male); "
-    # Default female — aligns with default Edge voice (Emma) when offline
-    return "$s.SelectVoiceByHints([System.Speech.Synthesis.VoiceGender]::Female); "
-
-
 def _sapi_speak() -> None:
     try:
         safe = TEXT.replace("'", " ").replace('"', " ")[:400]
@@ -829,14 +1043,26 @@ def _sapi_speak() -> None:
         print(f"friday-speak: SAPI also failed — {sapi_err}", file=sys.stderr)
 
 
-def _read_tts_lock_pid() -> int | None:
+def _read_tts_lock_info() -> tuple:
+    """Read (pid, write_timestamp) from TTS_ACTIVE_FILE. Returns (None, None) on failure.
+    Format: '{PID}\\n{timestamp}' — timestamp is time.time() when the lock was acquired.
+    Backward-compatible: plain '{PID}' (no timestamp) yields (pid, None).
+    """
     try:
         raw = TTS_ACTIVE_FILE.read_text(encoding="utf-8").strip()
         if not raw:
-            return None
-        return int(raw)
+            return None, None
+        lines = raw.split("\n", 1)
+        pid = int(lines[0])
+        ts = float(lines[1]) if len(lines) > 1 else None
+        return pid, ts
     except (OSError, ValueError):
-        return None
+        return None, None
+
+
+def _read_tts_lock_pid() -> int | None:
+    pid, _ = _read_tts_lock_info()
+    return pid
 
 
 def _pid_alive(pid: int) -> bool:
@@ -927,8 +1153,14 @@ async def speak():
                 sys.exit(0)
 
         if _priority:
-            # User-facing reply: cut over ambient / stuck TTS instead of waiting behind it.
             preempted_replay = _preempt_for_priority_tts()
+
+        # ── Redis distributed lock — serialises ALL callers system-wide ──
+        if not _acquire_redis_tts_lock(priority=_priority, timeout=60.0):
+            print("[friday-speak] timed out waiting for Redis TTS lock — skipping", flush=True)
+            sys.exit(0)
+        _stamp_tts_call()
+
         # ── Global serialisation: wait for any other speak instance to finish ──
         # Uses O_CREAT|O_EXCL for atomic lock acquisition on NTFS — eliminates
         # the TOCTOU race where two processes both see the file absent and both
@@ -944,7 +1176,7 @@ async def speak():
             try:
                 fd = os.open(str(TTS_ACTIVE_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
                 try:
-                    os.write(fd, str(os.getpid()).encode())
+                    os.write(fd, f"{os.getpid()}\n{time.time()}".encode())
                 finally:
                     os.close(fd)
                 # Orphan friday-player from a crashed holder would bypass the file lock
@@ -954,11 +1186,12 @@ async def speak():
             except FileExistsError:
                 pass  # another process holds the lock — fall through to wait
 
-            # Stale lock: corrupt file or holder process exited without unlinking
+            # Stale lock: corrupt file, dead PID, or TTL expired (guards against PID reuse on Windows).
             try:
                 if TTS_ACTIVE_FILE.exists():
-                    lp = _read_tts_lock_pid()
-                    if lp is None or not _pid_alive(lp):
+                    lp, lts = _read_tts_lock_info()
+                    _ttl_expired = lts is not None and (time.time() - lts) > _TTS_ACTIVE_LOCK_TTL
+                    if lp is None or _ttl_expired or not _pid_alive(lp):
                         _kill_friday_player_processes()
                         TTS_ACTIVE_FILE.unlink(missing_ok=True)
                         continue
@@ -973,8 +1206,9 @@ async def speak():
 
             if time.time() > _wait_deadline:
                 try:
-                    lp = _read_tts_lock_pid()
-                    if lp is not None and _pid_alive(lp):
+                    lp, lts = _read_tts_lock_info()
+                    _ttl_expired = lts is not None and (time.time() - lts) > _TTS_ACTIVE_LOCK_TTL
+                    if lp is not None and not _ttl_expired and _pid_alive(lp):
                         _wait_deadline = time.time() + 60.0
                     else:
                         _kill_friday_player_processes()
@@ -984,7 +1218,7 @@ async def speak():
                 await asyncio.sleep(0.05)
                 continue
 
-            await asyncio.sleep(0.25)
+            await asyncio.sleep(0.10)
 
     try:
         await _speak_inner()

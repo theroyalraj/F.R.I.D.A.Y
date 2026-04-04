@@ -76,11 +76,11 @@ function playDoneSong(log) {
 function pcAgentStartupGreetingPhrase() {
   const n = (process.env.FRIDAY_USER_NAME || 'Raj').trim() || 'Raj';
   const lines = [
-    `P.C. agent online. Voice interface active. Ready to assist, ${n}.`,
-    `All local systems operational. Friday standing by, ${n}.`,
-    `Agent initialised. Claude is armed and standing by, ${n}.`,
-    `Online. What shall we build today, ${n}?`,
-    `Systems up. Voice and command interface ready, ${n}.`,
+    `Friday here, ${n} — I'm up when you are.`,
+    `Hey ${n}, I'm online. What do you need?`,
+    `Right, ${n}, we're connected. Go ahead whenever.`,
+    `Good to go, ${n}. What's on your mind?`,
+    `I'm here, ${n}. Talk to me when you're ready.`,
   ];
   return lines[Math.floor(Math.random() * lines.length)];
 }
@@ -130,6 +130,9 @@ function speakStartup() {
       FRIDAY_TTS_VOICE:  process.env.FRIDAY_TTS_VOICE  || 'en-US-EmmaMultilingualNeural',
       FRIDAY_TTS_DEVICE: process.env.FRIDAY_TTS_DEVICE || 'default',
       FRIDAY_TTS_BYPASS_CURSOR_DEFER: 'true',
+      // Priority clears any stale TTS file/Redis lock left over from a previous process
+      // that was killed mid-speech (e.g. during server restart) — guarantees audio works immediately.
+      FRIDAY_TTS_PRIORITY: '1',
       ...delivery,
     },
     detached: true,

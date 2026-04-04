@@ -35,6 +35,22 @@ Output is JSON — pipe to Claude or parse fields: `uid`, `from`, `subject`, `da
 
 ---
 
+## Gmail Watch (live email notifications)
+
+Script: `scripts/gmail-watch.py` — long-running daemon that polls IMAP for new unseen emails and speaks them at **highest TTS priority** (`FRIDAY_TTS_PRIORITY=1`), pre-empting all other speech.
+
+Config in `.env`: `FRIDAY_EMAIL_WATCH` (master switch), `FRIDAY_EMAIL_POLL_SEC` (default 30), `FRIDAY_EMAIL_FOLDERS` (default INBOX), `FRIDAY_EMAIL_NOTIFY_VOICE` (blank = session voice).
+
+```powershell
+python scripts/gmail-watch.py
+```
+
+On startup, snapshots current unseen UIDs (does not announce old mail). Then polls every N seconds. New emails trigger: "New email from [sender]. Subject: [subject]." at priority 1.
+
+Auto-reconnects on IMAP drops. Crashes restart after 30 seconds.
+
+---
+
 ## TTS — friday-speak.py
 
 Script: `skill-gateway/scripts/friday-speak.py`
@@ -49,9 +65,18 @@ Env overrides (optional, set inline):
 - `FRIDAY_TTS_VOICE` — Edge TTS voice name (default: en-US-EmmaMultilingualNeural)
 - **`FRIDAY_TTS_VOICE_BLOCK`** — comma-separated Edge voice ids **never** to use; see repo root **`CLAUDE.md`** — do not suggest or set blocked voices in `.env`, scripts, or docs.
 - `FRIDAY_TTS_PRIORITY=1` — pre-empts ambient and competing TTS
+- `FRIDAY_TTS_THINKING=1` — **singleton lock** for thinking narration; only one thinking speak active at a time (extras exit silently). Use for narrate-thinking rule chunks.
 - `FRIDAY_TTS_BYPASS_CURSOR_DEFER=true` — speak even when Cursor is focused
 
 Falls back to Windows SAPI automatically if edge-tts network is unreachable.
+
+### Session voice check
+
+```powershell
+python skill-gateway/scripts/pick-session-voice.py --check
+```
+
+Prints all voice assignments per session type (main, subagent, cursor-reply), Redis context with last-used timestamps, and the blocklist.
 
 ---
 
@@ -100,7 +125,7 @@ npm run start:cursor-reply
 python scripts/cursor-reply-watch.py
 ```
 
-`npm run restart:local` / `scripts/start.mjs` also starts this watcher when any of `FRIDAY_CURSOR_SPEAK_REPLY`, `FRIDAY_CURSOR_SPEAK_SUBAGENT_REPLY`, or `FRIDAY_CURSOR_SPEAK_THINKING` is enabled. Set all to `false` to skip.
+`npm run restart:local` / `scripts/start.mjs` starts this watcher when any of `FRIDAY_CURSOR_SPEAK_REPLY`, `FRIDAY_CURSOR_SPEAK_SUBAGENT_REPLY`, or `FRIDAY_CURSOR_SPEAK_THINKING` is active after narration gating (thinking stays on with narration by default). Set all channels off to skip.
 
 Requires `chat_id` in repo `.session-voice.json` (from normal `pick-session-voice.py` / Composer use). Optional silent seed: set `FRIDAY_PICK_SESSION_NO_WELCOME=true` when invoking pick-session-voice once.
 

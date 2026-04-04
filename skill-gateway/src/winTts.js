@@ -33,13 +33,21 @@ export function winTtsEnabled() {
  * Speak text via edge-tts neural voice on Echo Dot (or fallback device). Fire-and-forget.
  * @param {string} text
  * @param {import('pino').Logger} [log]
- * @param {{ bypassCursorDefer?: boolean, priority?: boolean }} [opts]
+ * @param {{ bypassCursorDefer?: boolean, priority?: boolean, onClose?: () => void }} [opts]
  */
 export function speakWinTts(text, log, opts = {}) {
   if (!IS_WINDOWS) return;
 
+  const { onClose } = opts;
   const safeText = String(text || '').trim().slice(0, 500);
-  if (!safeText) return;
+  if (!safeText) {
+    try {
+      onClose?.();
+    } catch (e) {
+      log?.warn({ err: String(e?.message || e) }, 'winTts: onClose threw');
+    }
+    return;
+  }
 
   const env = {
     ...process.env,
@@ -61,6 +69,21 @@ export function speakWinTts(text, log, opts = {}) {
 
   child.stdout?.on('data', (d) => log?.info({ tts: d.toString().trim() }, 'winTts'));
   child.stderr?.on('data', (d) => log?.warn({ tts: d.toString().trim() }, 'winTts: err'));
-  child.on('error', (e) => log?.warn({ err: String(e.message) }, 'winTts: spawn failed'));
+  child.on('close', (code) => {
+    if (code !== 0) log?.warn({ exitCode: code }, 'winTts: process exited non-zero');
+    try {
+      onClose?.();
+    } catch (e) {
+      log?.warn({ err: String(e?.message || e) }, 'winTts: onClose threw');
+    }
+  });
+  child.on('error', (e) => {
+    log?.warn({ err: String(e.message) }, 'winTts: spawn failed');
+    try {
+      onClose?.();
+    } catch (err) {
+      log?.warn({ err: String(err?.message || err) }, 'winTts: onClose threw');
+    }
+  });
   child.unref();
 }
