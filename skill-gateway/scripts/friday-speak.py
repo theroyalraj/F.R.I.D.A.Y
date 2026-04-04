@@ -23,11 +23,20 @@ Good voices:
   en-US-GuyNeural               US male neural
   en-IN-NeerjaExpressiveNeural  Indian English / Hinglish
   hi-IN-SwaraNeural             Hindi female
+
+Latency notes:
+  • Cache HIT  → audio starts in ~50 ms  (disk read + ffplay init)
+  • Cache MISS → audio starts in ~150 ms (edge-tts first chunk arrives fast;
+                 streaming pipes chunks to ffplay as they arrive and saves to
+                 cache simultaneously — no wait for full download)
+  • Semantic cache: text is normalised before hashing so near-identical phrases
+    ("Done. sir." / "done, sir") share the same cached MP3.
 """
 import asyncio
 import hashlib
 import io
 import os
+import re
 import signal as _signal
 import subprocess
 import sys
@@ -84,9 +93,34 @@ def _write_last_spoken_ts() -> None:
         pass
 
 
-# ── MP3 cache ─────────────────────────────────────────────────────────────────
+# ── Semantic / normalised cache key ───────────────────────────────────────────
+def _normalize_text(text: str) -> str:
+    """
+    Normalise text before hashing so near-identical phrases share a cache entry.
+
+    Transforms applied (in order):
+      • strip leading/trailing whitespace
+      • collapse internal whitespace to single spaces
+      • lowercase everything
+      • strip trailing sentence-ending punctuation  (.  !  ?  …)
+      • strip a trailing "sir" suffix (with optional punctuation) so
+        "Task complete, sir." and "Task complete, sir" and
+        "task complete sir" all resolve to the same key
+    """
+    t = text.strip()
+    t = re.sub(r'\s+', ' ', t)          # multi-space → single space
+    t = t.lower()
+    t = re.sub(r'[.!?\u2026]+$', '', t) # trailing sentence enders
+    t = t.strip()
+    # Normalise trailing ", sir" / " sir" / "sir." so phrasing variants collapse
+    t = re.sub(r'[,\s]+sir[.!?]*$', ' sir', t)
+    t = t.strip()
+    return t
+
+
 def _cache_key() -> str:
-    key = f"{TEXT}|{VOICE}|{RATE}|{PITCH}|{VOLUME}"
+    normalised = _normalize_text(TEXT)
+    key = f"{normalised}|{VOICE}|{RATE}|{PITCH}|{VOLUME}"
     return hashlib.md5(key.encode()).hexdigest()
 
 def _cache_path() -> Path | None:
@@ -109,9 +143,9 @@ def _save_cache(data: bytes):
             pass
 
 
-# ── Edge-TTS with retry ───────────────────────────────────────────────────────
+# ── Edge-TTS fetch (full download — used for --output / --stdout) ─────────────
 async def _fetch_mp3_network(retries: int = 3) -> bytes:
-    """3 quick retries (2s, 4s gaps = ~6s total) then raise — caller falls back to SAPI."""
+    """3 quick retries then raise — caller falls back to SAPI."""
     last_err = None
     for attempt in range(1, retries + 1):
         try:
@@ -126,20 +160,10 @@ async def _fetch_mp3_network(retries: int = 3) -> bytes:
         except Exception as exc:
             last_err = exc
             if attempt < retries:
-                wait = attempt * 2.0   # 2s, 4s — short budget before SAPI kicks in
+                wait = attempt * 2.0
                 print(f"[friday-speak] attempt {attempt} failed ({exc.__class__.__name__}), retry in {wait}s", file=sys.stderr, flush=True)
                 await asyncio.sleep(wait)
     raise last_err
-
-async def _fetch_mp3() -> bytes:
-    """Return MP3 bytes — from cache if available, else download and cache."""
-    cached = _load_cache()
-    if cached:
-        print(f"[friday-speak] cache hit ({len(cached)} bytes)", flush=True)
-        return cached
-    data = await _fetch_mp3_network()
-    _save_cache(data)
-    return data
 
 
 # ── Windows audio device routing via IPolicyConfig (pycaw + comtypes) ─────────
@@ -176,7 +200,7 @@ def _get_default_output_id() -> str | None:
         return None
 
 
-# ── ffplay fallback (default Windows audio device) ────────────────────────────
+# ── ffplay (plays from bytes via temp file) ────────────────────────────────────
 def _play_ffplay(mp3_data: bytes) -> None:
     with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
         f.write(mp3_data)
@@ -207,47 +231,89 @@ def _play_ffplay(mp3_data: bytes) -> None:
             pass
 
 
-def _play_to_device(mp3_data: bytes, device_name_sub: str) -> bool:
+# ── Streaming playback (cache-miss fast path) ──────────────────────────────────
+async def _stream_and_play(switch_done: threading.Event) -> None:
     """
-    Switch Windows default audio output to the named device, play via ffplay, then restore.
-    The device switch happens CONCURRENTLY with the MP3 fetch (caller passes pre-fetched data).
-    Returns True on success, False to fall back to default device.
+    Stream edge-tts audio chunks directly to ffplay stdin while simultaneously
+    building the cache entry on disk.
+
+    The producer task starts immediately and buffers incoming audio chunks in an
+    asyncio.Queue.  We wait (asynchronously — without blocking the event loop)
+    for the Bluetooth device switch to complete, then hand off buffered + future
+    chunks to ffplay.  By the time the switch finishes (~300 ms) several hundred
+    milliseconds of audio are already buffered, so playback starts with no
+    additional wait.
     """
-    try:
-        result = _find_device_id(device_name_sub)
-        if not result:
-            print(f"[friday-speak] device '{device_name_sub}' not found — using default", file=sys.stderr, flush=True)
-            return False
+    loop = asyncio.get_event_loop()
+    audio_q: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=0)
+    cache_buf = io.BytesIO()
+    produce_exc: list[Exception] = []
 
-        target_id, target_name = result
-        original_id = _get_default_output_id()
-
-        # Already the right device — no switch needed, no BT wake delay
-        if original_id and original_id == target_id:
-            print(f"[friday-speak] playing to default device: {target_name}", flush=True)
-            _play_ffplay(mp3_data)
-            return True
-
-        print(f"[friday-speak] switching default to: {target_name}", flush=True)
-        _set_default_endpoint(target_id)
-        # Brief pause: Bluetooth needs a moment to (re)connect before audio starts
-        time.sleep(0.3)
-
+    async def _produce():
         try:
-            _play_ffplay(mp3_data)
+            communicate = edge_tts.Communicate(TEXT, VOICE, rate=RATE, pitch=PITCH, volume=VOLUME)
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    await audio_q.put(chunk["data"])
+        except Exception as exc:
+            produce_exc.append(exc)
         finally:
-            if original_id:
-                _set_default_endpoint(original_id)
-                print(f"[friday-speak] restored default output", flush=True)
+            await audio_q.put(None)  # sentinel — always sent
 
-        print(f"[friday-speak] played via {VOICE} on {target_name}", flush=True)
-        return True
+    producer = asyncio.create_task(_produce())
 
-    except Exception as exc:
-        print(f"[friday-speak] device routing failed ({exc.__class__.__name__}: {exc}) — using default", file=sys.stderr, flush=True)
-        return False
+    # Wait for BT device switch without blocking the event loop
+    await loop.run_in_executor(None, lambda: switch_done.wait(2.0))
+
+    kwargs: dict = {
+        "stdin":  subprocess.PIPE,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if platform.system() == "Windows":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+    proc = subprocess.Popen(
+        ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", "-"],
+        **kwargs,
+    )
+
+    pipe_ok = True
+    try:
+        while True:
+            data = await audio_q.get()
+            if data is None:
+                break
+            cache_buf.write(data)
+            if pipe_ok:
+                try:
+                    proc.stdin.write(data)
+                    proc.stdin.flush()
+                except (BrokenPipeError, OSError):
+                    pipe_ok = False  # ffplay exited early — keep draining queue for cache
+    finally:
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
+
+    await loop.run_in_executor(None, proc.wait)
+    _write_last_spoken_ts()
+
+    # Re-raise any producer error after playback so caller can SAPI-fallback
+    if produce_exc:
+        raise produce_exc[0]
+
+    audio_data = cache_buf.getvalue()
+    if len(audio_data) > 100:
+        _save_cache(audio_data)
+        print(f"[friday-speak] cached {len(audio_data)} bytes for next time", flush=True)
+
+    # Ensure producer task is fully awaited (it should be done by now)
+    await producer
 
 
+# ── Music fade-out ─────────────────────────────────────────────────────────────
 def _fade_and_stop_music(fade_sec: float = 1.5, steps: int = 20) -> None:
     """
     Fade out ONLY the startup song (friday-play.py's ffplay process) before TTS speaks.
@@ -255,14 +321,13 @@ def _fade_and_stop_music(fade_sec: float = 1.5, steps: int = 20) -> None:
     """
     pid_file = Path(tempfile.gettempdir()) / "friday-play.pid"
     if not pid_file.exists():
-        return  # no song playing — nothing to do
+        return
 
     try:
         song_pid = int(pid_file.read_text().strip())
     except Exception:
         return
 
-    # Fade only the session whose process PID matches the song's ffplay
     try:
         from pycaw.utils import AudioUtilities
 
@@ -275,7 +340,7 @@ def _fade_and_stop_music(fade_sec: float = 1.5, steps: int = 20) -> None:
         if music_sessions:
             step_time = fade_sec / steps
             for i in range(steps + 1):
-                vol = 1.0 - (i / steps)   # 1.0 → 0.0 linear fade
+                vol = 1.0 - (i / steps)
                 for s in music_sessions:
                     try:
                         s.SimpleAudioVolume.SetMasterVolume(vol, None)
@@ -285,11 +350,10 @@ def _fade_and_stop_music(fade_sec: float = 1.5, steps: int = 20) -> None:
                     time.sleep(step_time)
             print(f"[friday-speak] song faded out (PID {song_pid})", flush=True)
     except ImportError:
-        pass  # pycaw not installed — skip volume fade, just kill
+        pass
     except Exception as exc:
         print(f"[friday-speak] fade-out skipped ({exc.__class__.__name__}: {exc})", file=sys.stderr, flush=True)
 
-    # Kill the song process so it doesn't linger silently at volume 0
     try:
         os.kill(song_pid, _signal.SIGTERM)
         pid_file.unlink(missing_ok=True)
@@ -297,13 +361,32 @@ def _fade_and_stop_music(fade_sec: float = 1.5, steps: int = 20) -> None:
         pass
 
 
+# ── SAPI fallback ──────────────────────────────────────────────────────────────
+def _sapi_speak() -> None:
+    try:
+        safe = TEXT.replace("'", " ").replace('"', " ")[:400]
+        print(f"[friday-speak] SAPI fallback: {safe[:60]}", flush=True)
+        subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             f"Add-Type -AssemblyName System.Speech; "
+             f"$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+             f"$s.SelectVoiceByHints([System.Speech.Synthesis.VoiceGender]::Male); "
+             f"$s.Speak('{safe}')"],
+            timeout=30,
+        )
+        _write_last_spoken_ts()
+    except Exception as sapi_err:
+        print(f"friday-speak: SAPI also failed — {sapi_err}", file=sys.stderr)
+
+
+# ── Main ───────────────────────────────────────────────────────────────────────
 async def speak():
     if not TEXT:
         print("friday-speak: no text provided", file=sys.stderr)
         sys.exit(1)
 
-    # Kick off device-switch lookup in a background thread while we fetch the MP3 —
-    # so the BT switch and TTS download overlap instead of running sequentially.
+    # Kick off device-switch lookup in a background thread while we start the
+    # TTS request — BT switch and stream overlap instead of running sequentially.
     use_device = DEVICE and DEVICE.lower() not in ("", "default", "none")
     device_result: list = [None]   # [(target_id, target_name, original_id) | None | False]
     switch_done  = threading.Event()
@@ -321,11 +404,9 @@ async def speak():
             target_id, target_name = res
             original_id = _get_default_output_id()
             if original_id and original_id == target_id:
-                # Already correct — nothing to switch
                 device_result[0] = (target_id, target_name, None)
                 switch_done.set()
                 return
-            # Switch now (while MP3 is still downloading)
             _set_default_endpoint(target_id)
             time.sleep(0.3)   # BT wake-up
             device_result[0] = (target_id, target_name, original_id)
@@ -335,77 +416,83 @@ async def speak():
         finally:
             switch_done.set()
 
-    # Start device prep immediately (non-blocking thread)
     threading.Thread(target=_prepare_device, daemon=True).start()
 
-    try:
-        mp3_data = await _fetch_mp3()
-    except Exception as exc:
-        print(f"friday-speak: edge-tts failed — {exc}", file=sys.stderr, flush=True)
-        switch_done.wait(timeout=2)
-        # Restore device if we already switched
-        if device_result[0] and device_result[0] is not False:
-            _tid, _tname, orig = device_result[0]
-            if orig:
-                try: _set_default_endpoint(orig)
-                except Exception: pass
-        # SAPI fallback — instant, no network needed
-        if not OUTPUT and not STDOUT:
+    # ── --output / --stdout: always need full MP3 bytes ───────────────────────
+    if OUTPUT or STDOUT:
+        cached = _load_cache()
+        if cached:
+            print(f"[friday-speak] cache hit ({len(cached)} bytes)", flush=True)
+            mp3_data = cached
+        else:
             try:
-                safe = TEXT.replace("'", " ").replace('"', " ")[:400]
-                print(f"[friday-speak] SAPI fallback: {safe[:60]}", flush=True)
-                subprocess.run(
-                    ["powershell", "-NoProfile", "-Command",
-                     f"Add-Type -AssemblyName System.Speech; "
-                     f"$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
-                     f"$s.SelectVoiceByHints([System.Speech.Synthesis.VoiceGender]::Male); "
-                     f"$s.Speak('{safe}')"],
-                    timeout=30,
-                )
-                _write_last_spoken_ts()
-            except Exception as sapi_err:
-                print(f"friday-speak: SAPI also failed — {sapi_err}", file=sys.stderr)
+                mp3_data = await _fetch_mp3_network()
+                _save_cache(mp3_data)
+            except Exception as exc:
+                print(f"friday-speak: edge-tts failed — {exc}", file=sys.stderr, flush=True)
+                sys.exit(1)
+
+        switch_done.wait(timeout=5)
+        _restore_device(device_result)
+
+        if OUTPUT:
+            with open(OUTPUT, "wb") as f:
+                f.write(mp3_data)
+            print(f"[friday-speak] wrote {len(mp3_data)} bytes -> {OUTPUT}", flush=True)
+        else:
+            sys.stdout.buffer.write(mp3_data)
+            sys.stdout.buffer.flush()
+        return
+
+    # ── Playback mode ─────────────────────────────────────────────────────────
+    cached = _load_cache()
+
+    if cached:
+        # Fast path: cache hit — wait for device, play from bytes
+        print(f"[friday-speak] cache hit ({len(cached)} bytes)", flush=True)
+        switch_done.wait(timeout=10)
+        _fade_and_stop_music()
+        _play_with_device(cached, device_result, use_device)
+        return
+
+    # Streaming path: cache miss — stream to ffplay while device switch runs
+    _fade_and_stop_music()
+    try:
+        await _stream_and_play(switch_done)
+        print(f"[friday-speak] streamed via {VOICE}", flush=True)
+    except Exception as exc:
+        print(f"friday-speak: edge-tts stream failed — {exc}", file=sys.stderr, flush=True)
+        switch_done.wait(timeout=2)
+        _restore_device(device_result)
+        _sapi_speak()
         sys.exit(1)
 
-    # --output: write MP3 to file
-    if OUTPUT:
-        switch_done.wait(timeout=5)
-        if device_result[0] and device_result[0] is not False:
-            _tid, _tname, orig = device_result[0]
-            if orig:
-                try: _set_default_endpoint(orig)
-                except Exception: pass
-        with open(OUTPUT, "wb") as f:
-            f.write(mp3_data)
-        print(f"[friday-speak] wrote {len(mp3_data)} bytes -> {OUTPUT}", flush=True)
-        return
+    _restore_device(device_result)
 
-    # --stdout
-    if STDOUT:
-        switch_done.wait(timeout=5)
-        if device_result[0] and device_result[0] is not False:
-            _tid, _tname, orig = device_result[0]
-            if orig:
-                try: _set_default_endpoint(orig)
-                except Exception: pass
-        sys.stdout.buffer.write(mp3_data)
-        sys.stdout.buffer.flush()
-        return
 
-    # Wait for device switch to complete (it probably already finished while we were fetching)
-    switch_done.wait(timeout=10)
+# ── Device helpers ─────────────────────────────────────────────────────────────
+def _restore_device(device_result: list) -> None:
+    """Restore the original default audio device if we switched it."""
+    info = device_result[0]
+    if info and info is not False:
+        _tid, _tname, original_id = info
+        if original_id:
+            try:
+                _set_default_endpoint(original_id)
+                print(f"[friday-speak] restored default output", flush=True)
+            except Exception:
+                pass
 
-    # Fade out any running music before speaking — always, for every TTS call
-    _fade_and_stop_music()
 
-    if use_device and device_result[0] is not False:
-        info = device_result[0]
+def _play_with_device(mp3_data: bytes, device_result: list, use_device: bool) -> None:
+    """Play mp3_data respecting the device switch that already happened."""
+    info = device_result[0]
+
+    if use_device and info is not False:
         if info is None:
-            # Thread didn't finish in time — fall through to ffplay default
             print(f"[friday-speak] device switch timed out — using default", file=sys.stderr, flush=True)
             _play_ffplay(mp3_data)
             return
-
         target_id, target_name, original_id = info
         try:
             _play_ffplay(mp3_data)
@@ -415,10 +502,10 @@ async def speak():
                 try:
                     _set_default_endpoint(original_id)
                     print(f"[friday-speak] restored default output", flush=True)
-                except Exception: pass
+                except Exception:
+                    pass
         return
 
-    # Fallback / no device specified
     print(f"[friday-speak] playing via {VOICE} on default audio device", flush=True)
     _play_ffplay(mp3_data)
 
