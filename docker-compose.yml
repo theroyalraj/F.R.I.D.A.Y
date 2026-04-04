@@ -40,6 +40,8 @@ services:
       - EVOLUTION_INSTANCE=${EVOLUTION_INSTANCE:-}
       - EVOLUTION_BASE_URL=http://evolution-api:8080
       - WHATSAPP_WEBHOOK_SECRET=${WHATSAPP_WEBHOOK_SECRET:-}
+      - WHATSAPP_ALLOWED_NUMBERS=${WHATSAPP_ALLOWED_NUMBERS:-}
+      - WHATSAPP_NOTIFY_NUMBER=${WHATSAPP_NOTIFY_NUMBER:-}
     volumes:
       - openclaw_n8n:/home/node/.n8n
     depends_on:

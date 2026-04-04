@@ -14,7 +14,7 @@ Requirements (all already installed for friday-speak.py):
   ffmpeg on PATH
 
 Env vars (optional — reads .env automatically):
-  FRIDAY_TTS_VOICE       edge-tts voice       (default: en-GB-RyanNeural)
+  FRIDAY_TTS_VOICE       edge-tts voice       (default: en-US-EmmaMultilingualNeural)
   FRIDAY_TTS_DEVICE      audio output device  (default: Echo Dot)
   FRIDAY_TTS_JARVIS_RANDOM — random greeting speed/pitch (default true; set false for fixed JARVIS_*)
   FRIDAY_USER_NAME       spoken address / prompts (default Raj)
@@ -69,9 +69,14 @@ if str(_sg_scripts) not in sys.path:
 from friday_greeting_delivery import sample_greeting_rate_pitch  # noqa: E402
 from friday_win_focus import should_defer_voice_for_cursor  # noqa: E402
 from indic_tts_voice import edge_voice_override_for_text  # noqa: E402
+from friday_music_lock import (
+    SESSION_START_FILE,
+    clear_music_active,
+    friday_play_music_hold_active,
+)  # noqa: E402
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-VOICE        = os.environ.get("FRIDAY_TTS_VOICE",    "en-GB-RyanNeural")
+VOICE        = os.environ.get("FRIDAY_TTS_VOICE",    "en-US-EmmaMultilingualNeural")
 DEVICE_HINT  = os.environ.get("FRIDAY_TTS_DEVICE",   "Echo Dot")
 USER_DISPLAY = (os.environ.get("FRIDAY_USER_NAME", "Raj") or "Raj").strip() or "Raj"
 AGENT_URL    = os.environ.get("PC_AGENT_URL",         "http://127.0.0.1:3847").rstrip("/")
@@ -88,11 +93,13 @@ CHANNELS     = 1
 # Seconds after startup to ignore mic energy — lets the welcome song + greeting
 # finish before the daemon can stop the music via voice activity detection.
 DEAF_SEC     = float(os.environ.get("LISTEN_DEAF_SEC", "15"))
-# Separate, longer window protecting the startup song from being killed by mic feedback.
-# Defaults to FRIDAY_PLAY_SECONDS (45) + 15s buffer so the full song + greeting finish
-# before any VAD can fire stop_music().  Override via LISTEN_MUSIC_PROTECT_SEC.
+# Long window while friday-play holds music (Redis + PID + session file age). During hold,
+# stop_music() is a no-op unless force=True (spoken "stop" after LISTEN_SONG_STOP_GRACE_SEC).
+# Mic energy never stops music; only transcribed commands do. Override via LISTEN_MUSIC_PROTECT_SEC.
 _play_sec    = int(os.environ.get("FRIDAY_PLAY_SECONDS", "45").split("#")[0].strip())
 MUSIC_PROTECT_SEC = float(os.environ.get("LISTEN_MUSIC_PROTECT_SEC", str(_play_sec + 15)))
+# Seconds after friday-play starts before spoken "stop" may cut the song (VAD never cuts music).
+SONG_STOP_GRACE_SEC = float(os.environ.get("LISTEN_SONG_STOP_GRACE_SEC", "5"))
 
 def _env_bool(name: str, default: bool = False) -> bool:
     v = os.environ.get(name, "").strip().lower()
@@ -162,8 +169,12 @@ def post_event(event_type: str, text: str = ""):
     threading.Thread(target=_send, daemon=True).start()
 
 # ── Music fade-out ─────────────────────────────────────────────────────────────
-def stop_music():
-    """Stop Alexa music via gateway + kill any local ffplay PID file."""
+def stop_music(force: bool = False):
+    """Stop Alexa music via gateway + kill any local ffplay PID file.
+    When force=True, ignore friday-play hold (user said stop after LISTEN_SONG_STOP_GRACE_SEC)."""
+    if not force and friday_play_music_hold_active():
+        log.debug("stop_music skipped — friday-play music hold (Redis or local)")
+        return
     # 1. Stop Alexa via gateway (non-blocking best-effort)
     try:
         import urllib.request
@@ -191,6 +202,32 @@ def stop_music():
         log.debug("stop_music local: %s", e)
     finally:
         PLAY_PID.unlink(missing_ok=True)
+        SESSION_START_FILE.unlink(missing_ok=True)
+        clear_music_active()
+
+
+def _seconds_since_friday_play_start() -> float | None:
+    """Wall-clock seconds since friday-play wrote the session file, or None."""
+    if not SESSION_START_FILE.exists():
+        return None
+    try:
+        t0 = float(SESSION_START_FILE.read_text(encoding="ascii").strip())
+        return max(0.0, time.time() - t0)
+    except (ValueError, OSError):
+        return None
+
+
+def _is_music_stop_phrase(lower: str) -> bool:
+    return lower in (
+        "stop",
+        "stop music",
+        "stop the music",
+        "stop that song",
+        "stop the song",
+        "stop song",
+        "stop playing",
+    )
+
 
 # ── Speech output (non-blocking) ───────────────────────────────────────────────
 _speak_lock = threading.Lock()
@@ -229,14 +266,16 @@ def _wait_for_tts_clear(timeout: float = 45.0) -> None:
         time.sleep(0.25)
 
 
-def speak(text: str, *, jarvis: bool = False):
+def speak(text: str, *, jarvis: bool = False, priority: bool = True):
     log.info("-> speak: %s", text[:80])
     def _run():
         _speaking.set()
         try:
             with _speak_lock:
-                # Wait for any ambient or other TTS to finish before we start
-                _wait_for_tts_clear()
+                # Priority (default): interrupt ambient / other TTS so replies are never stuck
+                # waiting behind a long chatter line. Non-priority: wait for lock to clear.
+                if not priority:
+                    _wait_for_tts_clear()
                 try:
                     override = edge_voice_override_for_text(text)
                     env = {**os.environ, "FRIDAY_TTS_VOICE": override or VOICE}
@@ -246,6 +285,10 @@ def speak(text: str, *, jarvis: bool = False):
                         gr, gp = sample_greeting_rate_pitch()
                         env["FRIDAY_TTS_RATE"] = gr
                         env["FRIDAY_TTS_PITCH"] = gp
+                    if priority:
+                        env["FRIDAY_TTS_PRIORITY"] = "1"
+                    else:
+                        env.pop("FRIDAY_TTS_PRIORITY", None)
                     result = subprocess.run(
                         [sys.executable, str(SPEAK_SCRIPT), text],
                         env=env,
@@ -344,6 +387,45 @@ def _restart_ambient() -> None:
         log.info("Ambient restarted.")
     except Exception as e:
         log.warning("Ambient restart failed: %s", e)
+
+
+_NARRATE_PATTERN = re.compile(
+    r"(narrate|what'?s? on (my )?screen|describe (my |the )?screen|"
+    r"what (am i|do i have|is) (looking at|on screen|open)|"
+    r"look at (my )?screen|screen narrat|read (my |the )?screen|"
+    r"what('?s| is) (this|that|here)|tell me what('?s| is) on)",
+    re.IGNORECASE,
+)
+
+_NARRATE_SCRIPT = root / "scripts" / "narrate-screen.py"
+
+
+def try_handle_narrate_screen(text: str) -> bool:
+    """Intercept narrate / screen description commands. Returns True if handled."""
+    if not _NARRATE_PATTERN.search(text):
+        return False
+
+    speak(f"Looking at your screen now, {USER_DISPLAY}.")
+    log.info("Screen narration requested.")
+
+    def _capture_and_speak():
+        try:
+            result = subprocess.run(
+                [sys.executable, str(_NARRATE_SCRIPT), "--silent"],
+                capture_output=True, timeout=30, cwd=str(root),
+            )
+            description = (result.stdout or b"").decode(errors="replace").strip()
+            if not description:
+                description = "Couldn't get a description — check the API key or screen capture."
+            speak(description)
+        except subprocess.TimeoutExpired:
+            speak(f"Screen narration timed out, {USER_DISPLAY}.")
+        except Exception as e:
+            log.warning("Screen narration failed: %s", e)
+            speak(f"Screen narration hit an error: {str(e)[:80]}")
+
+    threading.Thread(target=_capture_and_speak, daemon=True).start()
+    return True
 
 
 def try_handle_whatsapp_read(text: str) -> bool:
@@ -545,12 +627,8 @@ def record_phrase(mic_idx: int | None) -> np.ndarray | None:
 
             if rms > THRESHOLD:
                 if not speaking:
-                    # Only kill music after the startup music-protect window has elapsed.
-                    # This is longer than DEAF_SEC so the gateway greeting (fires at ~28s)
-                    # can play without mic feedback killing the song.
-                    elapsed = time.monotonic() - _daemon_start
-                    if MUSIC_PROTECT_SEC <= 0 or elapsed >= MUSIC_PROTECT_SEC:
-                        stop_music()
+                    # Do not stop music from mic energy — only from spoken stop (after grace) or other commands.
+                    pass
                 speaking = True
                 silent   = 0
                 chunks.append(block)
@@ -598,15 +676,20 @@ def main():
 
     _mic_errors = 0
     post_event("daemon_start", f"Voice daemon online. {mode.capitalize()} mode.")
-    speak(f"Friday voice daemon online, {USER_DISPLAY}. {mode.capitalize()} mode. Ready.", jarvis=True)
+    # Startup greeting suppressed — gateway already speaks on boot to avoid double TTS.
+    # speak(
+    #     f"Friday voice daemon online, {USER_DISPLAY}. {mode.capitalize()} mode. Ready.",
+    #     jarvis=True,
+    #     priority=False,
+    # )
     post_event("listening", f"Ready for your command, {USER_DISPLAY}.")
     global _daemon_start
     _daemon_start = time.monotonic()
     log.info("Listening — speak to Friday any time. Ctrl+C to stop.\n")
     if DEAF_SEC > 0 or MUSIC_PROTECT_SEC > 0:
         log.info(
-            "Startup windows — deaf (commands): %.0fs | music-protect (stop_music): %.0fs",
-            DEAF_SEC, MUSIC_PROTECT_SEC,
+            "Startup windows — deaf (commands): %.0fs | music hold (VAD ignored): %.0fs | song stop grace: %.0fs",
+            DEAF_SEC, MUSIC_PROTECT_SEC, SONG_STOP_GRACE_SEC,
         )
 
     while True:
@@ -660,13 +743,27 @@ def main():
 
         log.info("► %s", text)
 
-        # Cut the music the moment a command is recognised (deaf window already elapsed by now)
+        lower = text.lower().strip()
+
+        # Stop background music by voice only after grace; does not shut down the daemon.
+        if _is_music_stop_phrase(lower) and friday_play_music_hold_active():
+            age = _seconds_since_friday_play_start()
+            if age is not None and age < SONG_STOP_GRACE_SEC:
+                log.info(
+                    "Music stop ignored — within first %.0fs of playback (heard at %.1fs)",
+                    SONG_STOP_GRACE_SEC,
+                    age,
+                )
+                continue
+            stop_music(force=True)
+            post_event("heard", text)
+            continue
+
+        # Other commands: stop music when hold allows (so replies are audible over Alexa/local clip)
         stop_music()
         post_event("heard", text)
 
-        lower = text.lower()
-
-        # Built-in stop commands
+        # Built-in stop commands (plain "stop" only reaches here when no music hold)
         if lower in ("stop", "exit", "quit", "goodbye", "shut down", "go offline"):
             bye = random.choice([
                 f"Going offline, {USER_DISPLAY}. Goodbye.",
@@ -700,6 +797,11 @@ def main():
 
         # Ambient frequency control (semantic intercept before routing to agent)
         if try_handle_ambient_frequency(text):
+            post_event("listening", f"Ready for your command, {USER_DISPLAY}.")
+            continue
+
+        # Screen narration intercept
+        if try_handle_narrate_screen(text):
             post_event("listening", f"Ready for your command, {USER_DISPLAY}.")
             continue
 
@@ -758,9 +860,12 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        speak(random.choice([
-            f"Going offline, {USER_DISPLAY}.",
-            f"Shutting down. Later, {USER_DISPLAY}.",
-            "Offline. See you next time.",
-        ]))
+        speak(
+            random.choice([
+                f"Going offline, {USER_DISPLAY}.",
+                f"Shutting down. Later, {USER_DISPLAY}.",
+                "Offline. See you next time.",
+            ]),
+            priority=False,
+        )
         print("\nStopped.")

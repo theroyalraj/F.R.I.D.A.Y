@@ -6,13 +6,13 @@
  *
  * Env vars:
  *   FRIDAY_SPEAK_PY=false          — disable entirely (enabled by default when script is present)
- *   FRIDAY_TTS_VOICE               — edge-tts voice (default: en-GB-RyanNeural)
+ *   FRIDAY_TTS_VOICE               — edge-tts voice (default: en-US-EmmaMultilingualNeural)
  *   FRIDAY_TTS_DEVICE              — audio device substring (default: Echo Dot)
- *   FRIDAY_TTS_RATE                — speed e.g. "+5%" (default: +0%)
- *   FRIDAY_TTS_PITCH               — pitch e.g. "+0Hz" (default: +0Hz)
+ *   FRIDAY_TTS_RATE                — speed e.g. "+7.5%" (default: ~1.075×)
+ *   FRIDAY_TTS_PITCH               — pitch e.g. "+2Hz" (default: +2Hz)
  *
- * Good voices:
- *   en-GB-RyanNeural      — British male    ← default (Jarvis / FRIDAY feel)
+ * Good voices (honour FRIDAY_TTS_VOICE_BLOCK in .env — see CLAUDE.md):
+ *   en-US-EmmaMultilingualNeural — US female multilingual (repo default)
  *   en-US-AriaNeural      — US female neural
  *   en-US-GuyNeural       — US male neural
  *   en-GB-SoniaNeural     — British female
@@ -42,12 +42,29 @@ export function fridaySpeakEnabled(env = process.env) {
  * Speak text via friday-speak.py — fire-and-forget.
  * @param {string} text
  * @param {import('pino').Logger} [log]
+ * @param {{ bypassCursorDefer?: boolean, interruptMusic?: boolean, onClose?: () => void }} [opts]  bypassCursorDefer: greetings while Cursor focused; interruptMusic: FRIDAY_TTS_INTERRUPT_MUSIC=ui so friday-speak may duck friday-play; onClose: after friday-speak.py exits (playback finished) or if speak skipped
  */
-export function speakFridayPy(text, log) {
-  if (!fridaySpeakEnabled()) return;
+export function speakFridayPy(text, log, opts = {}) {
+  const { onClose, bypassCursorDefer, interruptMusic } = opts;
+
+  if (!fridaySpeakEnabled()) {
+    try {
+      onClose?.();
+    } catch (e) {
+      log?.warn({ err: String(e?.message || e) }, 'fridaySpeak: onClose threw');
+    }
+    return;
+  }
 
   const safeText = String(text || '').replace(/["`]/g, "'").trim().slice(0, 300);
-  if (!safeText) return;
+  if (!safeText) {
+    try {
+      onClose?.();
+    } catch (e) {
+      log?.warn({ err: String(e?.message || e) }, 'fridaySpeak: onClose threw');
+    }
+    return;
+  }
 
   // Stop Alexa cloud music before speaking (no fade API for Alexa, just stop)
   if (alexaMusicConfigured()) {
@@ -59,9 +76,11 @@ export function speakFridayPy(text, log) {
   const child = spawn('python', [SPEAK_SCRIPT, safeText], {
     env: {
       ...process.env,
-      FRIDAY_TTS_VOICE:  process.env.FRIDAY_TTS_VOICE  || 'en-GB-RyanNeural',
-      FRIDAY_TTS_RATE:   process.env.FRIDAY_TTS_RATE   || '+0%',
-      FRIDAY_TTS_PITCH:  process.env.FRIDAY_TTS_PITCH  || '+0Hz',
+      FRIDAY_TTS_VOICE:  process.env.FRIDAY_TTS_VOICE  || 'en-US-EmmaMultilingualNeural',
+      FRIDAY_TTS_RATE:   process.env.FRIDAY_TTS_RATE   || '+7.5%',
+      FRIDAY_TTS_PITCH:  process.env.FRIDAY_TTS_PITCH  || '+2Hz',
+      ...(bypassCursorDefer ? { FRIDAY_TTS_BYPASS_CURSOR_DEFER: 'true' } : {}),
+      ...(interruptMusic ? { FRIDAY_TTS_INTERRUPT_MUSIC: 'ui' } : {}),
     },
     // detached + unref lets the speech outlive a node --watch restart.
     // Pipe stderr so failures are visible in the terminal instead of silently swallowed.
@@ -78,10 +97,20 @@ export function speakFridayPy(text, log) {
   child.on('close', (code) => {
     if (code !== 0) log?.warn({ exitCode: code }, 'fridaySpeak: process exited non-zero');
     else log?.info({ text: safeText.slice(0, 60) }, 'fridaySpeak: done');
+    try {
+      onClose?.();
+    } catch (e) {
+      log?.warn({ err: String(e?.message || e) }, 'fridaySpeak: onClose threw');
+    }
   });
 
   child.on('error', (e) => {
     log?.warn({ err: String(e.message) }, 'fridaySpeak: python spawn failed');
+    try {
+      onClose?.();
+    } catch (err) {
+      log?.warn({ err: String(err?.message || err) }, 'fridaySpeak: onClose threw');
+    }
   });
 
   child.unref();
@@ -190,9 +219,13 @@ function pick(arr) {
  * Speak a random startup greeting (gateway or pc-agent).
  * @param {'gateway'|'agent'} [which]
  * @param {import('pino').Logger} [log]
+ * @param {{ onClose?: () => void }} [chainOpts]  e.g. start startup song after welcome TTS exits
  */
-export function speakGatewayStartup(log, which = 'gateway') {
-  speakFridayPy(pick(which === 'agent' ? pcAgentStartupPool() : gatewayStartupPool()), log);
+export function speakGatewayStartup(log, which = 'gateway', chainOpts = {}) {
+  speakFridayPy(pick(which === 'agent' ? pcAgentStartupPool() : gatewayStartupPool()), log, {
+    bypassCursorDefer: true,
+    onClose: chainOpts.onClose,
+  });
 }
 
 /**
@@ -211,7 +244,7 @@ export function speakTaskDone(summary, log) {
  * @param {import('pino').Logger} [log]
  */
 export function speakAlexaLaunch(log) {
-  speakFridayPy(pick(alexaLaunchPhrases()), log);
+  speakFridayPy(pick(alexaLaunchPhrases()), log, { bypassCursorDefer: true });
 }
 
 /**
@@ -219,5 +252,5 @@ export function speakAlexaLaunch(log) {
  * @param {import('pino').Logger} [log]
  */
 export function speakAlexaCommand(log) {
-  speakFridayPy(pick(alexaCommandPhrases()), log);
+  speakFridayPy(pick(alexaCommandPhrases()), log, { bypassCursorDefer: true });
 }

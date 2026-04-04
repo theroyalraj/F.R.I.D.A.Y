@@ -7,13 +7,24 @@ alwaysApply: true
 
 You are working inside the OpenClaw repo. As you work, **speak status out loud** through `friday-speak.py` so the user hears what you are doing in real time — no silent grinding. (Their spoken name comes from `FRIDAY_USER_NAME` in `.env`.)
 
-## Speak command (always background, never blocking)
+## Speak command (ALWAYS async — NEVER block on it)
 
 ```powershell
-cd d:\code\openclaw; python skill-gateway/scripts/friday-speak.py "your status text here"
+Start-Process python -ArgumentList "skill-gateway/scripts/friday-speak.py", "your status text here" -WorkingDirectory d:\code\openclaw -NoNewWindow -PassThru -Environment @{FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'}
 ```
 
-Use `block_until_ms: 0` so the speak never blocks your work.
+Or the short form using PowerShell background job:
+
+```powershell
+cd d:\code\openclaw; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; Start-Job { python skill-gateway/scripts/friday-speak.py "your status text here" } | Out-Null
+```
+
+**⚠️ RULE: Every single `friday-speak.py` invocation MUST be fire-and-forget.**
+- NEVER `await`, NEVER block, NEVER wait for the process to exit before continuing.
+- Use PowerShell `Start-Process` (no `-Wait`) or append `; exit 0` and background it.
+- The Bash equivalent: append ` &` to run in background — e.g. `python .../friday-speak.py "text" &`
+- If running via Bash tool: always use `run_in_background: true` on any TTS command, OR append ` &` to the shell command.
+- Blocking on TTS freezes your work loop — this is never acceptable.
 
 ---
 
@@ -22,7 +33,7 @@ Use `block_until_ms: 0` so the speak never blocks your work.
 After **every** substantive task — code change, fix, refactor, investigation, install, debug session — you **MUST** run this before your final text reply. No exceptions. No skipping. No forgetting.
 
 ```powershell
-cd d:\code\openclaw; python skill-gateway/scripts/friday-speak.py "Done. [verbose summary of everything changed]."
+cd d:\code\openclaw; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "Done. [verbose summary of everything changed]."
 ```
 
 ### How to write the completion summary
@@ -93,7 +104,7 @@ speak → "All done. [verbose summary]."
 
 **Subagent voice (mandatory in subagent prompts):** each Task subagent must use the teen / young-adult pool only. Tell the subagent to run pick and speak with:
 
-`$env:FRIDAY_TTS_SESSION='subagent'` and `pick-session-voice.py --subagent` before any `friday-speak.py`, and the same env on every `friday-speak.py` call. Main Cursor chat uses `FRIDAY_TTS_VOICE` from the environment (Jarvis by default); subagents stay on the separate sticky teen pool.
+`$env:FRIDAY_TTS_SESSION='subagent'` and `pick-session-voice.py --subagent` before any `friday-speak.py`, and the same env plus `FRIDAY_TTS_BYPASS_CURSOR_DEFER=true` on every `friday-speak.py` call. Main Cursor chat uses `FRIDAY_TTS_VOICE` from the environment (Jarvis by default); subagents stay on the separate sticky teen pool.
 
 ---
 

@@ -25,7 +25,7 @@ The spoken summary **must match reality**. If you speak "Done. Updated silence t
 ```powershell
 # 1. Read the relevant file (Read tool) — ALWAYS do this first
 # 2. Then speak the summary based on what you actually confirmed
-cd d:\code\openclaw; python skill-gateway/scripts/friday-speak.py "Done. [confirmed summary]."
+cd d:\code\openclaw; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "Done. [confirmed summary]."
 ```
 
 **The spoken summary must be derived from what you read, not from memory of what you intended to write.**

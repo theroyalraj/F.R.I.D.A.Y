@@ -9,6 +9,8 @@ Live data sources (no API keys required unless noted):
     when the match is over or on a rest day, behaviour returns to normal. Without CricAPI key,
     the calendar window alone controls special mode (match-over cannot be detected).
   - While special mode on: ~50% IPL-focused Google News headlines vs general cricket RSS (FRIDAY_IPL_HEADLINE_RATIO).
+    When no IPL match is live (CricAPI) or IPL mode is off, cricket headlines and cricket-heavy queue lines are skipped
+    so ambient returns to tech, science, news, and other interests.
     Headlines, scores, CricAPI JSON, and IPL on/off are cached in Redis with tunable TTLs.
   - ESPN Cricinfo RSS (English), Amar Ujala cricket RSS (Hindi), Google News IPL feeds
   - Optional: CRICAPI_API_KEY — live scores, match_info commentary snippet, off-season IPL detection
@@ -106,6 +108,20 @@ REDIS_URL           = os.environ.get("FRIDAY_AMBIENT_REDIS_URL", "redis://127.0.
 NEWS_API_KEY        = os.environ.get("NEWS_API_KEY", "").strip()
 AI_MODEL            = os.environ.get("FRIDAY_AMBIENT_AI_MODEL", "claude-haiku-4-5").strip()
 ANTHROPIC_KEY       = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+
+# Spoken-line dedup window (exact SQLite match + semantic compare vs spoken_log); default one day
+try:
+    SPOKEN_DEDUP_SEC = int(os.environ.get("FRIDAY_AMBIENT_SPOKEN_DEDUP_SEC", str(86400)))
+except ValueError:
+    SPOKEN_DEDUP_SEC = 86400
+SPOKEN_DEDUP_SEC = max(3600, SPOKEN_DEDUP_SEC)
+
+# Redis TTL for cached Haiku lines per topic key; default one day (was four hours)
+try:
+    AI_LINE_CACHE_SEC = int(os.environ.get("FRIDAY_AMBIENT_AI_LINE_CACHE_SEC", str(86400)))
+except ValueError:
+    AI_LINE_CACHE_SEC = 86400
+AI_LINE_CACHE_SEC = max(3600, AI_LINE_CACHE_SEC)
 
 USER_NAME      = os.environ.get("FRIDAY_USER_NAME",      "Raj").strip() or "Raj"
 USER_AGE       = os.environ.get("FRIDAY_USER_AGE",       "").strip()
@@ -384,8 +400,8 @@ PLAY_SCRIPT   = ROOT / "skill-gateway" / "scripts" / "friday-play.py"
 
 # Sub-agent child voice — slightly different rate/pitch so parallel worker
 # announcements feel distinct from main Friday deliveries
-SUB_VOICE_RATE  = os.environ.get("FRIDAY_AMBIENT_SUB_VOICE_RATE",  "+12%")
-SUB_VOICE_PITCH = os.environ.get("FRIDAY_AMBIENT_SUB_VOICE_PITCH", "-8Hz")
+SUB_VOICE_RATE  = os.environ.get("FRIDAY_AMBIENT_SUB_VOICE_RATE",  "+9%")
+SUB_VOICE_PITCH = os.environ.get("FRIDAY_AMBIENT_SUB_VOICE_PITCH", "+3Hz")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1316,6 +1332,8 @@ def generate_line_ai(
     # -- Try cached line first
     _hi_flag = int(cin) if mode == "cricket" else 0
     _raw_comm = (live_data.get("cricket_commentary") or "").strip()
+    if not _ipl_speech_on:
+        _raw_comm = ""
     _comm_h = hashlib.md5(_raw_comm.encode()).hexdigest()[:12] if mode == "cricket" and _raw_comm else ""
     cache_key = "friday:ambient:content_cache:" + hashlib.sha256(
         f"{topic}|{mode}|{USER_INTERESTS}|{_hi_flag}|{_comm_h}".encode()
@@ -1327,8 +1345,10 @@ def generate_line_ai(
     except Exception:
         pass
 
-    # -- Compose prompt context from live data
+    # -- Compose prompt context from live data (no cricket feeds when IPL not live)
     cricket_line = live_data.get("cricket")
+    if not _ipl_speech_on:
+        cricket_line = None
     if mode == "cricket" and _raw_comm:
         if cricket_line:
             cricket_line = f"{cricket_line}\n\nLatest from the field (feed): {_raw_comm}"
@@ -1408,6 +1428,10 @@ def generate_line_ai(
             "The fact that this exists in the same year as four Marvel films is objectively funny.'\n\n"
             "The raw data is your FUEL. Your reaction is the OUTPUT. "
             "Always add one layer: interpretation, context, opinion, or implication.\n\n"
+
+            "NOVELTY — never sound like a rerun: vary domains and angles each time (science, space, history, "
+            "language, psychology, startups, tech, culture). Teach something fresh; do not parrot the same "
+            "setup, punchline shape, or headline rhythm you used in a recent aside.\n\n"
 
             # ── Opener ───────────────────────────────────────────────────────
             "OPENER — start mid-thought, vary every single turn:\n"
@@ -1500,8 +1524,13 @@ def generate_line_ai(
                     f"Natural opener. 25–40 words."
                 )
             else:
+                fact_domains = (
+                    "tech, science, history, cricket, or AI"
+                    if _ipl_speech_on
+                    else "tech, science, history, AI, biology, or geography"
+                )
                 prompt = (
-                    f"Share one genuinely surprising fact — tech, science, history, cricket, or AI. "
+                    f"Share one genuinely surprising fact — {fact_domains}. "
                     f"Something that makes {USER_NAME} go 'huh, didn't know that'. "
                     f"Natural opener. 25–35 words."
                 )
@@ -1515,8 +1544,13 @@ def generate_line_ai(
                     f"Start like you just thought of it. Land the punchline clean. 20–30 words."
                 )
             else:
+                funny_topics = (
+                    "tech, cricket, Hyderabad life, startups, or AI"
+                    if _ipl_speech_on
+                    else "tech, Hyderabad life, startups, AI, science, or everyday absurdities"
+                )
                 prompt = (
-                    f"Short funny observation for {USER_NAME} — tech, cricket, Hyderabad life, startups, or AI. "
+                    f"Short funny observation for {USER_NAME} — {funny_topics}. "
                     f"One sharp joke or dry one-liner. "
                     f"Natural opener, like it just occurred to you. 20–30 words."
                 )
@@ -1630,9 +1664,13 @@ def generate_line_ai(
                     + ("50–70 words — give it proper context." if verbose else "25–40 words.")
                 )
             else:
+                trend_ctx = (
+                    "tech, entertainment, Bollywood, cricket, or Indian internet culture"
+                    if _ipl_speech_on
+                    else "tech, entertainment, Bollywood, or Indian internet culture"
+                )
                 prompt = (
-                    f"Share something that's trending or going viral right now in tech, entertainment, "
-                    f"Bollywood, cricket, or Indian internet culture. "
+                    f"Share something that's trending or going viral right now in {trend_ctx}. "
                     f"Something fans are going crazy about. Natural opener. 25–40 words."
                 )
 
@@ -1669,7 +1707,7 @@ def generate_line_ai(
             if line:
                 _anthropic_ok = True
                 try:
-                    r.setex(cache_key, 4 * 3600, line)
+                    r.setex(cache_key, AI_LINE_CACHE_SEC, line)
                 except Exception:
                     pass
                 _redis_push_recent_topic(r, topic)
@@ -1731,7 +1769,7 @@ def generate_line_ai(
             f"Completely unprompted, but — {fact_line}. There you go.",
             f"Okay this is actually interesting — {fact_line}.",
         ])
-    elif cricket_line and random.random() < 0.35:
+    elif _ipl_speech_on and cricket_line and random.random() < 0.35:
         if cin:
             line = random.choice([
                 f"और हाँ क्रिकेट — {cricket_line}. तुम्हें पता होना चाहिए।",
@@ -1924,6 +1962,10 @@ def pick_mode() -> str:
             return "informational"
         return TONE
 
+    # When IPL is not live, nudge toward science / history / news instead of filler-only modes
+    if not _ipl_speech_on and random.random() < 0.07:
+        return random.choice(("science", "history", "informational", "space"))
+
     # Song moment: inject based on SONG_CHANCE — but never if music already playing
     if random.random() < SONG_CHANCE and not _is_music_playing():
         hour = time.localtime().tm_hour
@@ -2096,6 +2138,14 @@ def _redis_recent_topics(r) -> list[str]:
 # -- Line-level deduplication (never repeat the same spoken line) -------------
 _DEDUP_KEY    = "friday:ambient:recent_lines"
 _DEDUP_WINDOW = 30   # remember last 30 spoken lines
+_RECENT_TEXT_KEY = "friday:ambient:recent_lines_text"  # raw text for semantic similarity
+
+try:
+    _SIMILARITY_SKIP = float(os.environ.get("FRIDAY_AMBIENT_SIMILARITY_SKIP", "0.7"))
+except ValueError:
+    _SIMILARITY_SKIP = 0.7
+_SIMILARITY_SKIP = min(0.99, max(0.35, _SIMILARITY_SKIP))
+_SEM_MIN_TOKENS = 4   # below this, rely on exact hash dedup only
 
 
 # -- Redis distributed TTS lock -----------------------------------------------
@@ -2173,8 +2223,73 @@ def _mark_spoken(r, line: str) -> None:
     try:
         r.lpush(_DEDUP_KEY, key)
         r.ltrim(_DEDUP_KEY, 0, _DEDUP_WINDOW - 1)
+        # Paraphrase detection: keep trimmed plaintext alongside hashes
+        snippet = line.strip()[:600]
+        if snippet:
+            r.lpush(_RECENT_TEXT_KEY, snippet)
+            r.ltrim(_RECENT_TEXT_KEY, 0, _DEDUP_WINDOW - 1)
     except Exception:
         pass
+
+
+def _tokens_for_similarity(text: str) -> set[str]:
+    """Word-ish tokens for Dice overlap (works for Latin and Devanagari)."""
+    words = re.findall(r"[\w']+", (text or "").lower(), flags=re.UNICODE)
+    return {w for w in words if len(w) >= 2}
+
+
+def _dice_similarity(a: set[str], b: set[str]) -> float:
+    if not a or not b:
+        return 0.0
+    inter = len(a & b)
+    if inter == 0:
+        return 0.0
+    return (2.0 * inter) / (len(a) + len(b))
+
+
+def _line_similarity_score(candidate: str, previous: str) -> float:
+    ca = _tokens_for_similarity(candidate)
+    pb = _tokens_for_similarity(previous)
+    if len(ca) < _SEM_MIN_TOKENS or len(pb) < _SEM_MIN_TOKENS:
+        return 0.0
+    return _dice_similarity(ca, pb)
+
+
+def _too_similar_to_recent_texts(candidate: str, texts: list[str]) -> bool:
+    for prev in texts:
+        if not prev or not prev.strip():
+            continue
+        if _line_similarity_score(candidate, prev) > _SIMILARITY_SKIP:
+            return True
+    return False
+
+
+def _was_semantically_redundant(r, conn: sqlite3.Connection, line: str) -> bool:
+    """
+    Skip speaking if this line is too close (Dice token overlap) to recent ambient lines.
+    Threshold FRIDAY_AMBIENT_SIMILARITY_SKIP defaults to 0.7 — higher = stricter dedup.
+    Compares against spoken_log back FRIDAY_AMBIENT_SPOKEN_DEDUP_SEC (default one day).
+    """
+    recent_redis: list[str] = []
+    try:
+        recent_redis = [str(x) for x in r.lrange(_RECENT_TEXT_KEY, 0, _DEDUP_WINDOW - 1) if x]
+    except Exception:
+        pass
+    if _too_similar_to_recent_texts(line, recent_redis):
+        return True
+    try:
+        with _db_lock:
+            rows = conn.execute(
+                "SELECT text FROM spoken_log WHERE ts > ? AND source LIKE 'ambient%' "
+                "ORDER BY id DESC LIMIT 200",
+                (time.time() - SPOKEN_DEDUP_SEC,),
+            ).fetchall()
+        db_texts = [str(row[0]) for row in rows if row and row[0]]
+        if _too_similar_to_recent_texts(line, db_texts):
+            return True
+    except Exception:
+        pass
+    return False
 
 
 # -- TTS ----------------------------------------------------------------------
@@ -2461,7 +2576,10 @@ def refill_content_queue(conn, r) -> None:
                 topic, line, mode = result
                 log_ambient_content(conn, topic, line, mode, spoken=False)
                 try:
-                    r.lpush(key, line)
+                    r.lpush(
+                        key,
+                        json.dumps({"v": 1, "mode": mode, "line": line}, ensure_ascii=False),
+                    )
                 except Exception:
                     pass
 
@@ -2584,7 +2702,9 @@ def main() -> None:
                         if moment:
                             line = moment["spoken"]
                             # Dedup check
-                            if not _was_recently_spoken(r, line):
+                            if not _was_recently_spoken(r, line) and not _was_semantically_redundant(
+                                r, conn, line
+                            ):
                                 last_ambient = time.time()
                                 _mark_spoken(r, line)
                                 d1 = int(speak_blocking(line) * 1000)
@@ -2612,11 +2732,29 @@ def main() -> None:
                     # filled by non-song modes only)
                     line = None
                     if not (mode == "cricket" and _cricket_hindi_live_ambient()):
-                        try:
-                            raw = r.rpop("friday:ambient:content_queue")
-                            line = raw if isinstance(raw, str) else None
-                        except Exception:
-                            pass
+                        for _q_attempt in range(5):
+                            try:
+                                raw = r.rpop("friday:ambient:content_queue")
+                            except Exception:
+                                raw = None
+                            if not raw:
+                                break
+                            parsed: dict[str, Any] | None = None
+                            if isinstance(raw, str):
+                                try:
+                                    parsed = json.loads(raw)
+                                except (json.JSONDecodeError, TypeError):
+                                    parsed = None
+                            if isinstance(parsed, dict) and parsed.get("line"):
+                                qmode = str(parsed.get("mode") or "")
+                                ql = str(parsed.get("line") or "").strip()
+                                if qmode == "cricket" and not _ipl_speech_on:
+                                    continue
+                                line = ql
+                                break
+                            if isinstance(raw, str) and raw.strip():
+                                line = raw.strip()
+                                break
 
                     # Verbose mode: 30% of turns get longer storytelling output
                     verbose = random.random() < VERBOSE_RATIO
@@ -2632,15 +2770,23 @@ def main() -> None:
                         log.debug("Dedup: skipping recently spoken line.")
                         continue
 
-                    # Dedup: skip if spoken in the last 2 hours (SQLite)
+                    # Semantic dedup: skip paraphrases too close to recent ambient (Dice token overlap)
+                    if _was_semantically_redundant(r, conn, line):
+                        log.debug(
+                            "Semantic dedup: skipping line (overlap > %.0f%%).",
+                            _SIMILARITY_SKIP * 100,
+                        )
+                        continue
+
+                    # Dedup: skip if same text spoken within SPOKEN_DEDUP_SEC (SQLite, default one day)
                     try:
                         with _db_lock:
                             row = conn.execute(
                                 "SELECT 1 FROM spoken_log WHERE text=? AND ts > ? LIMIT 1",
-                                (line, time.time() - 7200),
+                                (line, time.time() - SPOKEN_DEDUP_SEC),
                             ).fetchone()
                         if row:
-                            log.debug("SQLite dedup: skipping line spoken in last 2h.")
+                            log.debug("SQLite dedup: skipping line spoken within dedup window.")
                             continue
                     except Exception:
                         pass

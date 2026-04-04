@@ -1,8 +1,8 @@
 """
 Windows foreground process helper — yield mic/TTS when the IDE has focus.
 
-Used by friday-listen and friday-ambient so dictation or chat to Cursor is not
-competed with by Friday.
+Used by friday-listen, friday-ambient, and friday-speak (optional) so dictation
+or Cursor voice mode is not competed with by Friday.
 """
 from __future__ import annotations
 

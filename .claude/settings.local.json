@@ -52,7 +52,29 @@
       "Bash(openclaw --dev configure --section model)",
       "Bash(openclaw --dev agent --agent dev -m \"say hello\" --json)",
       "Bash(himalaya --version)",
-      "Bash(gog --version)"
+      "Bash(gog --version)",
+      "Bash(findstr \":3847 \\\\|:3848 \")",
+      "Bash(python -c \"import edge_tts; import asyncio; asyncio.run\\(edge_tts.list_voices\\(\\)\\)\")",
+      "Bash(curl -s --max-time 5 https://speech.platform.bing.com)",
+      "Bash(powershell -Command \"Add-Type -AssemblyName System.Speech; \\(New-Object System.Speech.Synthesis.SpeechSynthesizer\\).GetInstalledVoices\\(\\) | ForEach-Object { $_.VoiceInfo.Name + '' | '' + $_.VoiceInfo.Culture }\")",
+      "Bash(powershell -NoProfile -Command \"Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.SelectVoice\\(''Microsoft David Desktop''\\); $s.Speak\\(''Systems online. Jarvis at your service, Raj.''\\)\")",
+      "Bash(winget install:*)",
+      "Bash(cargo install:*)",
+      "Bash(pip install:*)",
+      "Bash(python D:/code/openclaw/scripts/gmail.py unread --count 3)",
+      "Bash(curl -s -X POST http://127.0.0.1:3847/voice/speak -H \"Content-Type: application/json\" -d \"{\"\"text\"\": \"\"Hello Raj, this is Friday speaking. TTS is working correctly. Priority voice online.\"\"}\")",
+      "Bash(curl -s http://127.0.0.1:3847/)",
+      "Bash(curl -s -X POST http://127.0.0.1:3847/voice/tts -H \"Content-Type: application/json\" -d \"{\"\"text\"\": \"\"Hello Raj, this is Friday speaking. T T S is working correctly. Priority voice online.\"\"}\" -w \"\\\\nHTTP %{http_code}\")",
+      "Bash(agent)",
+      "Bash(rule)",
+      "Bash(soul)",
+      "Bash(cursor \")",
+      "Bash(GMAIL_ADDRESS=rajut@gmail.com GMAIL_APP_PWD=wfjhiaktdcjqwlb python scripts/gmail.py unread --count 5)",
+      "Bash(python scripts/gmail.py unread --count 5)",
+      "Bash(python scripts/gmail.py list --count 3)",
+      "Bash(python -c \"import PIL; print\\(''PIL ok''\\); import mss; print\\(''mss ok''\\)\")",
+      "Bash(python scripts/narrate-screen.py --silent)",
+      "Bash(curl -s http://127.0.0.1:8181/)"
     ]
   }
 }

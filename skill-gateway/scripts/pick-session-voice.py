@@ -10,7 +10,7 @@ How it works:
   5. Prints the chosen voice name to stdout.
 
 Voice policy (main Cursor chat — default):
-  • Uses FRIDAY_TTS_VOICE from the environment (Jarvis / Ryan by default), except each new chat
+  • Uses FRIDAY_TTS_VOICE from the environment (Emma multilingual by default), except each new chat
     has a 50% chance to pick a Hindi or Hinglish-suited Edge voice instead (hi-IN or en-IN neural).
 
 Optional party mode:
@@ -37,6 +37,19 @@ from pathlib import Path
 
 from friday_greeting_delivery import sample_greeting_rate_pitch
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+_ENV_FILE = _REPO_ROOT / ".env"
+if _ENV_FILE.exists():
+    for line in _ENV_FILE.read_text(encoding="utf-8").splitlines():
+        t = line.strip()
+        if not t or t.startswith("#") or "=" not in t:
+            continue
+        k, _, rest = t.partition("=")
+        k = k.strip()
+        v = rest.split("#", 1)[0].strip().strip('"').strip("'")
+        if k and k not in os.environ:
+            os.environ[k] = v
+
 # ── Voice pools ────────────────────────────────────────────────────────────────
 # Child: Edge Ana — toddler / small-child timbre (rare in main chat only).
 CHILD_VOICE = "en-US-AnaNeural"
@@ -61,27 +74,34 @@ HINDI_HINGLISH_POOL = [
     "en-IN-PrabhatNeural",
 ]
 
+# Voices Raj never wants to hear — checked against all pools at pick time.
+_BLOCKED_VOICES = {v.strip() for v in os.environ.get("FRIDAY_TTS_VOICE_BLOCK", "").split(",") if v.strip()}
+_BLOCKED_VOICES |= {
+    "en-AU-WilliamNeural",
+    "en-AU-WilliamMultilingualNeural",
+}
+
 # Main chat adults — balanced Jarvis / FRIDAY style; excludes Ana and teen-only voices.
-ADULT_POOL = [
-    "en-GB-RyanNeural",
-    "en-GB-ThomasNeural",
+ADULT_POOL = [v for v in [
+    "en-US-EmmaMultilingualNeural",
+    "en-US-AndrewMultilingualNeural",
+    "en-US-BrianMultilingualNeural",
+    "en-US-RogerNeural",
     "en-GB-SoniaNeural",
     "en-GB-LibbyNeural",
     "en-US-GuyNeural",
     "en-US-EricNeural",
     "en-US-JennyNeural",
     "en-US-AriaNeural",
-    "en-AU-WilliamNeural",
     "en-AU-NatashaNeural",
     "en-IE-ConnorNeural",
     "en-CA-LiamNeural",
     "en-CA-ClaraNeural",
     "en-IN-PrabhatNeural",
     "en-IN-NeerjaExpressiveNeural",
-]
+] if v not in _BLOCKED_VOICES]
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
-_REPO_ROOT        = Path(__file__).resolve().parent.parent.parent
 _STATE_FILE       = _REPO_ROOT / ".session-voice.json"
 _SPEAK_SCRIPT     = Path(__file__).resolve().parent / "friday-speak.py"
 _TRANSCRIPTS_ROOT = Path(os.environ.get(
@@ -153,19 +173,37 @@ def _pick_from_pool_excluding(pool: list[str], last_voice: str) -> str:
     return random.choice(choices)
 
 
+def _hindi_hinglish_candidates() -> list[str]:
+    return [v for v in HINDI_HINGLISH_POOL if v not in _BLOCKED_VOICES]
+
+
+def _env_main_voice_raw() -> str:
+    return os.environ.get("FRIDAY_TTS_VOICE", "en-US-EmmaMultilingualNeural").strip() or "en-US-EmmaMultilingualNeural"
+
+
 def _pick_main_chat_voice(state: dict) -> str:
     last_voice = state.get("voice", "")
     use_hindi_hinglish = random.random() < 0.5
 
     if use_hindi_hinglish:
-        return _pick_from_pool_excluding(HINDI_HINGLISH_POOL, last_voice)
+        hh = _hindi_hinglish_candidates()
+        if hh:
+            return _pick_from_pool_excluding(hh, last_voice)
+        # Blocked or empty — fall through to English paths
 
     if _main_random_voices_enabled():
-        if random.randint(1, CHILD_ROLL_MAX) == 1:
+        if CHILD_VOICE not in _BLOCKED_VOICES and random.randint(1, CHILD_ROLL_MAX) == 1:
             return CHILD_VOICE
-        return _pick_from_pool_excluding(ADULT_POOL, last_voice)
+        if ADULT_POOL:
+            return _pick_from_pool_excluding(ADULT_POOL, last_voice)
+        return _env_main_voice_raw()
 
-    return os.environ.get("FRIDAY_TTS_VOICE", "en-GB-RyanNeural").strip() or "en-GB-RyanNeural"
+    preferred = _env_main_voice_raw()
+    if preferred not in _BLOCKED_VOICES:
+        return preferred
+    if ADULT_POOL:
+        return _pick_from_pool_excluding(ADULT_POOL, last_voice)
+    return "en-US-EmmaMultilingualNeural"
 
 
 def _jarvis_greeting_env(voice: str) -> dict:
@@ -221,10 +259,19 @@ def pick_voice(*, subagent: bool = False) -> str:
             and state.get("subagent_voice")
         )
         if not is_new:
-            return state["subagent_voice"]
+            cur = state.get("subagent_voice", "")
+            if cur in _BLOCKED_VOICES:
+                last_voice = state.get("subagent_voice", "")
+                pool = [v for v in TEEN_POOL if v not in _BLOCKED_VOICES]
+                pool = [v for v in pool if v != last_voice] or pool or TEEN_POOL
+                new_voice = random.choice(pool)
+                state["subagent_voice"] = new_voice
+                _save_state(state)
+                return new_voice
+            return cur
 
         last_voice = state.get("subagent_voice", "")
-        pool       = [v for v in TEEN_POOL if v != last_voice] or TEEN_POOL
+        pool       = [v for v in TEEN_POOL if v != last_voice and v not in _BLOCKED_VOICES] or TEEN_POOL
         new_voice  = random.choice(pool)
         state["subagent_chat_id"] = chat_id
         state["subagent_voice"]   = new_voice
@@ -234,7 +281,13 @@ def pick_voice(*, subagent: bool = False) -> str:
     # ── Main chat ─────────────────────────────────────────────────────────────
     is_new = not (chat_id and state.get("chat_id") == chat_id and state.get("voice"))
     if not is_new:
-        return state["voice"]
+        cur = state.get("voice", "")
+        if cur in _BLOCKED_VOICES:
+            new_voice = _pick_main_chat_voice(state)
+            state["voice"] = new_voice
+            _save_state(state)
+            return new_voice
+        return cur
 
     new_voice = _pick_main_chat_voice(state)
 

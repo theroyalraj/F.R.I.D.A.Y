@@ -204,10 +204,12 @@
       border: 1px solid var(--stroke);
       opacity: 0.6;
       transition: transform 0.4s ease, opacity 0.4s ease, border-color 0.4s;
+      z-index: 0;
     }
     .orb-core {
       position: absolute;
       inset: 0;
+      z-index: 1;
       border-radius: 50%;
       background:
         radial-gradient(circle at 35% 30%, rgba(255,255,255,0.25), transparent 45%),
@@ -273,6 +275,64 @@
     .orb-wrap[data-state="listening"] + .state-label { color: var(--cyan); }
     .orb-wrap[data-state="thinking"]  + .state-label { color: var(--think); }
     .orb-wrap[data-state="speaking"]  + .state-label { color: var(--magenta); }
+
+    /* Stop control overlaid on orb (speaking / thinking) */
+    .orb-stop {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      z-index: 10;
+      width: 3rem;
+      height: 3rem;
+      border-radius: 50%;
+      border: 2px solid rgba(248, 113, 113, 0.55);
+      background: rgba(15, 20, 35, 0.72);
+      color: #fecaca;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.25s ease, transform 0.2s ease, border-color 0.2s, box-shadow 0.2s;
+      -webkit-tap-highlight-color: transparent;
+      box-shadow: 0 4px 24px rgba(0, 0, 0, 0.35);
+    }
+    body:not(.dark) .orb-stop {
+      background: rgba(255, 255, 255, 0.88);
+      color: #b91c1c;
+      border-color: rgba(220, 38, 38, 0.45);
+    }
+    .orb-stop:hover {
+      border-color: rgba(248, 113, 113, 0.9);
+      box-shadow: 0 0 20px rgba(248, 113, 113, 0.25);
+    }
+    .orb-stop:focus-visible {
+      outline: 2px solid var(--cyan);
+      outline-offset: 3px;
+    }
+    .orb-stop .orb-stop-icon {
+      width: 0.85rem;
+      height: 0.85rem;
+      border-radius: 2px;
+      background: currentColor;
+    }
+    .orb-wrap[data-state="listening"] .orb-stop,
+    .orb-wrap[data-state="speaking"] .orb-stop,
+    .orb-wrap[data-state="thinking"] .orb-stop {
+      opacity: 1;
+      pointer-events: auto;
+    }
+    .orb-wrap[data-state="listening"] .orb-stop {
+      border-color: rgba(14, 165, 233, 0.55);
+      box-shadow: 0 4px 20px rgba(14, 165, 233, 0.2);
+    }
+    body.dark .orb-wrap[data-state="listening"] .orb-stop {
+      border-color: rgba(62, 224, 255, 0.55);
+      box-shadow: 0 4px 24px rgba(62, 224, 255, 0.18);
+    }
 
     .hint {
       font-size: 0.72rem;
@@ -365,6 +425,22 @@
       color: #dc2626;
     }
     body.dark button.ctrl.danger { color: #fca5a5; }
+    /* Stop — distinct from End session so it stays visible in the row */
+    button.ctrl.stop-action {
+      border-color: rgba(245, 158, 11, 0.55);
+      color: #b45309;
+      background: linear-gradient(135deg, rgba(245, 158, 11, 0.12), rgba(251, 191, 36, 0.08));
+    }
+    body.dark button.ctrl.stop-action {
+      color: #fbbf24;
+      border-color: rgba(251, 191, 36, 0.45);
+      background: linear-gradient(135deg, rgba(245, 158, 11, 0.18), rgba(251, 191, 36, 0.06));
+    }
+    button.ctrl.stop-action:disabled {
+      opacity: 0.38;
+      cursor: not-allowed;
+      background: var(--ctrl-bg);
+    }
     button.ctrl:disabled { opacity: 0.4; cursor: not-allowed; }
 
     /* ── Settings panel ───────────────────────────────────── */
@@ -525,7 +601,7 @@
   <div class="wrap">
     <header>
       <h1>Friday</h1>
-      <p>Two-way voice: you speak &rarr; Friday runs your PC (apps + Claude) &rarr; she speaks back. <strong>While she talks, speak again to interrupt</strong> (or tap the orb).</p>
+      <p>Two-way voice: you speak &rarr; Friday runs your PC (apps + Claude) &rarr; she speaks back. <strong>While listening or speaking</strong>, use the amber <strong>Stop</strong> or the square on the orb — or speak again to interrupt her reply.</p>
       <p class="hint" id="ttsHint" style="margin-top: 0.35rem; max-width: 24rem"></p>
       <div class="model-bar">
         <label for="claudeModel">Claude model</label>
@@ -548,20 +624,24 @@
       <!-- Session voice badge — randomly assigned per browser tab -->
       <div class="session-voice-bar" id="sessionVoiceBar">
         <span class="sv-label">Session voice</span>
-        <span class="sv-badge" id="chatVoiceBadge" data-gender="male">Ryan · British · Male</span>
+        <span class="sv-badge" id="chatVoiceBadge" data-gender="female">Emma · US · Multilingual</span>
         <button type="button" class="sv-reroll" id="btnRerollVoice" title="Pick a different random voice for this session">&#x21BA;</button>
       </div>
     </header>
     <div class="stage">
-      <div class="orb-wrap" id="orb" data-state="idle" title="Tap to interrupt while speaking">
+      <div class="orb-wrap" id="orb" data-state="idle" title="Tap to skip mic turn, cancel thinking, or stop speech">
         <div class="orb-halo"></div>
         <div class="orb-core"></div>
+        <button type="button" class="orb-stop" id="orbStop" aria-label="Stop" title="Stop: skip mic, cancel request, or cut off speech">
+          <span class="orb-stop-icon" aria-hidden="true"></span>
+        </button>
       </div>
       <div class="state-label" id="stateLabel">Ready</div>
       <p class="hint" id="hint">Start a session to enable the microphone. Works best in Chrome or Edge on this PC.</p>
       <div class="transcript" id="transcript" aria-live="polite"></div>
       <div class="controls">
         <button type="button" class="ctrl primary" id="btnSession">Begin session</button>
+        <button type="button" class="ctrl stop-action" id="btnStop" disabled aria-label="Stop mic turn, cancel thinking, or stop speech">Stop</button>
         <button type="button" class="ctrl danger" id="btnEnd" disabled>End session</button>
       </div>
       <details class="panel">
@@ -572,10 +652,10 @@
           <button type="button" class="ctrl primary" id="btnSend">Send typed</button>
 
           <div class="row-voice">
-            <label for="rate">Speech rate</label>
-            <input type="range" id="rate" min="0.7" max="1.35" step="0.05" value="0.95" />
+            <label for="rate">Speech rate (default 1.075×)</label>
+            <input type="range" id="rate" min="0.9" max="1.25" step="0.005" value="1.075" />
             <label for="pitch">Pitch</label>
-            <input type="range" id="pitch" min="0.85" max="1.15" step="0.05" value="1" />
+            <input type="range" id="pitch" min="0.9" max="1.2" step="0.05" value="1.05" />
           </div>
 
           <div class="row-voice-pick">
@@ -602,7 +682,9 @@
       const hint          = document.getElementById('hint');
       const transcript    = document.getElementById('transcript');
       const btnSession    = document.getElementById('btnSession');
+      const btnStop       = document.getElementById('btnStop');
       const btnEnd        = document.getElementById('btnEnd');
+      const orbStop       = document.getElementById('orbStop');
       const typed         = document.getElementById('typed');
       const btnSend       = document.getElementById('btnSend');
       const rateEl        = document.getElementById('rate');
@@ -620,8 +702,7 @@
 
       /* ── Session voice — one random voice per browser tab ───────────────── */
       const CHAT_VOICES = [
-        { voice: 'en-GB-RyanNeural',                   gender: 'Male',   label: 'Ryan · British · Male' },
-        { voice: 'en-GB-ThomasNeural',                 gender: 'Male',   label: 'Thomas · British · Male' },
+        { voice: 'en-US-EmmaMultilingualNeural',       gender: 'Female', label: 'Emma · US · Multilingual' },
         { voice: 'en-GB-LibbyNeural',                  gender: 'Female', label: 'Libby · British · Female' },
         { voice: 'en-GB-SoniaNeural',                  gender: 'Female', label: 'Sonia · British · Female' },
         { voice: 'en-US-GuyNeural',                    gender: 'Male',   label: 'Guy · US · Male' },
@@ -632,7 +713,6 @@
         { voice: 'en-US-NancyNeural',                  gender: 'Female', label: 'Nancy · US · Female' },
         { voice: 'en-IN-NeerjaExpressiveNeural',        gender: 'Female', label: 'Neerja · Indian · Female' },
         { voice: 'en-IN-PrabhatNeural',                gender: 'Male',   label: 'Prabhat · Indian · Male' },
-        { voice: 'en-AU-WilliamNeural',                gender: 'Male',   label: 'William · Australian · Male' },
         { voice: 'en-AU-NatashaNeural',                gender: 'Female', label: 'Natasha · Australian · Female' },
         { voice: 'en-CA-LiamNeural',                   gender: 'Male',   label: 'Liam · Canadian · Male' },
         { voice: 'en-CA-ClaraNeural',                  gender: 'Female', label: 'Clara · Canadian · Female' },
@@ -877,12 +957,56 @@
       let bargeRec    = null;
       let utterGen    = 0;
       let currentAudio= null;
+      let voiceCommandAbort = null;
+      let listenTurnGen     = 0;
 
       const labels = { idle: 'Ready', listening: 'Listening', thinking: 'Thinking', speaking: 'Speaking' };
+
+      function updateStopButton() {
+        const st = orb.dataset.state;
+        const canStop = agentActive && st !== 'idle';
+        btnStop.disabled = !canStop;
+      }
 
       function setOrb(state) {
         orb.dataset.state   = state;
         stateLabel.textContent = labels[state] || state;
+        updateStopButton();
+      }
+
+      /** Skip mic turn, abort in-flight command, or stop speech — then listen again if session on. */
+      function cancelVoiceAndTask() {
+        utterGen += 1;
+        cancelSpeech();
+        stopBargeRec();
+        const st = orb.dataset.state;
+
+        if (st === 'listening') {
+          listenTurnGen += 1;
+          stopRec();
+          if (agentActive && !busy) {
+            hint.textContent = 'Skipped that mic beat — listening again.';
+            setTimeout(() => {
+              if (agentActive && !busy) startListenTurn();
+            }, 200);
+          }
+          return;
+        }
+
+        stopRec();
+        if (voiceCommandAbort) {
+          try { voiceCommandAbort.abort(); } catch (_) {}
+          return;
+        }
+        if (st === 'speaking') {
+          busy = false;
+          if (agentActive) {
+            hint.textContent = 'Stopped. Listening…';
+            startListenTurn();
+          } else {
+            setOrb('idle');
+          }
+        }
       }
 
       /* Heuristic auto-pick — used when no voice is selected in the picker */
@@ -991,9 +1115,9 @@
 
       async function speakBrowserNatural(text, id, onEnd) {
         const chunks = splitSentences(text);
-        const gapMs  = 90;
-        const rate   = Math.min(1.05, Math.max(0.72, parseFloat(rateEl.value) * 0.93));
-        const pitch  = parseFloat(pitchEl.value) || 1;
+        const gapMs  = 70;
+        const rate   = Math.min(1.25, Math.max(0.9, parseFloat(rateEl.value) || 1.075));
+        const pitch  = Math.min(1.2, Math.max(0.9, parseFloat(pitchEl.value) || 1.05));
         for (const chunk of chunks) {
           if (id !== utterGen) return;
           const c = chunk.trim();
@@ -1051,6 +1175,7 @@
             const cleanup = () => { URL.revokeObjectURL(url); if (currentAudio === audio) currentAudio = null; };
             audio.onended = () => { cleanup(); done(); };
             audio.onerror = () => { cleanup(); done(); };
+            audio.playbackRate = Math.min(1.25, Math.max(0.9, parseFloat(rateEl.value) || 1.075));
             await audio.play();
             return;
           }
@@ -1077,6 +1202,11 @@
       async function runCommand(text, { fromVoice } = {}) {
         const t = (text || '').trim();
         if (!t) return;
+        if (fromVoice && agentActive && /^(stop|stop listening|cancel|never ?mind)\.?$/i.test(t)) {
+          hint.textContent = 'Okay — that was not sent. Listening again.';
+          startListenTurn();
+          return;
+        }
         if (busy && orb.dataset.state !== 'speaking') return;
         busy = true;
         addBubble('you', t);
@@ -1087,12 +1217,15 @@
           ? 'Thinking — Claude often needs 10–30s. Pick Haiku above for speed.'
           : 'Thinking — Claude often needs 10–30s.';
 
+        const ac = new AbortController();
+        voiceCommandAbort = ac;
         try {
           const r = await fetch(api('/voice/command'), {
             method : 'POST',
             headers: { 'Content-Type': 'application/json', ...tunnelHeaders },
             body   : JSON.stringify({ text: t, userId: 'friday-web', correlationId: crypto.randomUUID(), ...claudeModelBody() }),
             cache  : 'no-store',
+            signal : ac.signal,
           });
           const raw     = await r.text();
           const trimmed = raw.trim();
@@ -1112,12 +1245,25 @@
           const reply = typeof j.summary === 'string' ? j.summary : JSON.stringify(j);
           addBubble('agent', reply);
           setOrb('speaking');
-          hint.textContent = 'Speak to interrupt, or tap the orb.';
+          hint.textContent = 'Speak to interrupt, tap Stop, or tap the orb.';
           speak(reply, () => cycleAfterSpeech());
         } catch (e) {
+          if (e && e.name === 'AbortError') {
+            addBubble('agent', 'Stopped.');
+            busy = false;
+            if (agentActive) {
+              hint.textContent = 'Listening…';
+              startListenTurn();
+            } else {
+              setOrb('idle');
+            }
+            return;
+          }
           const msg = String(e.message || e);
           addBubble('agent', msg);
           speak('Connection failed.', () => cycleAfterSpeech());
+        } finally {
+          if (voiceCommandAbort === ac) voiceCommandAbort = null;
         }
       }
 
@@ -1133,6 +1279,7 @@
         if (!SR) { hint.textContent = 'Speech recognition not available in this browser.'; setOrb('idle'); return; }
         setOrb('listening');
         stopRec();
+        const myListen = listenTurnGen;
         let buffer = '';
         const r = new SR();
         r.lang = 'en-US';
@@ -1167,6 +1314,7 @@
         };
         r.onend = () => {
           rec = null;
+          if (myListen !== listenTurnGen) return;
           if (!agentActive || busy) return;
           const said = buffer.trim();
           buffer = '';
@@ -1183,15 +1331,19 @@
         }
       }
 
-      orb.addEventListener('click', () => {
-        if (orb.dataset.state === 'speaking') {
-          utterGen += 1;
-          cancelSpeech();
-          stopBargeRec();
-          busy = false;
-          if (agentActive) { hint.textContent = 'Interrupted. Listening…'; startListenTurn(); }
-          else              { setOrb('idle'); }
-        }
+      orb.addEventListener('click', (e) => {
+        if (e.target.closest('.orb-stop')) return;
+        const st = orb.dataset.state;
+        if (st === 'listening' || st === 'speaking' || st === 'thinking') cancelVoiceAndTask();
+      });
+
+      orbStop.addEventListener('click', (e) => {
+        e.stopPropagation();
+        cancelVoiceAndTask();
+      });
+
+      btnStop.addEventListener('click', () => {
+        cancelVoiceAndTask();
       });
 
       btnSession.addEventListener('click', () => {
@@ -1203,6 +1355,7 @@
         busy        = false;
         btnSession.disabled = true;
         btnEnd.disabled     = false;
+        updateStopButton();
         transcript.innerHTML = '';
         cancelSpeech();
         stopRec();
@@ -1219,6 +1372,7 @@
         cancelSpeech();
         btnSession.disabled = false;
         btnEnd.disabled     = true;
+        updateStopButton();
         setOrb('idle');
         hint.textContent = 'Session ended. Tap Begin when you want to continue.';
       });

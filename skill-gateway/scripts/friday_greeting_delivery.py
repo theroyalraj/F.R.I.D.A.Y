@@ -1,7 +1,7 @@
 """
 Rate/pitch for first-contact TTS only (session welcome, pc-agent boot, listen daemon start).
 
-Default: random within env bounds so delivery is not stuck on one slow cadence.
+Default: random within env bounds — biased slightly quick/brighter (≈1.075× tier).
 Set FRIDAY_TTS_JARVIS_RANDOM=false to use fixed FRIDAY_TTS_JARVIS_RATE / FRIDAY_TTS_JARVIS_PITCH.
 """
 
@@ -28,13 +28,13 @@ def _parse_int(name: str, default: int) -> int:
 def sample_greeting_rate_pitch() -> tuple[str, str]:
     if not _env_bool("FRIDAY_TTS_JARVIS_RANDOM", True):
         return (
-            os.environ.get("FRIDAY_TTS_JARVIS_RATE", "-5%"),
-            os.environ.get("FRIDAY_TTS_JARVIS_PITCH", "-2Hz"),
+            os.environ.get("FRIDAY_TTS_JARVIS_RATE", "+7.5%"),
+            os.environ.get("FRIDAY_TTS_JARVIS_PITCH", "+2Hz"),
         )
-    r_lo = _parse_int("FRIDAY_TTS_JARVIS_RATE_MIN_PCT", -10)
+    r_lo = _parse_int("FRIDAY_TTS_JARVIS_RATE_MIN_PCT", 3)
     r_hi = _parse_int("FRIDAY_TTS_JARVIS_RATE_MAX_PCT", 12)
-    p_lo = _parse_int("FRIDAY_TTS_JARVIS_PITCH_MIN_HZ", -6)
-    p_hi = _parse_int("FRIDAY_TTS_JARVIS_PITCH_MAX_HZ", 4)
+    p_lo = _parse_int("FRIDAY_TTS_JARVIS_PITCH_MIN_HZ", 0)
+    p_hi = _parse_int("FRIDAY_TTS_JARVIS_PITCH_MAX_HZ", 10)
     r_lo, r_hi = min(r_lo, r_hi), max(r_lo, r_hi)
     p_lo, p_hi = min(p_lo, p_hi), max(p_lo, p_hi)
     rp = random.randint(r_lo, r_hi)

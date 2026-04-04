@@ -7,8 +7,12 @@
 .PARAMETER SkipDocker
   Skip Docker steps; only free ports and start Node/Python services.
 
+.PARAMETER RestartRedis
+  Restart the Redis container (docker compose restart redis). Default: never touch a running Redis —
+  only n8n + redis-insight are reconciled so local app restarts do not bounce Redis.
+
 .PARAMETER NoKill
-  Do not stop ffplay, friday-play, node watchers, voice daemon, or free ports 3847/3848.
+  Do not stop ffplay, friday-play, voice daemon, or free ports 3847/3848.
   If gateway + agent already respond on /health, exits without starting anything.
   Otherwise starts via start.mjs with OPENCLAW_NO_FREE_PORTS so existing listeners are not killed.
 
@@ -16,9 +20,11 @@
   pwsh -File scripts/restart-local.ps1
   pwsh -File scripts/restart-local.ps1 -SkipDocker
   pwsh -File scripts/restart-local.ps1 -SkipDocker -NoKill
+  pwsh -File scripts/restart-local.ps1 -RestartRedis   # only when you want Redis bounced
 #>
 param(
   [switch] $SkipDocker,
+  [switch] $RestartRedis,
   [switch] $NoKill
 )
 
@@ -69,6 +75,13 @@ if ($NoKill) {
     Write-Host "  killed $($ffplayProcs.Count) ffplay process(es) (song/TTS stopped)"
   }
 
+  # friday-speak uses a renamed ffplay executable on Windows
+  $fridayPlayer = @(Get-Process -Name 'friday-player' -ErrorAction SilentlyContinue)
+  if ($fridayPlayer.Count -gt 0) {
+    $fridayPlayer | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
+    Write-Host "  killed $($fridayPlayer.Count) friday-player process(es) (Edge TTS playback)"
+  }
+
   Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
     Where-Object { $_.CommandLine -like '*friday-play*' -or $_.CommandLine -like '*yt_dlp*' } |
     ForEach-Object {
@@ -79,16 +92,9 @@ if ($NoKill) {
   $pidFile = Join-Path $env:TEMP "friday-play.pid"
   if (Test-Path $pidFile) { Remove-Item $pidFile -Force -ErrorAction SilentlyContinue }
 
-  Write-Host "Stopping any OpenClaw node watchers..."
-  Get-Process -Name node -ErrorAction SilentlyContinue | ForEach-Object {
-    try {
-      $cmd = (Get-CimInstance Win32_Process -Filter "ProcessId=$($_.Id)" -EA SilentlyContinue).CommandLine
-      if ($cmd -match 'server\.js|start\.mjs') {
-        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
-        Write-Host "  killed node watcher/server PID $($_.Id)"
-      }
-    } catch {}
-  }
+  # Do not scan-kill all node processes matching server.js/start.mjs — that also hits
+  # Docker Desktop, other IDEs, and unrelated apps. Local OpenClaw listeners are
+  # stopped via the port free step below.
 
   Write-Host "Freeing ports 3848 and 3847..."
   Stop-ListenersOnPort @(3848, 3847)
@@ -100,17 +106,68 @@ if ($NoKill) {
       Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
       Write-Host "  killed old voice daemon (PID $($_.ProcessId))"
     }
+
+  Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -like '*friday-ambient*' } |
+    ForEach-Object {
+      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+      Write-Host "  killed old ambient daemon (PID $($_.ProcessId))"
+    }
+
+  Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -like '*friday-speak*' } |
+    ForEach-Object {
+      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+      Write-Host "  killed stray TTS process (PID $($_.ProcessId))"
+    }
+
+  # Redis + temp files — stale friday:tts:lock or friday-tts-active can block all TTS after a crash
+  $clearLocks = Join-Path $root 'skill-gateway\scripts\clear_friday_locks.py'
+  if (Test-Path $clearLocks) {
+    Write-Host 'Clearing Friday Redis locks + temp TTS files...'
+    & python $clearLocks
+  }
 }
 
 # -- 3. Docker (optional) ----------------------------------------------------
+# Never run bare `docker compose up -d` — it can recreate Redis when the project reconciles.
+# Default: Redis is started only if missing or stopped (compose start or up -d redis); running Redis is never restarted.
 if (-not $SkipDocker) {
   Push-Location $root
-  Write-Host "Docker: compose up -d ..."
-  docker compose up -d
+  if ($RestartRedis) {
+    Write-Host "Docker: -RestartRedis — docker compose restart redis ..." -ForegroundColor Cyan
+    docker compose restart redis
+    if ($LASTEXITCODE -ne 0) {
+      Write-Warning "docker compose restart redis failed (exit $LASTEXITCODE)."
+    }
+  } else {
+    $redisId = (docker compose ps -q redis 2>$null | Select-Object -First 1).Trim()
+    if ([string]::IsNullOrWhiteSpace($redisId)) {
+      Write-Host "Docker: no redis container yet — docker compose up -d redis ..." -ForegroundColor Cyan
+      docker compose up -d redis
+      if ($LASTEXITCODE -ne 0) {
+        Write-Warning "docker compose up -d redis failed (exit $LASTEXITCODE)."
+      }
+    } else {
+      $running = (docker inspect -f '{{.State.Running}}' $redisId 2>$null).Trim().ToLowerInvariant()
+      if ($running -ne 'true') {
+        Write-Host "Docker: redis container stopped — starting (not recreating) ..." -ForegroundColor Cyan
+        docker compose start redis 2>$null
+        if ($LASTEXITCODE -ne 0) {
+          docker compose up -d redis
+        }
+        if ($LASTEXITCODE -ne 0) {
+          Write-Warning "Could not start redis (exit $LASTEXITCODE)."
+        }
+      } else {
+        Write-Host "Docker: redis already running — left untouched (use -RestartRedis to bounce it)." -ForegroundColor DarkGray
+      }
+    }
+  }
+  Write-Host "Docker: compose up -d n8n redis-insight ..."
+  docker compose up -d n8n redis-insight
   if ($LASTEXITCODE -ne 0) {
-    Write-Warning "docker compose up -d failed (exit $LASTEXITCODE)."
-  } elseif (-not $NoKill) {
-    docker compose restart
+    Write-Warning "docker compose up -d n8n redis-insight failed (exit $LASTEXITCODE)."
   }
   Pop-Location
 } else {
