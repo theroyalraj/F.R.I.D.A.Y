@@ -88,53 +88,90 @@ export function speakFridayPy(text, log) {
   }, fadeDelay);
 }
 
-// ── Phrase pools — all Jarvis / FRIDAY style, human not technical ─────────────
+// ── Phrase pools — conversational, varied, human feel ─────────────────────────
 
 const GATEWAY_STARTUP = [
-  "Good morning, sir. I've run the startup checks — everything looks good.",
-  "I'm back online, sir. Missed me?",
-  "All systems are running. Ready when you are, sir.",
-  "Good to be back, sir. What are we doing today?",
-  "I'm up, sir. All good on my end.",
-  "Welcome back. I'm fully operational, sir.",
-  "Good evening, sir. Shall we get to work?",
-  "I've completed the startup sequence, sir. Standing by.",
+  // casual / warm
+  "Back online, sir. Missed you.",
+  "Right, I'm up. What are we getting into today?",
+  "I'm here. Everything checked out on the way up — we're good.",
+  "Morning, sir. Coffee in hand, I hope — we've got work to do.",
+  "All good on my end. Whenever you're ready.",
+  "Up and running. World still standing, I assume.",
+  "Hey — I'm back. Give me something to do.",
+  "Online. Full power. Let's not waste it.",
+  // slightly wry
+  "I've run the checks. Nothing's on fire. You're welcome.",
+  "Startup complete. You know, one day I'll come up and something will actually be broken.",
+  "I'm here, sir. Try not to be too impressed by how fast that was.",
+  "Systems up. All the boring stuff worked. The fun part's on you.",
+  // dramatic / Jarvis-ish
+  "FRIDAY online. Ready to do something impressive, sir.",
+  "All systems nominal. Standing by for whatever chaos you've planned.",
+  "I've got eyes on everything. Nothing to worry about — yet.",
+  "Back in the game, sir. What's the first move?",
+  // concise
+  "Ready.",
+  "I'm up.",
+  "Online. Talk to me.",
+  "Here, sir. Go ahead.",
 ];
 
 const PC_AGENT_STARTUP = [
-  "Voice interface online, sir. I can hear you.",
-  "Ready to take your commands, sir.",
-  "I'm listening, sir. What do you need?",
-  "Claude is armed and ready, sir. Let's get to it.",
-  "Good to go, sir. Talk to me.",
-  "Everything's up on my end, sir. What shall we build?",
+  "I can hear you, sir. Go ahead.",
+  "Listening. What do you need?",
+  "Claude's up and I'm wired in. What are we building?",
+  "Right here. Ready when you are.",
+  "Voice interface live. I'm all ears.",
+  "Yeah, I'm here. What's up?",
+  "Tuned in. Hit me.",
+  "Connected, sir. Let's get into it.",
 ];
 
 const TASK_DONE_PHRASES = [
+  // short punchy
   "Done, sir.",
-  "As you wish, sir. All finished.",
-  "Consider it done, sir.",
-  "That's sorted, sir. Anything else?",
-  "All done. What's next, sir?",
-  "Completed, sir. Ready for the next one.",
-  "Very well, sir — finished.",
+  "Finished. What's next?",
+  "That's handled.",
+  "Sorted.",
+  "Got it done.",
+  "Wrapped up, sir.",
+  // with follow-up hook
+  "All done. Anything else on the list?",
+  "That's sorted, sir. What are we tackling next?",
+  "Done and dusted. You've got more, I know it.",
+  "Nailed it. Ready for the next one.",
+  "Done. You're welcome, sir.",
+  // slightly characterful
+  "Consider it handled, sir.",
+  "As requested — done.",
+  "Easy. What's next?",
+  "That one's off the board. Keep them coming.",
+  "Finished, sir. I actually enjoyed that one.",
 ];
 
 const ALEXA_LAUNCH_PHRASES = [
-  "I'm here, sir.",
-  "Good to hear from you, sir.",
-  "Yes, sir. What do you need?",
-  "Ready, sir.",
-  "Right here, sir. Go ahead.",
+  "I'm here.",
+  "Yeah, what do you need?",
+  "Right here, sir.",
+  "Go ahead.",
+  "Listening.",
+  "Talk to me.",
+  "What's up?",
+  "Here — go.",
 ];
 
 const ALEXA_COMMAND_PHRASES = [
-  "On it, sir.",
-  "Right away, sir.",
-  "Understood, sir.",
-  "Yes sir.",
-  "Copy that, sir.",
-  "Working on it, sir.",
+  "On it.",
+  "Right away.",
+  "Got it.",
+  "Yep.",
+  "Working on it.",
+  "Copy that.",
+  "Already on it, sir.",
+  "Leave it with me.",
+  "Sure.",
+  "Done — well, almost.",
 ];
 
 /** Pick a random element from an array. */

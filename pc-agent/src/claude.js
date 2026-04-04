@@ -63,9 +63,9 @@ export function runClaude(prompt, timeoutMs, options = {}) {
     'If they need research-style reasoning, walk through it plainly — what you checked, what you think, what they could try next. Skip "As an AI" disclaimers unless something is genuinely impossible.',
     'Keep it under ~8 short sentences unless they clearly want depth; then still stay conversational, not a manual.',
   ];
-  if (options.replyChannel === 'alexa') {
+  if (options.replyChannel === 'alexa' || options.replyChannel === 'voice') {
     lines.push(
-      'Alexa will read this out loud — sound like a smart friend on a voice call: short clauses, easy to hear, no markdown or bullet glyphs. Avoid code fences; say numbers and symbols in a speakable way when you must mention them.',
+      'This reply will be read aloud by a TTS voice — respond like a smart friend on a voice call: 1-3 short sentences max, plain spoken English, no markdown, no bullet points, no code fences. If the answer involves code or a list, summarise it in words. Be specific and punchy.',
     );
   }
   lines.push('User request:', String(prompt));
