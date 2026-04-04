@@ -680,16 +680,33 @@ def _play_priority_followup(ambient_line: str) -> None:
 
 
 # ── SAPI fallback ──────────────────────────────────────────────────────────────
+def _sapi_voice_setup_ps() -> str:
+    """PowerShell fragment: SelectVoice(name) or gender hint. Matches FRIDAY_WIN_TTS_* in .env."""
+    win_voice = os.environ.get("FRIDAY_WIN_TTS_VOICE", "").strip()
+    gender_raw = os.environ.get("FRIDAY_WIN_TTS_GENDER", "").strip().lower()
+    if win_voice:
+        esc = win_voice.replace("`", "``").replace('"', '`"')
+        return f'$s.SelectVoice("{esc}"); '
+    if gender_raw == "male":
+        return "$s.SelectVoiceByHints([System.Speech.Synthesis.VoiceGender]::Male); "
+    # Default female — aligns with default Edge voice (Emma) when offline
+    return "$s.SelectVoiceByHints([System.Speech.Synthesis.VoiceGender]::Female); "
+
+
 def _sapi_speak() -> None:
     try:
         safe = TEXT.replace("'", " ").replace('"', " ")[:400]
-        print(f"[friday-speak] SAPI fallback: {safe[:60]}", flush=True)
+        win_voice = os.environ.get("FRIDAY_WIN_TTS_VOICE", "").strip()
+        gend = os.environ.get("FRIDAY_WIN_TTS_GENDER", "").strip().lower() or "(default female hint)"
+        who = win_voice if win_voice else gend
+        print(f"[friday-speak] SAPI fallback (Edge offline): voice={who!r} text={safe[:60]!r}...", flush=True)
+        voice_ps = _sapi_voice_setup_ps()
         subprocess.run(
             ["powershell", "-NoProfile", "-Command",
-             f"Add-Type -AssemblyName System.Speech; "
-             f"$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
-             f"$s.SelectVoiceByHints([System.Speech.Synthesis.VoiceGender]::Male); "
-             f"$s.Speak('{safe}')"],
+             "Add-Type -AssemblyName System.Speech; "
+             "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+             + voice_ps
+             + f"$s.Speak('{safe}')"],
             timeout=30,
         )
         _write_last_spoken_ts()
@@ -754,9 +771,11 @@ async def speak():
         _bypass = os.environ.get("FRIDAY_TTS_BYPASS_CURSOR_DEFER", "").strip().lower() in (
             "1", "true", "yes", "on",
         )
+        # Priority replies (task results, urgent notify) must never be swallowed by IDE focus.
         _ds = os.environ.get("FRIDAY_DEFER_SPEAK_WHEN_CURSOR", "true").strip().lower()
         if (
             not _bypass
+            and not _priority
             and _ds not in ("0", "false", "no", "off")
             and platform.system() == "Windows"
         ):
@@ -934,6 +953,13 @@ async def _speak_inner():
             print(f"[friday-speak] retry ok via {VOICE}", flush=True)
         except Exception as retry_exc:
             print(f"friday-speak: edge-tts retry failed — {retry_exc}", file=sys.stderr, flush=True)
+            print(
+                "[friday-speak] Cannot reach Microsoft Edge TTS (speech.platform.bing.com). "
+                "Check network, VPN, firewall, or DNS — falling back to Windows SAPI. "
+                "Set FRIDAY_WIN_TTS_VOICE (e.g. Microsoft Zira Desktop) or FRIDAY_WIN_TTS_GENDER.",
+                file=sys.stderr,
+                flush=True,
+            )
             switch_done.wait(timeout=2)
             _restore_device(device_result)
             _sapi_speak()

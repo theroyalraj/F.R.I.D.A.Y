@@ -91,7 +91,13 @@
       "Bash(FRIDAY_TTS_VOICE=en-US-GuyNeural python skill-gateway/scripts/friday-speak.py \"Guy here. Anchor style, American.\")",
       "Bash(FRIDAY_TTS_VOICE=en-US-GuyNeural FRIDAY_TTS_RATE=+18% python skill-gateway/scripts/friday-speak.py \"Guy here. This is the real neural voice — the decimal rate was breaking edge-TTS and sending everything to Windows SAPI. Fixed now.\")",
       "Bash(powershell -NoProfile -Command \"Get-ChildItem ''C:/Users/rajut/AppData/Roaming/Cursor/'' -Recurse -Filter ''*.json'' -ErrorAction SilentlyContinue | Select-Object -First 5 FullName\")",
-      "Bash(powershell -NoProfile -Command \"Start-Process node -ArgumentList ''pc-agent/src/server.js'' -WorkingDirectory D:/code/openclaw -NoNewWindow; Start-Sleep 2; Write-Host ''pc-agent started''\")"
+      "Bash(powershell -NoProfile -Command \"Start-Process node -ArgumentList ''pc-agent/src/server.js'' -WorkingDirectory D:/code/openclaw -NoNewWindow; Start-Sleep 2; Write-Host ''pc-agent started''\")",
+      "Bash(redis-cli ping:*)",
+      "Read(//d/code/openclaw/$TEMP/**)",
+      "Bash(ls -la C:UsersrajutAppDataLocalTempfriday-*)",
+      "Bash(tasklist)",
+      "Bash(curl -s -X POST http://127.0.0.1:3847/voice/speak-async -H \"Content-Type: application/json\" -d '{\"\"\"\"text\"\"\"\":\"\"\"\"Testing Jarvis voice. This should use the Emma neural voice with Jarvis rate and pitch settings.\"\"\"\"}')",
+      "Bash(timeout 3 curl -s -N http://127.0.0.1:3847/voice/stream)"
     ]
   }
 }

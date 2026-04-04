@@ -338,6 +338,12 @@
             if (d?.summary) {
               addFridayBubble(d.summary, Date.now());
               setState('offline');
+              // Speak the response via Jarvis voice daemon (fire-and-forget)
+              fetch(`${AGENT}/voice/speak-async`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: d.summary }),
+              }).catch(() => {});
             }
           } catch (_) {
             setState('offline');

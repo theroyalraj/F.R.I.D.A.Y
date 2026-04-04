@@ -172,7 +172,7 @@ def play(mp3_path: Path):
         print(f"[friday-play] playing {'full' if not play_sec else f'{play_sec}s'} -> {SEARCH!r}", flush=True)
 
     vol = _play_volume_percent()
-    cmd = ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", "-volume", str(vol)]
+    cmd = ["friday-player", "-nodisp", "-autoexit", "-loglevel", "quiet", "-volume", str(vol)]
     if play_sec:
         cmd += ["-t", f"{play_sec:.2f}"]
     cmd.append(str(mp3_path))

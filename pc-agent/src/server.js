@@ -22,6 +22,7 @@ import {
 import { openAiTtsApiKey, openAiTtsConfigured, synthesizeOpenAiMp3 } from './openaiTts.js';
 import { createPerceptionRouter } from './perceptionRoutes.js';
 import { createSettingsRouter } from './settingsRoutes.js';
+import { createAutomationRouter } from './automationRoutes.js';
 import { perceptionDbConfigured, perceptionDbHealth } from './perceptionDb.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -75,7 +76,7 @@ function greetingTtsRatePitch() {
   const raw = (process.env.FRIDAY_TTS_JARVIS_RANDOM || 'true').toLowerCase();
   if (off.includes(raw)) {
     return {
-      FRIDAY_TTS_RATE: process.env.FRIDAY_TTS_JARVIS_RATE || '+7.5%',
+      FRIDAY_TTS_RATE: process.env.FRIDAY_TTS_JARVIS_RATE || '+10%',
       FRIDAY_TTS_PITCH: process.env.FRIDAY_TTS_JARVIS_PITCH || '+2Hz',
     };
   }
@@ -250,6 +251,44 @@ voiceRouter.post('/command', async (req, res, next) => {
   } catch (e) {
     next(e);
   }
+});
+
+/** Speak text asynchronously via friday-speak.py with Jarvis voice settings (fire-and-forget).
+ * Used for incoming messages (WhatsApp, email, etc.) to auto-speak responses.
+ */
+voiceRouter.post('/speak-async', (req, res) => {
+  const text = String(req.body?.text || '').trim();
+  if (!text) {
+    return res.status(400).json({ error: 'Missing text in body: { "text": "Hello" }' });
+  }
+  if (!existsSync(SPEAK_SCRIPT)) {
+    return res.status(503).json({ error: 'friday-speak.py not found', hint: 'Install skill-gateway scripts.' });
+  }
+
+  // Fire-and-forget: spawn async, return immediately
+  const delivery = greetingTtsRatePitch();
+  const child = spawn('python', [SPEAK_SCRIPT, text], {
+    env: {
+      ...process.env,
+      FRIDAY_TTS_VOICE:  process.env.FRIDAY_TTS_VOICE  || 'en-US-EmmaMultilingualNeural',
+      FRIDAY_TTS_DEVICE: process.env.FRIDAY_TTS_DEVICE || 'default',
+      FRIDAY_TTS_PRIORITY: '1',
+      // Always audible: listen UI and integrations use this for assistant replies (Cursor focus must not mute).
+      FRIDAY_TTS_BYPASS_CURSOR_DEFER: 'true',
+      ...delivery,
+    },
+    detached: true,
+    stdio: ['ignore', 'ignore', 'pipe'],
+    windowsHide: true,
+  });
+
+  // Log errors but don't block response
+  child.stderr?.on('data', (buf) => {
+    const line = buf.toString().trim();
+    if (line) req.log?.warn({ fridaySpeak: line }, '/voice/speak-async stderr');
+  });
+
+  res.json({ ok: true, text: text.slice(0, 60) });
 });
 
 /** Free local neural TTS (Piper) → WAV; optional paid OpenAI (set FRIDAY_TTS_OPENAI=true). Else client uses browser. */
@@ -451,6 +490,7 @@ app.post('/task', auth, async (req, res, next) => {
 
 app.use('/perception', createPerceptionRouter(auth));
 app.use('/settings', createSettingsRouter(auth));
+app.use('/automation', createAutomationRouter(auth));
 
 app.use((err, req, res, _next) => {
   req.log?.error({ err }, 'unhandled route error');

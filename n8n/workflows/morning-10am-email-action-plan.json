@@ -1,0 +1,135 @@
+{
+  "name": "Openclaw — 10 AM Email Action Plan → WhatsApp",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 10 * * *" }]
+        }
+      },
+      "id": "m10a0001-0000-4000-8000-000000000001",
+      "name": "Schedule 10 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:3847/automation/gmail-snapshot",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.PC_AGENT_SECRET }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { unreadCount: 25, recentCount: 20 } }}",
+        "options": { "timeout": 120000 }
+      },
+      "id": "m10a0002-0000-4000-8000-000000000002",
+      "name": "Gmail Snapshot",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [260, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "const j = $input.first().json;\nif (!j.ok) {\n  throw new Error(j.error || 'Gmail snapshot failed');\n}\nconst number = String($env.WHATSAPP_NOTIFY_NUMBER || '').trim();\nif (!number) {\n  throw new Error('WHATSAPP_NOTIFY_NUMBER is empty');\n}\nconst inst = $env.EVOLUTION_INSTANCE || 'openclaw';\nconst payload = JSON.stringify({ unread: j.unread, recent: j.recent });\nconst cap = 100000;\nconst body = payload.length > cap ? payload.slice(0, cap) + '\\n…[truncated]' : payload;\nconst text = `You are preparing a personal morning action plan. Inbox snapshot JSON:\\n${body}\\n\\nProduce:\\n(1) Top three priorities for today — one sentence each.\\n(2) Anything time-sensitive or needing a reply today.\\n(3) Suggested order to tackle items.\\n(4) One short line for what to defer or ignore.\\n\\nFormat for WhatsApp: short clear sections, line breaks, plain text only — no markdown code blocks, no asterisk headings. Max about six hundred words.`;\nreturn [\n  {\n    json: {\n      text,\n      userId: 'n8n:10am-action-plan',\n      correlationId: `m10-${Date.now()}`,\n      instance: inst,\n      number,\n    },\n  },\n];\n"
+      },
+      "id": "m10a0003-0000-4000-8000-000000000003",
+      "name": "BuildTaskPrompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [520, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:3847/task",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.PC_AGENT_SECRET }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { text: $json.text, userId: $json.userId, correlationId: $json.correlationId, source: 'n8n', claudeModel: 'sonnet' } }}",
+        "options": { "timeout": 300000 }
+      },
+      "id": "m10a0004-0000-4000-8000-000000000004",
+      "name": "PC Agent Plan",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [780, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "const agent = $input.first().json;\nconst prev = $('BuildTaskPrompt').first().json;\nconst summary = String(agent.summary || agent.error || 'No output from agent.').slice(0, 4000);\nreturn [\n  {\n    json: {\n      number: prev.number,\n      instance: prev.instance,\n      whatsappText: `Ten A M action plan:\\n\\n${summary}`,\n    },\n  },\n];\n"
+      },
+      "id": "m10a0005-0000-4000-8000-000000000005",
+      "name": "FormatWhatsApp",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1040, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://evolution-api:8080/message/sendText/{{ $json.instance }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "apikey", "value": "={{ $env.EVOLUTION_API_KEY }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { number: $json.number, text: $json.whatsappText } }}",
+        "options": {}
+      },
+      "id": "m10a0006-0000-4000-8000-000000000006",
+      "name": "Send WhatsApp",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1300, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.GATEWAY_INTERNAL_URL }}/internal/speak",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "X-Openclaw-Secret", "value": "={{ $env.N8N_WEBHOOK_SECRET }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { text: 'Your ten A M action plan was sent to WhatsApp.' } }}",
+        "options": { "timeout": 15000, "ignore404": true }
+      },
+      "id": "m10a0007-0000-4000-8000-000000000007",
+      "name": "Speak Done",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1560, 0],
+      "continueOnFail": true
+    }
+  ],
+  "connections": {
+    "Schedule 10 AM": { "main": [[{ "node": "Gmail Snapshot", "type": "main", "index": 0 }]] },
+    "Gmail Snapshot": { "main": [[{ "node": "BuildTaskPrompt", "type": "main", "index": 0 }]] },
+    "BuildTaskPrompt": { "main": [[{ "node": "PC Agent Plan", "type": "main", "index": 0 }]] },
+    "PC Agent Plan": { "main": [[{ "node": "FormatWhatsApp", "type": "main", "index": 0 }]] },
+    "FormatWhatsApp": { "main": [[{ "node": "Send WhatsApp", "type": "main", "index": 0 }]] },
+    "Send WhatsApp": { "main": [[{ "node": "Speak Done", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" }
+}

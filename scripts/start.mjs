@@ -165,20 +165,20 @@ function waitForPort(port, timeoutMs = 10_000) {
   });
 }
 
-// ── Open Chrome to URL ────────────────────────────────────────────────────────
+// ── Focus existing Chrome tab (or open if none) ─────────────────────────────
 function openChrome(url) {
+  // Just navigate — Chrome reuses the existing tab for same-origin URLs when no --new-tab flag
   const candidates = [
     'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
     'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
   ];
   const exe = candidates.find(p => existsSync(p));
   const cmd = exe || 'chrome';
-  const child = spawn(cmd, [url, '--new-tab'], {
+  const child = spawn(cmd, [url], {
     detached: true, stdio: 'ignore', windowsHide: true,
   });
   child.unref();
   child.on('error', () => {
-    // fallback: try PowerShell Start-Process
     const ps = spawn('powershell', ['-Command', `Start-Process "${url}"`], {
       detached: true, stdio: 'ignore', windowsHide: true,
     });

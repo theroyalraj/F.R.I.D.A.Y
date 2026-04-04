@@ -289,6 +289,8 @@ def speak(text: str, *, jarvis: bool = False, priority: bool = True):
                         env["FRIDAY_TTS_PRIORITY"] = "1"
                     else:
                         env.pop("FRIDAY_TTS_PRIORITY", None)
+                    # Mic daemon replies are the primary voice UX — never mute because Cursor is focused.
+                    env["FRIDAY_TTS_BYPASS_CURSOR_DEFER"] = "true"
                     result = subprocess.run(
                         [sys.executable, str(SPEAK_SCRIPT), text],
                         env=env,
@@ -840,7 +842,7 @@ def main():
         reply = send_command(text)
         log.info("◄ %s", reply[:120])
 
-        spoken = reply if len(reply) <= 250 else reply[:247] + "…"
+        spoken = reply if len(reply) <= 1000 else reply[:997] + "…"
         post_event("reply", spoken)
         post_event("speak", spoken)
         speak(spoken)

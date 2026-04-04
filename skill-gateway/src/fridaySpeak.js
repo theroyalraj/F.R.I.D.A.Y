@@ -42,10 +42,10 @@ export function fridaySpeakEnabled(env = process.env) {
  * Speak text via friday-speak.py — fire-and-forget.
  * @param {string} text
  * @param {import('pino').Logger} [log]
- * @param {{ bypassCursorDefer?: boolean, interruptMusic?: boolean, onClose?: () => void }} [opts]  bypassCursorDefer: greetings while Cursor focused; interruptMusic: FRIDAY_TTS_INTERRUPT_MUSIC=ui so friday-speak may duck friday-play; onClose: after friday-speak.py exits (playback finished) or if speak skipped
+ * @param {{ bypassCursorDefer?: boolean, interruptMusic?: boolean, priority?: boolean, onClose?: () => void }} [opts]  bypassCursorDefer: skip IDE focus mute; priority: FRIDAY_TTS_PRIORITY=1 (pre-empt + never defer on Windows); interruptMusic: duck friday-play; onClose: after playback or skip
  */
 export function speakFridayPy(text, log, opts = {}) {
-  const { onClose, bypassCursorDefer, interruptMusic } = opts;
+  const { onClose, bypassCursorDefer, interruptMusic, priority } = opts;
 
   if (!fridaySpeakEnabled()) {
     try {
@@ -81,6 +81,7 @@ export function speakFridayPy(text, log, opts = {}) {
       FRIDAY_TTS_PITCH:  process.env.FRIDAY_TTS_PITCH  || '+2Hz',
       ...(bypassCursorDefer ? { FRIDAY_TTS_BYPASS_CURSOR_DEFER: 'true' } : {}),
       ...(interruptMusic ? { FRIDAY_TTS_INTERRUPT_MUSIC: 'ui' } : {}),
+      ...(priority ? { FRIDAY_TTS_PRIORITY: '1' } : {}),
     },
     // detached + unref lets the speech outlive a node --watch restart.
     // Pipe stderr so failures are visible in the terminal instead of silently swallowed.
@@ -224,6 +225,8 @@ function pick(arr) {
 export function speakGatewayStartup(log, which = 'gateway', chainOpts = {}) {
   speakFridayPy(pick(which === 'agent' ? pcAgentStartupPool() : gatewayStartupPool()), log, {
     bypassCursorDefer: true,
+    priority: true,
+    interruptMusic: true,
     onClose: chainOpts.onClose,
   });
 }
@@ -236,8 +239,11 @@ export function speakGatewayStartup(log, which = 'gateway', chainOpts = {}) {
 export function speakTaskDone(summary, log) {
   const base  = pick(taskDonePhrases());
   const extra = summary ? ` ${String(summary).slice(0, 100).trim()}` : '';
-  // Always bypass Cursor/IDE defer — task-complete is the “done” cue; startup already bypasses.
-  speakFridayPy(base + extra, log, { bypassCursorDefer: true });
+  speakFridayPy(base + extra, log, {
+    bypassCursorDefer: true,
+    priority: true,
+    interruptMusic: true,
+  });
 }
 
 /**
