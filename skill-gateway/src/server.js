@@ -222,7 +222,9 @@ app.post('/alexa', runVerifier, async (req, res, next) => {
   const t0 = Date.now();
   try {
     const body = req.body;
-    const requestType = body?.request?.type;
+    // Support both standard Alexa SDK format (body.request.type) and
+    // our custom Lambda flat format (body.requestType)
+    const requestType = body?.request?.type || body?.requestType;
 
     req.log.info({ alexa: summarizeAlexaRequest(body) }, 'alexa request accepted');
 
@@ -231,11 +233,15 @@ app.post('/alexa', runVerifier, async (req, res, next) => {
       return res.json({ version: '1.0' });
     }
 
-    const userId = body?.session?.user?.userId || body?.context?.System?.user?.userId || 'anonymous';
-    const locale = body?.request?.locale || 'en-US';
-    const apiEndpoint = body?.context?.System?.apiEndpoint;
+    const userId =
+      body?.session?.user?.userId ||
+      body?.context?.System?.user?.userId ||
+      body?.userId ||       // flat Lambda format
+      'anonymous';
+    const locale      = body?.request?.locale      || body?.locale      || 'en-US';
+    const apiEndpoint = body?.context?.System?.apiEndpoint || body?.apiEndpoint;
     const apiAccessToken = body?.context?.System?.apiAccessToken;
-    const requestId = body?.request?.requestId;
+    const requestId   = body?.request?.requestId   || body?.alexaRequestId;
 
     const extracted = extractUserCommand(body);
 
@@ -535,8 +541,15 @@ app.post('/internal/awaiting-user/peek', (req, res) => {
   res.json({ ok: true, pending: getAwaitingUserReply(userId) });
 });
 
-/** Stop Alexa music immediately (called by friday-listen.py when voice is detected). */
+/** Stop Alexa music immediately (called by friday-listen.py when voice is detected).
+ *  Cooldown of 8s prevents the mic VAD from hammering this on every noise burst. */
+let _lastAlexaStop = 0;
 app.post('/internal/alexa-stop', async (req, res) => {
+  const now = Date.now();
+  if (now - _lastAlexaStop < 8_000) {
+    return res.json({ ok: true, skipped: 'cooldown' });
+  }
+  _lastAlexaStop = now;
   await alexaStopMusic(req.log).catch(() => {});
   res.json({ ok: true });
 });

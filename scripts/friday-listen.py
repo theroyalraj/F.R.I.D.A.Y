@@ -28,6 +28,7 @@ import io
 import json
 import logging
 import os
+import random
 import signal
 import subprocess
 import sys
@@ -205,7 +206,7 @@ def send_command(text: str) -> str:
     try:
         r = req_lib.post(
             f"{AGENT_URL}/voice/command",
-            json={"text": text, "userId": "friday-mic-daemon", "source": "mic-daemon"},
+            json={"text": text, "userId": "friday-mic-daemon", "source": "voice"},
             timeout=120,
             headers={"ngrok-skip-browser-warning": "1"},
         )
@@ -388,22 +389,60 @@ def main():
 
         # Built-in stop commands
         if lower in ("stop", "exit", "quit", "goodbye", "shut down", "go offline"):
-            post_event("speak", "Going offline, sir. Goodbye.")
-            speak("Going offline, sir. Goodbye.")
+            bye = random.choice([
+                "Going offline, sir. Goodbye.",
+                "Shutting down. Take care, sir.",
+                "Signing off. Till next time.",
+                "Offline. Catch you later, sir.",
+                "Done for now. Goodbye, sir.",
+            ])
+            post_event("speak", bye)
+            speak(bye)
             log.info("Shutdown requested.")
             break
 
         # Status ping
+        ping_reply = random.choice([
+            "Right here, sir. Ready for your command.",
+            "Online and listening.",
+            "Always here, sir.",
+            "Standing by. What do you need?",
+            "Alive and well. Go ahead.",
+            "Ready when you are, sir.",
+            "At your service.",
+            "Here, sir. What's the play?",
+            "Fully operational. Talk to me.",
+        ])
         if lower in ("status", "are you there", "hello", "hey friday", "friday"):
-            post_event("speak", "Right here, sir. Ready for your command.")
-            speak("Right here, sir. Ready for your command.")
+            post_event("speak", ping_reply)
+            speak(ping_reply)
             post_event("listening", "Ready for your command, sir.")
             continue
 
         # Send to Friday pc-agent
+        ack = random.choice([
+            "On it.",
+            "Already on it, sir.",
+            "Consider it done.",
+            "Right away.",
+            "Copy that. Working on it.",
+            "Sure, give me a moment.",
+            "Locked in. Stand by.",
+            "Running it now.",
+            "On it — won't be long.",
+            "Leave it with me.",
+            "Got it. Let me pull that together.",
+            "Understood. Give me a second.",
+            "Yep, on it.",
+            "Roger that.",
+            "Diving in now, sir.",
+            "Absolutely. One moment.",
+            "I'm on it — back in a moment.",
+            "All over it.",
+        ])
         post_event("thinking", "Routing to Friday agent…")
-        post_event("speak", "On it, sir.")
-        speak("On it, sir.")
+        post_event("speak", ack)
+        speak(ack)
         log.info("Sending to agent…")
         reply = send_command(text)
         log.info("◄ %s", reply[:120])
@@ -429,5 +468,9 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        speak("Going offline, sir.")
+        speak(random.choice([
+            "Going offline, sir.",
+            "Shutting down. Later, sir.",
+            "Offline. See you next time.",
+        ]))
         print("\nStopped.")
