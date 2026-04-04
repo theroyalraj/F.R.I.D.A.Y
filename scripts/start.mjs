@@ -20,6 +20,11 @@ import http                from 'node:http';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
+/** When set (e.g. by restart-local.ps1 -NoKill), do not kill listeners on 3847/3848 before spawn. */
+const NO_FREE_PORTS = ['1', 'true', 'yes'].includes(
+  String(process.env.OPENCLAW_NO_FREE_PORTS || '').toLowerCase()
+);
+
 /** Read FRIDAY_AMBIENT from .env (no dependency on dotenv). */
 function readFridayAmbientFromDotEnv() {
   const p = path.join(ROOT, '.env');
@@ -197,9 +202,12 @@ function freePort(port) {
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 async function main() {
-  // Free ports first so the new instances always bind cleanly
-  freePort(3848);
-  freePort(3847);
+  if (!NO_FREE_PORTS) {
+    freePort(3848);
+    freePort(3847);
+  } else {
+    process.stdout.write(`${C.warn}[openclaw] OPENCLAW_NO_FREE_PORTS set — not clearing ports 3847/3848${C.reset}\n`);
+  }
 
   process.stdout.write(`${C.warn}
   ╔══════════════════════════════════════════════════╗

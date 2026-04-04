@@ -18,7 +18,7 @@
     "heartbeat": "powershell -ExecutionPolicy Bypass -File scripts/openclaw-heartbeat.ps1",
     "start:all": "node scripts/start.mjs",
     "restart:local": "powershell -ExecutionPolicy Bypass -File scripts/restart-local.ps1",
-    "restart:skip": "powershell -ExecutionPolicy Bypass -File scripts/restart-local.ps1 -SkipDocker",
+    "restart:skip": "powershell -ExecutionPolicy Bypass -File scripts/restart-local.ps1 -SkipDocker -NoKill",
     "test:notify": "node scripts/test-task-complete-notify.mjs",
     "voice:daemon": "python scripts/friday-listen.py",
     "start:ambient": "python scripts/friday-ambient.py",

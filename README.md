@@ -24,7 +24,9 @@ pwsh -ExecutionPolicy Bypass -File scripts/restart-local.ps1
 - **Skill-gateway**: `http://127.0.0.1:3848` (`POST /alexa`, `POST /webhook/friday-intake` proxy)
 - **PC agent**: `http://127.0.0.1:3847`
 
-Skip Docker (only free **3848** / **3847** and start Node):
+**`npm run restart:skip`** — **`-SkipDocker -NoKill`**: skips Docker, skips killing node watchers and freeing **3847**/**3848**. If both services already respond on **`/health`**, it exits; otherwise it runs **`node scripts/start.mjs`** with **`OPENCLAW_NO_FREE_PORTS`** (no port pre-kill).
+
+**Hard recycle** (kill listeners + watchers, free ports) — **`npm run restart:local`**, or Docker-less:
 
 ```powershell
 pwsh -ExecutionPolicy Bypass -File scripts/restart-local.ps1 -SkipDocker
