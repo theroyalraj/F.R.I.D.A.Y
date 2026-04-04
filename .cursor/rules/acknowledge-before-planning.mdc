@@ -9,21 +9,32 @@ Before thinking about or presenting any plan, **always** narrate an acknowledgem
 
 ## Required Steps (in order)
 
-1. **Speak acknowledgement** — say you've understood the request
-2. **Ask any clarifying questions** — if anything is ambiguous, ask now before proceeding
-3. **Only then** — begin planning or executing
+1. **Pick session voice** — run `pick-session-voice.py` first (assigns a random sticky voice for this Cursor chat)
+2. **Speak acknowledgement** — say you've understood the request
+3. **Ask any clarifying questions** — if anything is ambiguous, ask now before proceeding
+4. **Only then** — begin planning or executing
 
-## Acknowledgement command
+## Acknowledgement command (run BOTH lines, in order, at the very start of every response)
 
 ```powershell
+# Step 1 — assign sticky voice for this chat (no-op if already assigned)
+cd d:\code\openclaw; python skill-gateway/scripts/pick-session-voice.py
+
+# Step 2 — speak acknowledgement (will use the session voice automatically)
 cd d:\code\openclaw; python skill-gateway/scripts/friday-speak.py "Got it, sir. [one sentence restatement of the task]."
 ```
 
+Both commands use `block_until_ms: 0` (background / non-blocking).
+
 ## Examples
 
-- User: "Add a new TTS endpoint" → speak `"Got it, sir. Adding a new T T S endpoint to the skill gateway."` → then plan
-- User: "Fix the mic backoff bug" → speak `"Got it, sir. Investigating and fixing the mic backoff bug."` → then fix
-- User: "Refactor the memory module" → speak `"Got it, sir. Refactoring the memory module."` → then proceed
+```powershell
+# New chat — pick-session-voice assigns e.g. en-AU-WilliamNeural for this whole session
+cd d:\code\openclaw; python skill-gateway/scripts/pick-session-voice.py
+cd d:\code\openclaw; python skill-gateway/scripts/friday-speak.py "Got it, sir. Adding a new T T S endpoint to the skill gateway."
+```
+
+The same voice (en-AU-WilliamNeural in this example) will be used for every `friday-speak.py` call for the rest of this chat — acknowledgements, status narrations, and the completion summary alike.
 
 ## If you have questions
 

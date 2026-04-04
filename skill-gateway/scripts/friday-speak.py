@@ -66,6 +66,18 @@ TEXT   = " ".join(_args).strip()
 # The function is defined later in this file; we call it after full module load below.
 _RAW_TEXT = TEXT
 VOICE  = os.environ.get("FRIDAY_TTS_VOICE",  "en-GB-RyanNeural")
+
+# Session-sticky voice: if .session-voice.json exists in the repo root and has a
+# voice set for the current Cursor chat, it overrides FRIDAY_TTS_VOICE.
+_SESSION_VOICE_FILE = Path(__file__).resolve().parent.parent.parent / ".session-voice.json"
+try:
+    import json as _json
+    _sv = _json.loads(_SESSION_VOICE_FILE.read_text(encoding="utf-8"))
+    if _sv.get("voice"):
+        VOICE = _sv["voice"]
+except Exception:
+    pass
+
 RATE   = os.environ.get("FRIDAY_TTS_RATE",   "+0%")
 PITCH  = os.environ.get("FRIDAY_TTS_PITCH",  "+0Hz")
 VOLUME = os.environ.get("FRIDAY_TTS_VOLUME", "+0%")

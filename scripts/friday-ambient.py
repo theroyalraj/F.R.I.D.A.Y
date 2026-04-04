@@ -1061,6 +1061,21 @@ def generate_line_ai(
             f"Right, from SpaceNews — {space}. Keep an eye on that.",
             f"Quick space one — {space}. Worth knowing.",
         ])
+    elif mode == "trending":
+        signals = [s for s in [
+            live_data.get("trending"), live_data.get("movies"),
+            live_data.get("viral"),    live_data.get("product"),
+        ] if s]
+        if signals:
+            picked = random.choice(signals)
+            line = random.choice([
+                f"Right, so apparently this is trending — {picked}. Make of that what you will.",
+                f"Oh so people are going absolutely wild about — {picked}. The internet is the internet.",
+                f"I just saw this and had to mention it — {picked}. Something's happening.",
+                f"This is blowing up right now — {picked}. Thought you'd want to know.",
+            ])
+        else:
+            line = random.choice(WITTY_FALLBACKS)
     elif mode == "history" and live_data.get("history"):
         hist = live_data["history"]
         line = random.choice([
@@ -1710,7 +1725,43 @@ def main() -> None:
 
                 # ── We now own the lock — generate + speak ─────────────────────
                 try:
-                    # Pop pre-generated content from queue first
+                    mode = pick_mode()
+                    if media_state.get("want_music_comment"):
+                        media_state["want_music_comment"] = False
+                        mode = "music_comment"
+
+                    # ── Song moment: speak intro, then launch music player ──────
+                    if mode == "song_moment":
+                        moment = generate_song_moment()
+                        if moment:
+                            line = moment["spoken"]
+                            # Dedup check
+                            if not _was_recently_spoken(r, line):
+                                last_ambient = time.time()
+                                _mark_spoken(r, line)
+                                d1 = int(speak_blocking(line) * 1000)
+                                # Release TTS lock before starting music
+                                # (music uses its own PID file, not the TTS lock)
+                                _release_tts_lock(r)
+                                play_song_ambient(moment["query"], moment["seconds"])
+                                log.info(
+                                    "[song] %r — playing %s for %ds",
+                                    moment["query"], moment["section"], moment["seconds"],
+                                )
+                                last_ambient = time.time()
+                                try:
+                                    TTS_TS_FILE.write_text(str(time.time()), encoding="utf-8")
+                                except OSError:
+                                    pass
+                                log_spoken(conn, line, "ambient_song", d1)
+                            continue  # lock already released above
+                        else:
+                            # Fallback to a regular funny/mixed turn if song gen failed
+                            mode = "funny"
+
+                    # ── Regular content generation ─────────────────────────────
+                    # Pop pre-generated content from queue first (queue is
+                    # filled by non-song modes only)
                     line = None
                     try:
                         raw = r.rpop("friday:ambient:content_queue")
@@ -1718,16 +1769,14 @@ def main() -> None:
                     except Exception:
                         pass
 
-                    mode = pick_mode()
-                    if media_state.get("want_music_comment"):
-                        media_state["want_music_comment"] = False
-                        mode = "music_comment"
+                    # Verbose mode: 30% of turns get longer storytelling output
+                    verbose = random.random() < VERBOSE_RATIO
 
                     if mode == "music_comment" or not line:
                         live       = get_live_data()
                         music_hint = media_state.get("last_track_pretty")
                         news       = live.get("news") if mode in ("informational", "mixed") else None
-                        _, line    = generate_line_ai(r, mode, news, music_hint, live)
+                        _, line    = generate_line_ai(r, mode, news, music_hint, live, verbose=verbose)
 
                     # Dedup: skip if spoken recently (Redis ring buffer)
                     if _was_recently_spoken(r, line):

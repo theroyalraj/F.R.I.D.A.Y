@@ -12,3 +12,4 @@ alexa-lambda-python/config.json
 .alexa-cookie.json
 data/*.db
 data/*.db-*
+.session-voice.json
