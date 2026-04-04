@@ -93,6 +93,25 @@ logging.basicConfig(
 )
 log = logging.getLogger("friday-ambient")
 
+
+def _load_anthropic():
+    """Return anthropic module or None if not installed."""
+    try:
+        import anthropic
+
+        return anthropic
+    except ImportError:
+        return None
+
+
+ANTHROPIC_MOD = _load_anthropic() if ANTHROPIC_KEY else None
+if ANTHROPIC_KEY and ANTHROPIC_MOD is None:
+    log.warning(
+        "ANTHROPIC_API_KEY is set but the 'anthropic' package is not installed — "
+        "using fallbacks. Fix: pip install anthropic  "
+        "(or pip install -r scripts/requirements-ambient.txt)"
+    )
+
 # ── Fallback phrases (never silent) ───────────────────────────────────────────
 FILLERS = [
     "One moment, sir.",
@@ -383,14 +402,12 @@ def generate_line_haiku(
     except Exception:
         pass
 
-    if not ANTHROPIC_KEY:
+    if not ANTHROPIC_KEY or ANTHROPIC_MOD is None:
         line = random.choice(WITTY_FALLBACKS)
         return topic, line
 
     try:
-        import anthropic
-
-        client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+        client = ANTHROPIC_MOD.Anthropic(api_key=ANTHROPIC_KEY)
         system = (
             f"You are Friday, a witty British AI assistant (Jarvis tone). "
             f"User: {USER_NAME}"
