@@ -15,6 +15,7 @@ Env vars (all optional — reads .env):
   FRIDAY_MUSIC_SCHEDULER       true/false to enable/disable (default: true if script is run)
   FRIDAY_MUSIC_INTERVAL_MIN    minutes between songs (default: 30)
   FRIDAY_MUSIC_PLAYLIST        comma-separated search phrases (default: FRIDAY_STARTUP_SONG)
+  FRIDAY_MUSIC_FIRST_WAIT_SEC  seconds before first song (optional; default min(120, interval))
   FRIDAY_PLAY_SECONDS          per-song play duration (default: 28)
   FRIDAY_PLAY_VOLUME           ffplay volume 0-100 (default: 70)
 """
@@ -136,6 +137,20 @@ def play_song():
         log.warning("friday-play error: %s", e)
 
 
+def _first_sleep_sec(interval_sec: float) -> float:
+    """
+    Legacy loop slept a full interval before the first song — up to 30+ minutes of silence.
+    Default: wait at most two minutes (or one full interval if shorter), unless overridden.
+    """
+    raw = os.environ.get("FRIDAY_MUSIC_FIRST_WAIT_SEC", "").strip().split("#")[0].strip()
+    if raw:
+        try:
+            return max(5.0, float(raw))
+        except ValueError:
+            pass
+    return min(120.0, interval_sec)
+
+
 def main():
     interval_sec = INTERVAL_MIN * 60
     log.info(
@@ -145,8 +160,10 @@ def main():
     )
     log.info("Playlist: %s", PLAYLIST)
 
+    first = True
     while True:
-        time.sleep(interval_sec)
+        time.sleep(_first_sleep_sec(interval_sec) if first else interval_sec)
+        first = False
 
         if _tts_active():
             log.info("TTS active — skipping this cycle")

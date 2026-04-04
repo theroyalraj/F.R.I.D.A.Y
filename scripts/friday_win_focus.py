@@ -63,8 +63,8 @@ def foreground_exe_basename() -> str | None:
 
 def should_defer_voice_for_cursor() -> bool:
     """
-    True when Friday should not capture mic or play ambient TTS — a configured
-    app (default: Cursor) owns the foreground window.
+    True when Friday should not capture the mic — a configured app (default:
+    Cursor) owns the foreground window. Ambient uses should_defer_ambient_for_cursor().
     """
     if sys.platform != "win32":
         return False
@@ -77,3 +77,19 @@ def should_defer_voice_for_cursor() -> bool:
         if hint in exe:
             return True
     return False
+
+
+def should_defer_ambient_for_cursor() -> bool:
+    """
+    Separate gate for friday-ambient (chatter + song moments).
+
+    When FRIDAY_AMBIENT_DEFER_WHEN_CURSOR is true (default), ambient is silent
+    whenever Cursor/other defer exes have focus — same as legacy behaviour.
+
+    Set FRIDAY_AMBIENT_DEFER_WHEN_CURSOR=false in .env to allow Jarvis ambient
+    lines and featured clips while the IDE is focused; friday-listen still uses
+    should_defer_voice_for_cursor() so the mic path is unchanged.
+    """
+    if not _env_bool("FRIDAY_AMBIENT_DEFER_WHEN_CURSOR", True):
+        return False
+    return should_defer_voice_for_cursor()

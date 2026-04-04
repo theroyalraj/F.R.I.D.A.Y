@@ -67,7 +67,16 @@ function readCursorNarrationFromDotEnv() {
   );
 }
 
-/** Cursor JSONL → TTS: on if either toggle is on (empty env = on), unless live narration suppresses it. */
+/** Empty key → defaultVal; explicit true/false tokens override. */
+function envBool(key, defaultVal) {
+  const v = String(process.env[key] || '').trim().toLowerCase();
+  if (v === '') return defaultVal;
+  if (['0', 'false', 'no', 'off'].includes(v)) return false;
+  if (['1', 'true', 'yes', 'on'].includes(v)) return true;
+  return defaultVal;
+}
+
+/** Cursor JSONL → TTS: on if reply and/or thinking toggle is on, unless live narration suppresses it. */
 function readCursorReplyWatchFromDotEnv() {
   function enabled(key) {
     const v = String(process.env[key] || '').trim().toLowerCase();
@@ -77,6 +86,7 @@ function readCursorReplyWatchFromDotEnv() {
   }
   let main = enabled('FRIDAY_CURSOR_SPEAK_REPLY');
   let sub = enabled('FRIDAY_CURSOR_SPEAK_SUBAGENT_REPLY');
+  let thinking = enabled('FRIDAY_CURSOR_SPEAK_THINKING');
   if (readCursorNarrationFromDotEnv()) {
     const mainWith = ['1', 'true', 'yes', 'on'].includes(
       String(process.env.FRIDAY_CURSOR_SPEAK_REPLY_WITH_NARRATION || '').trim().toLowerCase(),
@@ -86,8 +96,11 @@ function readCursorReplyWatchFromDotEnv() {
     );
     if (main && !mainWith) main = false;
     if (sub && !subWith) sub = false;
+    if (thinking && !envBool('FRIDAY_CURSOR_SPEAK_THINKING_WITH_NARRATION', true)) {
+      thinking = false;
+    }
   }
-  return main || sub;
+  return main || sub || thinking;
 }
 
 // ── Colours ──────────────────────────────────────────────────────────────────

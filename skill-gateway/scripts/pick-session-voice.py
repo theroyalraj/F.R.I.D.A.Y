@@ -41,7 +41,6 @@ import datetime
 import json
 import os
 import random
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -119,30 +118,6 @@ _TRANSCRIPTS_ROOT = Path(os.environ.get(
     "CURSOR_TRANSCRIPTS_DIR",
     r"C:\Users\rajut\.cursor\projects\d-code-openclaw\agent-transcripts"
 ))
-
-# ── Human-readable voice labels ────────────────────────────────────────────────
-_LOCALE_LABELS = {
-    "en-GB": "British",
-    "en-US": "American",
-    "en-AU": "Australian",
-    "en-IE": "Irish",
-    "en-CA": "Canadian",
-    "en-IN": "Indian English",
-    "en-NZ": "New Zealand",
-    "hi-IN": "Hindi",
-}
-
-
-def _friendly_voice_name(voice: str) -> str:
-    """'en-AU-WilliamNeural' → 'William, Australian Neural voice'"""
-    parts  = voice.split("-", 2)
-    locale = "-".join(parts[:2])
-    label  = _LOCALE_LABELS.get(locale, locale)
-    name   = parts[2] if len(parts) > 2 else voice
-    name   = name.replace("Neural", "").strip()
-    name   = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", name)
-    return f"{name}, {label}"
-
 
 def _latest_chat_uuid() -> str | None:
     """Return the UUID of the most recently modified chat folder."""
@@ -273,21 +248,18 @@ def _speak_welcome(voice: str) -> None:
         return
     who = _user_display_name()
     if _main_random_voices_enabled():
-        friendly = _friendly_voice_name(voice)
         greeting = (
-            f"Friday online, {who}. Your session voice today is {friendly}. "
-            f"All responses this chat will use this voice."
+            f"Hey {who}, it's Friday — good to see you. "
+            "New chat, fresh voice; I'm here when you're ready."
         )
     elif voice in HINDI_HINGLISH_POOL:
-        friendly = _friendly_voice_name(voice)
         greeting = (
-            f"Friday online, {who}. Your session voice is {friendly}, "
-            "suited to Hindi or Hinglish. All responses this chat will use this voice."
+            f"Hey {who}, Friday here. "
+            "I picked a voice that sits nicer with Hindi and Hinglish — hope that works for you."
         )
     else:
         greeting = (
-            f"Friday online, {who}. Main assistant voice is active for this chat. "
-            "Ambient and subagents may use other voices."
+            f"Hey {who}, it's Friday — I'm with you on this chat."
         )
     try:
         subprocess.Popen(

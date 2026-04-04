@@ -4,20 +4,19 @@ friday_speaker.py — common TTS singleton used by every Python script in this r
 All scripts (friday-listen, friday-ambient, cursor-reply-watch, etc.) import
 FridaySpeaker instead of manually spawning friday-speak.py via subprocess.
 
-Serialisation:
-  1. A local threading.Lock prevents two threads in the same process from
-     speaking simultaneously.
-  2. A Redis distributed lock (friday:tts:lock) prevents two PROCESSES from
-     speaking simultaneously (ambient, listen, cursor-reply, Cursor agent).
-  Priority calls break the Redis lock first so urgent speech is never queued.
-  If Redis is down both locks are skipped (fail-open).
+Serialisation lives inside friday-speak.py itself (Redis distributed lock +
+file lock), so this module does NOT double-lock.  It provides:
+  • Text sanitisation (strip redacted tokens)
+  • Consistent env-var building
+  • A local threading.Lock so two in-process threads don't spawn two
+    friday-speak.py subprocesses at the same instant (the child will
+    still serialise via Redis, but avoiding the spawn storm is cheaper).
 
 Usage:
     from friday_speaker import speaker   # singleton, ready to use
 
-    speaker.speak("Hello")                         # fire-and-forget (queued behind lock)
+    speaker.speak("Hello")                         # fire-and-forget (background thread)
     duration = speaker.speak_blocking("Hello")     # waits for playback, returns seconds
-    speaker.speak_blocking("Hello", voice="en-GB-SoniaNeural")
     speaker.speak("Urgent", priority=True, bypass_cursor_defer=True)
 """
 from __future__ import annotations
@@ -29,81 +28,16 @@ import sys
 import threading
 import time
 import unicodedata
-import uuid
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SPEAK_SCRIPT = _REPO_ROOT / "skill-gateway" / "scripts" / "friday-speak.py"
 
-_REDIS_URL = os.environ.get("OPENCLAW_REDIS_URL", "").strip() or "redis://127.0.0.1:6379"
-_REDIS_TTS_LOCK = "friday:tts:lock"
-_REDIS_TTS_LOCK_TTL = 90
-
-# Local threading lock — serialises speak calls within the same Python process
+# Local lock — avoids spawning two friday-speak.py at the exact same instant.
+# The child process does its own Redis + file lock, but this prevents the
+# burst of process spawns that overloads Edge TTS before the first child
+# can even acquire its lock.
 _local_lock = threading.Lock()
-
-
-# ── Redis helpers (lazy import — no hard dependency) ──────────────────────────
-
-_redis_client = None
-_redis_init_done = False
-_redis_init_lock = threading.Lock()
-
-
-def _get_redis():
-    global _redis_client, _redis_init_done
-    if _redis_init_done:
-        return _redis_client
-    with _redis_init_lock:
-        if _redis_init_done:
-            return _redis_client
-        try:
-            import redis as _redis_mod
-            _redis_client = _redis_mod.Redis.from_url(_REDIS_URL, decode_responses=True, socket_timeout=2)
-            _redis_client.ping()
-        except Exception:
-            _redis_client = None
-        _redis_init_done = True
-        return _redis_client
-
-
-def _acquire_redis_lock(token: str, priority: bool = False, timeout: float = 60.0) -> bool:
-    """Acquire the global TTS Redis lock with a unique token.  Returns True when safe to speak."""
-    r = _get_redis()
-    if r is None:
-        return True  # fail-open
-
-    if priority:
-        try:
-            r.delete(_REDIS_TTS_LOCK)
-        except Exception:
-            pass
-        time.sleep(0.05)
-
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            if r.set(_REDIS_TTS_LOCK, token, nx=True, ex=_REDIS_TTS_LOCK_TTL):
-                return True
-            holder = r.get(_REDIS_TTS_LOCK)
-            if holder == token:
-                return True
-        except Exception:
-            return True  # fail-open
-        time.sleep(0.15)
-    return False
-
-
-def _release_redis_lock(token: str) -> None:
-    r = _get_redis()
-    if r is None:
-        return
-    try:
-        holder = r.get(_REDIS_TTS_LOCK)
-        if holder == token:
-            r.delete(_REDIS_TTS_LOCK)
-    except Exception:
-        pass
 
 
 # ── Text sanitisation (runs before every TTS call) ────────────────────────────
@@ -176,7 +110,7 @@ class FridaySpeaker:
         interrupt_music: bool = False,
         extra_env: dict[str, str] | None = None,
     ) -> None:
-        """Fire-and-forget TTS — returns immediately, audio queued behind lock."""
+        """Fire-and-forget TTS — returns immediately, audio queued via local lock."""
         clean = _strip_redacted(text)
         if not clean or len(re.sub(r"[^a-zA-Z0-9\u0900-\u097F]", "", clean)) < 2:
             return
@@ -193,7 +127,7 @@ class FridaySpeaker:
         )
         threading.Thread(
             target=self._run_locked,
-            args=(clean, env, priority),
+            args=(clean, env),
             daemon=True,
         ).start()
 
@@ -210,9 +144,9 @@ class FridaySpeaker:
         pitch: str | None = None,
         interrupt_music: bool = False,
         extra_env: dict[str, str] | None = None,
-        timeout: float = 120.0,
+        timeout: float | None = None,
     ) -> float:
-        """Blocking TTS — acquires both locks, waits for playback, returns duration."""
+        """Blocking TTS — waits for playback, returns duration in seconds."""
         clean = _strip_redacted(text)
         if not clean or len(re.sub(r"[^a-zA-Z0-9\u0900-\u097F]", "", clean)) < 2:
             return 0.0
@@ -228,24 +162,19 @@ class FridaySpeaker:
             extra_env=extra_env,
         )
         t0 = time.perf_counter()
-        self._run_locked(clean, env, priority, timeout=timeout)
+        self._run_locked(clean, env, timeout=timeout)
         return time.perf_counter() - t0
 
     # ── Internal ───────────────────────────────────────────────────────────
 
-    def _run_locked(
-        self,
-        clean: str,
-        env: dict[str, str],
-        priority: bool,
-        timeout: float = 120.0,
-    ) -> None:
-        """Local lock → Redis lock → run friday-speak.py → release both."""
-        token = f"{os.getpid()}:{uuid.uuid4().hex[:8]}"
+    def _run_locked(self, clean: str, env: dict[str, str], timeout: float | None = None) -> None:
+        """Local lock → spawn friday-speak.py (it handles Redis lock internally).
 
+        timeout=None waits for playback to finish (no cap). friday-speak.py enforces its
+        own playback budget when configured; killing the child here at thirty seconds
+        used to truncate long TTS and looked like a broken voice.
+        """
         with _local_lock:
-            if not _acquire_redis_lock(token, priority=priority):
-                return
             try:
                 subprocess.run(
                     [self._python, self._script, clean],
@@ -256,8 +185,6 @@ class FridaySpeaker:
                 )
             except Exception:
                 pass
-            finally:
-                _release_redis_lock(token)
 
     def _build_env(
         self,

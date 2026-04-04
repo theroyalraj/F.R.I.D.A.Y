@@ -83,12 +83,11 @@ Respect `FRIDAY_CURSOR_NARRATION` from `.env` — if it is false/off/0/no, skip 
 
 ## Relationship with cursor-reply-watch.py
 
-`cursor-reply-watch.py` can ALSO capture thinking from JSONL transcripts (`FRIDAY_CURSOR_SPEAK_THINKING`). When `FRIDAY_CURSOR_NARRATION` is on, the watcher **automatically suppresses** its own thinking capture to avoid double-voicing — **this rule** is the primary thinking narrator, and the watcher stays quiet.
+`cursor-reply-watch.py` captures thinking from JSONL when `FRIDAY_CURSOR_SPEAK_THINKING` is on (default). With `FRIDAY_CURSOR_NARRATION` on, **watcher thinking stays on by default** — live agent `FRIDAY_TTS_THINKING` speaks are best-effort and often never run, so JSONL capture is the reliable path. `friday-speak.py` thinking singleton still limits overlap.
 
-When narration is OFF (e.g. `FRIDAY_CURSOR_NARRATION=false`), the watcher becomes the **fallback** thinking capturer — it polls the JSONL fast and catches thinking before redaction. So one or the other is always active, never both.
+Set `FRIDAY_CURSOR_SPEAK_THINKING_WITH_NARRATION=false` if you want **only** live agent thinking narration and no JSONL echo (watcher thinking off while narration is on).
 
-To force BOTH (not recommended — causes overlapping speech):
-  `FRIDAY_CURSOR_SPEAK_THINKING_WITH_NARRATION=true`
+When narration is OFF, the watcher is the primary thinking capturer from JSONL.
 
 ## Why this matters
 
