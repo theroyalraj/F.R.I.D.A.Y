@@ -7,7 +7,7 @@ The maintainer uses **`FRIDAY_TTS_VOICE_BLOCK`** in `.env`: a comma-separated li
 - **Always read the current value** from `.env` before suggesting or editing voice-related variables.
 - **Do not** set `FRIDAY_TTS_VOICE`, `FRIDAY_EDGE_TTS_VOICE`, `FRIDAY_WIN_TTS_VOICE`, sticky session files, or any example in docs to a blocked id.
 - **Default assistant Edge voice** for this repo is **`en-US-EmmaMultilingualNeural`** unless `.env` says otherwise (and that choice must not be blocked).
-- **House defaults** also treat **`en-AU-WilliamNeural`** and **`en-AU-WilliamMultilingualNeural`** as blocked in code paths even if omitted from `.env` (see `skill-gateway/scripts/pick-session-voice.py` and `pc-agent/src/edgeTts.js`).
+- **House defaults** always block **`en-GB-RyanNeural`**, **`en-GB-ThomasNeural`**, **`en-AU-WilliamNeural`**, and **`en-AU-WilliamMultilingualNeural`** in code even if `.env` omits them (`pick-session-voice.py`, `friday-speak.py`, `edgeTts.js`). Extend the list with **`FRIDAY_TTS_VOICE_BLOCK`** for additional voices.
 
 Runtime enforcement: **`friday-speak.py`** clamps any sticky-session or env voice against the blocklist; **`POST /voice/set-voice`** rejects blocked ids; **`GET /voice/voices`** only lists allowed voices.
 

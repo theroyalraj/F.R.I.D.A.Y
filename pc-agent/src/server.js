@@ -20,6 +20,9 @@ import {
   isVoiceBlocked,
 } from './edgeTts.js';
 import { openAiTtsApiKey, openAiTtsConfigured, synthesizeOpenAiMp3 } from './openaiTts.js';
+import { createPerceptionRouter } from './perceptionRoutes.js';
+import { createSettingsRouter } from './settingsRoutes.js';
+import { perceptionDbConfigured, perceptionDbHealth } from './perceptionDb.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, '../public');
@@ -387,8 +390,12 @@ voiceRouter.post('/set-voice', (req, res) => {
 
 app.use('/voice', voiceRouter);
 
-app.get('/health', (_req, res) => {
-  res.json({ ok: true, service: 'openclaw-pc-agent' });
+app.get('/health', async (_req, res) => {
+  const body = { ok: true, service: 'openclaw-pc-agent' };
+  if (perceptionDbConfigured()) {
+    body.postgres = await perceptionDbHealth();
+  }
+  res.json(body);
 });
 
 app.get('/', (_req, res) => {
@@ -417,6 +424,18 @@ app.get('/friday/listen', (_req, res) => {
   res.sendFile(path.join(publicDir, 'listen.html'));
 });
 
+app.get('/listen.css', (_req, res) => {
+  res.setHeader('Content-Type', 'text/css');
+  res.setHeader('Cache-Control', 'public, max-age=3600');
+  res.sendFile(path.join(publicDir, 'listen.css'));
+});
+
+app.get('/listen.js', (_req, res) => {
+  res.setHeader('Content-Type', 'application/javascript');
+  res.setHeader('Cache-Control', 'public, max-age=3600');
+  res.sendFile(path.join(publicDir, 'listen.js'));
+});
+
 app.get('/jarvis', (_req, res) => {
   res.redirect(302, '/friday');
 });
@@ -429,6 +448,9 @@ app.post('/task', auth, async (req, res, next) => {
     next(e);
   }
 });
+
+app.use('/perception', createPerceptionRouter(auth));
+app.use('/settings', createSettingsRouter(auth));
 
 app.use((err, req, res, _next) => {
   req.log?.error({ err }, 'unhandled route error');

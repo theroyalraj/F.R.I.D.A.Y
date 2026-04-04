@@ -91,13 +91,28 @@ if str(_SG_SCRIPTS) not in sys.path:
 from indic_tts_voice import edge_voice_override_for_text  # noqa: E402
 
 # -- Config -------------------------------------------------------------------
-# Accept both names — FRIDAY_AMBIENT_POST_TTS_GAP is the .env canonical name
-SILENCE_SEC         = float(
-    os.environ.get("FRIDAY_AMBIENT_POST_TTS_GAP")
-    or os.environ.get("FRIDAY_AMBIENT_SILENCE_SEC", "6")
+# Ambient spacing: mutable so pc-agent GET /settings/ambient (Postgres) can override .env without rewriting .env.
+_timing_lock = threading.Lock()
+_post_tts_gap = float(
+    (os.environ.get("FRIDAY_AMBIENT_POST_TTS_GAP") or os.environ.get("FRIDAY_AMBIENT_SILENCE_SEC") or "12").split("#")[
+        0
+    ].strip()
 )
-MIN_AMBIENT_GAP     = float(os.environ.get("FRIDAY_AMBIENT_MIN_SILENCE_SEC", "4"))
-MAX_SILENCE_CAP     = float(os.environ.get("FRIDAY_AMBIENT_MAX_SILENCE_SEC", "25"))
+_min_ambient_gap = float(os.environ.get("FRIDAY_AMBIENT_MIN_SILENCE_SEC", "4").split("#")[0].strip())
+_max_silence_cap = float(os.environ.get("FRIDAY_AMBIENT_MAX_SILENCE_SEC", "25").split("#")[0].strip())
+
+
+def _get_ambient_timing() -> tuple[float, float, float]:
+    with _timing_lock:
+        return _post_tts_gap, _min_ambient_gap, _max_silence_cap
+
+
+def _set_ambient_timing(post: float, min_g: float, max_c: float) -> None:
+    global _post_tts_gap, _min_ambient_gap, _max_silence_cap
+    with _timing_lock:
+        _post_tts_gap, _min_ambient_gap, _max_silence_cap = post, min_g, max_c
+
+
 TONE                = os.environ.get("FRIDAY_AMBIENT_TONE", "mixed").strip().lower()
 FUNNY_RATIO         = float(os.environ.get("FRIDAY_AMBIENT_FUNNY_RATIO", "0.5"))
 TRACK_MEDIA         = _env_bool("FRIDAY_AMBIENT_TRACK_MEDIA", True)
@@ -147,6 +162,12 @@ def _cricket_hindi_enabled() -> bool:
     return _interests_cricket_ipl()
 
 
+def _ambient_main_voice_only() -> bool:
+    """When true, ambient uses FRIDAY_TTS_VOICE only — no Hinglish/Devanagari routing or FRIDAY_AMBIENT_TTS_VOICE."""
+    v = os.environ.get("FRIDAY_AMBIENT_MAIN_VOICE_ONLY", "").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
 def _ambient_line_tts_voice(line: str, mode: str) -> str | None:
     """
     Route Hindi / Hinglish ambient lines to appropriate Edge voices.
@@ -154,6 +175,8 @@ def _ambient_line_tts_voice(line: str, mode: str) -> str | None:
     Devanagari → Hindi neural; Roman Hinglish hints → Indian English neural.
     Cricket + Hindi mode but English-only model output → Indian English (not British ambient).
     """
+    if _ambient_main_voice_only():
+        return None
     o = edge_voice_override_for_text(line)
     if o:
         return o
@@ -379,6 +402,28 @@ def _witty_fallback_pool() -> list[str]:
     return pool if pool else WITTY_FALLBACKS
 
 
+def _poll_pc_agent_ambient_timing() -> None:
+    """Pull ambient spacing overrides from Postgres via pc-agent (no .env writes)."""
+    secret = os.environ.get("PC_AGENT_SECRET", "").strip()
+    base = os.environ.get("PC_AGENT_URL", "http://127.0.0.1:3847").rstrip("/")
+    if not secret:
+        return
+    url = f"{base}/settings/ambient"
+    headers = {"Authorization": f"Bearer {secret}", "ngrok-skip-browser-warning": "1"}
+    while True:
+        try:
+            req = urllib.request.Request(url, headers=headers, method="GET")
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                j = json.loads(resp.read().decode())
+            post = float(j.get("postTtsGap"))
+            min_g = float(j.get("minSilenceSec"))
+            max_c = float(j.get("maxSilenceSec"))
+            _set_ambient_timing(post, min_g, max_c)
+        except Exception:
+            pass
+        time.sleep(15)
+
+
 _db_raw = os.environ.get("FRIDAY_AMBIENT_DB_PATH", "data/friday.db").strip()
 DB_PATH = Path(_db_raw) if Path(_db_raw).is_absolute() else ROOT / _db_raw
 
@@ -387,8 +432,6 @@ TTS_ACTIVE_FILE = Path(tempfile.gettempdir()) / "friday-tts-active"   # written 
 AMBIENT_SPEAKING_FILE = Path(tempfile.gettempdir()) / "friday-ambient-speaking.txt"
 AMBIENT_PID_FILE= Path(tempfile.gettempdir()) / "friday-ambient.pid"
 SPEAK_SCRIPT    = ROOT / "skill-gateway" / "scripts" / "friday-speak.py"
-
-POST_TTS_GAP  = float(os.environ.get("FRIDAY_AMBIENT_POST_TTS_GAP", "12"))   # wait this long after TTS ends
 
 VERBOSE_RATIO = float(os.environ.get("FRIDAY_AMBIENT_VERBOSE_RATIO", "0.30"))  # 30% of turns are longer / richer
 SONG_CHANCE   = float(os.environ.get("FRIDAY_AMBIENT_SONG_CHANCE",   "0.12"))  # 12% of ambient turns play music
@@ -2307,7 +2350,7 @@ def speak_blocking(text: str, voice: str | None = None) -> float:
     env.pop("FRIDAY_TTS_PRIORITY", None)
     if voice:
         env["FRIDAY_TTS_VOICE"] = voice
-    else:
+    elif not _ambient_main_voice_only():
         av = os.environ.get("FRIDAY_AMBIENT_TTS_VOICE", "").strip()
         if av:
             env["FRIDAY_TTS_VOICE"] = av
@@ -2360,12 +2403,13 @@ def speak_child(text: str | None = None) -> None:
     env = {
         **os.environ,
         "FRIDAY_TTS_USE_SESSION_STICKY_VOICE": "false",
-        "FRIDAY_TTS_RATE":  SUB_VOICE_RATE,
-        "FRIDAY_TTS_PITCH": SUB_VOICE_PITCH,
     }
-    subv = os.environ.get("FRIDAY_AMBIENT_SUB_TTS_VOICE", "").strip()
-    if subv:
-        env["FRIDAY_TTS_VOICE"] = subv
+    if not _ambient_main_voice_only():
+        env["FRIDAY_TTS_RATE"] = SUB_VOICE_RATE
+        env["FRIDAY_TTS_PITCH"] = SUB_VOICE_PITCH
+        subv = os.environ.get("FRIDAY_AMBIENT_SUB_TTS_VOICE", "").strip()
+        if subv:
+            env["FRIDAY_TTS_VOICE"] = subv
     try:
         subprocess.Popen(
             [sys.executable, str(SPEAK_SCRIPT), phrase.strip()],
@@ -2586,9 +2630,10 @@ def refill_content_queue(conn, r) -> None:
 
 # -- Main brain ---------------------------------------------------------------
 def _jitter_threshold() -> float:
-    """Dynamic silence threshold: POST_TTS_GAP ± jitter, capped by env bounds."""
-    base = POST_TTS_GAP + random.uniform(-1.5, 3.5)
-    return max(MIN_AMBIENT_GAP, min(MAX_SILENCE_CAP, base))
+    """Dynamic silence threshold: post-TTS gap ± jitter, capped by min/max."""
+    post, min_g, max_c = _get_ambient_timing()
+    base = post + random.uniform(-1.5, 3.5)
+    return max(min_g, min(max_c, base))
 
 
 def main() -> None:
@@ -2633,10 +2678,12 @@ def main() -> None:
 
     last_ambient = 0.0
     speak_lock   = threading.Lock()
+    post0, min0, max0 = _get_ambient_timing()
     log.info(
         "Ambient brain online — post_tts_gap=%.1fs min_gap=%.1fs tone=%s",
-        POST_TTS_GAP, MIN_AMBIENT_GAP, TONE,
+        post0, min0, TONE,
     )
+    threading.Thread(target=_poll_pc_agent_ambient_timing, daemon=True).start()
 
     try:
         while True:
@@ -2655,12 +2702,13 @@ def main() -> None:
 
             # ── Dynamic silence gate: time since last TTS ended ────────────────
             since_tts = _seconds_since_last_tts()
-            threshold = _jitter_threshold()   # POST_TTS_GAP ± jitter
+            threshold = _jitter_threshold()   # post-TTS gap ± jitter
             if since_tts < threshold:
                 continue
 
-            # ── Ambient spacing: don't fire faster than MIN_AMBIENT_GAP ─────────
-            if time.time() - last_ambient < MIN_AMBIENT_GAP:
+            _, min_gap, _ = _get_ambient_timing()
+            # ── Ambient spacing: don't fire faster than min_gap ─────────
+            if time.time() - last_ambient < min_gap:
                 continue
 
             with speak_lock:
@@ -2669,7 +2717,8 @@ def main() -> None:
                     continue
                 if _seconds_since_last_tts() < threshold:
                     continue
-                if time.time() - last_ambient < MIN_AMBIENT_GAP:
+                _, min_gap2, _ = _get_ambient_timing()
+                if time.time() - last_ambient < min_gap2:
                     continue
 
                 # ── Acquire distributed TTS lock FIRST — before any API call ──

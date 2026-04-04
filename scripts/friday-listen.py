@@ -337,34 +337,6 @@ _EVERY_N_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-_ENV_PATH = root / ".env"
-
-
-def _read_env_value(key: str) -> str | None:
-    """Read a single key from .env file."""
-    if not _ENV_PATH.exists():
-        return None
-    for line in _ENV_PATH.read_text(encoding="utf-8").splitlines():
-        t = line.strip()
-        if t.startswith(f"{key}="):
-            return t[len(key) + 1:].split("#")[0].strip().strip('"').strip("'")
-    return None
-
-
-def _write_env_value(key: str, value: str) -> None:
-    """Update or append a key=value line in .env."""
-    lines = _ENV_PATH.read_text(encoding="utf-8").splitlines(keepends=True)
-    found = False
-    for i, line in enumerate(lines):
-        if re.match(rf"^{re.escape(key)}\s*=", line):
-            lines[i] = f"{key}={value}\n"
-            found = True
-            break
-    if not found:
-        lines.append(f"{key}={value}\n")
-    _ENV_PATH.write_text("".join(lines), encoding="utf-8")
-
-
 def _restart_ambient() -> None:
     """Kill all running ambient processes and start a fresh one."""
     try:
@@ -389,43 +361,49 @@ def _restart_ambient() -> None:
         log.warning("Ambient restart failed: %s", e)
 
 
-_NARRATE_PATTERN = re.compile(
-    r"(narrate|what'?s? on (my )?screen|describe (my |the )?screen|"
-    r"what (am i|do i have|is) (looking at|on screen|open)|"
-    r"look at (my )?screen|screen narrat|read (my |the )?screen|"
-    r"what('?s| is) (this|that|here)|tell me what('?s| is) on)",
-    re.IGNORECASE,
-)
+def _agent_bearer_headers() -> dict[str, str] | None:
+    secret = (os.environ.get("PC_AGENT_SECRET") or "").strip()
+    if not secret:
+        return None
+    return {
+        "Authorization": f"Bearer {secret}",
+        "Content-Type": "application/json",
+        "ngrok-skip-browser-warning": "1",
+    }
 
-_NARRATE_SCRIPT = root / "scripts" / "narrate-screen.py"
+
+def _get_ambient_settings_remote() -> dict | None:
+    h = _agent_bearer_headers()
+    if not h:
+        return None
+    try:
+        r = req_lib.get(f"{AGENT_URL}/settings/ambient", headers=h, timeout=6)
+        if r.status_code == 503:
+            return None
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        log.debug("GET /settings/ambient failed: %s", e)
+        return None
 
 
-def try_handle_narrate_screen(text: str) -> bool:
-    """Intercept narrate / screen description commands. Returns True if handled."""
-    if not _NARRATE_PATTERN.search(text):
-        return False
-
-    speak(f"Looking at your screen now, {USER_DISPLAY}.")
-    log.info("Screen narration requested.")
-
-    def _capture_and_speak():
-        try:
-            result = subprocess.run(
-                [sys.executable, str(_NARRATE_SCRIPT), "--silent"],
-                capture_output=True, timeout=30, cwd=str(root),
-            )
-            description = (result.stdout or b"").decode(errors="replace").strip()
-            if not description:
-                description = "Couldn't get a description — check the API key or screen capture."
-            speak(description)
-        except subprocess.TimeoutExpired:
-            speak(f"Screen narration timed out, {USER_DISPLAY}.")
-        except Exception as e:
-            log.warning("Screen narration failed: %s", e)
-            speak(f"Screen narration hit an error: {str(e)[:80]}")
-
-    threading.Thread(target=_capture_and_speak, daemon=True).start()
-    return True
+def _put_ambient_settings_remote(body: dict) -> tuple[bool, str]:
+    h = _agent_bearer_headers()
+    if not h:
+        return False, "PC_AGENT_SECRET is not set in your environment."
+    try:
+        r = req_lib.put(f"{AGENT_URL}/settings/ambient", headers=h, json=body, timeout=12)
+        if r.status_code == 503:
+            return False, "OpenClaw Postgres is not configured on pc-agent. Set OPENCLAW_DATABASE_URL and create table openclaw_settings."
+        if not r.ok:
+            try:
+                err = r.json().get("error")
+            except Exception:
+                err = None
+            return False, str(err or r.text or r.reason)[:240]
+        return True, ""
+    except Exception as e:
+        return False, str(e)[:200]
 
 
 def try_handle_whatsapp_read(text: str) -> bool:
@@ -509,10 +487,23 @@ def try_handle_whatsapp_read(text: str) -> bool:
 
 def try_handle_ambient_frequency(text: str) -> bool:
     """
-    If text semantically means 'speak more/less often' or 'every N seconds',
-    update .env and restart ambient. Returns True if handled.
+    If text means 'speak more/less often' or 'every N seconds', persist timing in Postgres
+    via pc-agent /settings/ambient (never writes .env). Restarts ambient so it picks up immediately.
     """
     lower = text.lower()
+
+    def _current_post_gap() -> float:
+        j = _get_ambient_settings_remote()
+        if j and j.get("postTtsGap") is not None:
+            try:
+                return float(j["postTtsGap"])
+            except (TypeError, ValueError):
+                pass
+        raw = (os.environ.get("FRIDAY_AMBIENT_POST_TTS_GAP") or os.environ.get("FRIDAY_AMBIENT_SILENCE_SEC") or "12").split("#")[0].strip()
+        try:
+            return float(raw)
+        except ValueError:
+            return 12.0
 
     # Explicit "every N seconds/minutes"
     m = _EVERY_N_PATTERN.search(lower)
@@ -521,31 +512,46 @@ def try_handle_ambient_frequency(text: str) -> bool:
         unit = m.group(2).lower()
         secs = n * 60 if "min" in unit else n
         secs = max(3, min(300, secs))
-        _write_env_value("FRIDAY_AMBIENT_SILENCE_SEC", str(secs))
-        _write_env_value("FRIDAY_AMBIENT_MIN_SILENCE_SEC", str(max(3, secs - 2)))
+        ok, err = _put_ambient_settings_remote(
+            {
+                "postTtsGap": secs,
+                "minSilenceSec": max(3, secs - 2),
+            }
+        )
+        if not ok:
+            speak(f"Couldn't save ambient timing, {USER_DISPLAY}. {err}")
+            return True
         threading.Thread(target=_restart_ambient, daemon=True).start()
         speak(f"Done, {USER_DISPLAY}. I'll chime in roughly every {secs} seconds from now on.")
-        log.info("Ambient frequency set to %ds by voice command.", secs)
+        log.info("Ambient post_tts_gap set to %ds in Postgres by voice command.", secs)
         return True
 
     if _MORE_PATTERNS.search(lower):
-        current = float(_read_env_value("FRIDAY_AMBIENT_SILENCE_SEC") or "12")
+        current = _current_post_gap()
         new_val = max(3, int(current * 0.55))
-        _write_env_value("FRIDAY_AMBIENT_SILENCE_SEC", str(new_val))
-        _write_env_value("FRIDAY_AMBIENT_MIN_SILENCE_SEC", str(max(3, new_val - 2)))
+        ok, err = _put_ambient_settings_remote(
+            {"postTtsGap": new_val, "minSilenceSec": max(3, new_val - 2)}
+        )
+        if not ok:
+            speak(f"Couldn't save ambient timing, {USER_DISPLAY}. {err}")
+            return True
         threading.Thread(target=_restart_ambient, daemon=True).start()
         speak(f"Got it, {USER_DISPLAY}. Increasing my frequency — I'll speak roughly every {new_val} seconds.")
-        log.info("Ambient frequency increased to %ds by voice command.", new_val)
+        log.info("Ambient post_tts_gap increased to %ds in Postgres by voice command.", new_val)
         return True
 
     if _LESS_PATTERNS.search(lower):
-        current = float(_read_env_value("FRIDAY_AMBIENT_SILENCE_SEC") or "12")
+        current = _current_post_gap()
         new_val = min(180, int(current * 2.0))
-        _write_env_value("FRIDAY_AMBIENT_SILENCE_SEC", str(new_val))
-        _write_env_value("FRIDAY_AMBIENT_MIN_SILENCE_SEC", str(max(3, new_val - 5)))
+        ok, err = _put_ambient_settings_remote(
+            {"postTtsGap": new_val, "minSilenceSec": max(3, new_val - 5)}
+        )
+        if not ok:
+            speak(f"Couldn't save ambient timing, {USER_DISPLAY}. {err}")
+            return True
         threading.Thread(target=_restart_ambient, daemon=True).start()
         speak(f"Understood, {USER_DISPLAY}. Dialling it back — I'll speak roughly every {new_val} seconds.")
-        log.info("Ambient frequency reduced to %ds by voice command.", new_val)
+        log.info("Ambient post_tts_gap reduced to %ds in Postgres by voice command.", new_val)
         return True
 
     return False
@@ -797,11 +803,6 @@ def main():
 
         # Ambient frequency control (semantic intercept before routing to agent)
         if try_handle_ambient_frequency(text):
-            post_event("listening", f"Ready for your command, {USER_DISPLAY}.")
-            continue
-
-        # Screen narration intercept
-        if try_handle_narrate_screen(text):
             post_event("listening", f"Ready for your command, {USER_DISPLAY}.")
             continue
 

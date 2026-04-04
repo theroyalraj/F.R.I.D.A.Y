@@ -1,16 +1,24 @@
 #!/usr/bin/env python3
 """
-narrate-screen.py — take a screenshot and narrate what's on screen via Claude vision + TTS.
+narrate-screen.py — take a screenshot and describe it via Claude vision (+ optional TTS).
+
+The friday-listen voice daemon does not invoke this script (no hot-mic screen narration).
+Use the CLI when you want a capture; use --store to persist to Postgres only (--silent for no TTS).
 
 Usage:
   python scripts/narrate-screen.py              # narrate full screen
   python scripts/narrate-screen.py --silent     # print description only, no TTS
+  python scripts/narrate-screen.py --store      # save description to Postgres via pc-agent /perception/capture
+  python scripts/narrate-screen.py --store --store-image   # also store JPEG (large payloads)
   python scripts/narrate-screen.py --focus      # narrate focused window only (future)
 
 Env vars (from .env):
   ANTHROPIC_API_KEY   — required for vision
   FRIDAY_USER_NAME    — spoken name (default: Raj)
   FRIDAY_NARRATE_MODEL — claude model for vision (default: claude-haiku-4-5)
+  PC_AGENT_SECRET     — Bearer for POST /perception/capture when using --store
+  PC_AGENT_BASE_URL   — default http://127.0.0.1:3847
+  OPENCLAW_DATABASE_URL — must be set in .env for pc-agent (see .env.example)
 """
 
 import argparse
@@ -141,23 +149,73 @@ def narrate_image(jpeg_bytes: bytes, prompt: str | None = None) -> str:
         return f"Vision API error: {e}"
 
 
+def store_perception(jpeg_bytes: bytes | None, description: str, include_image: bool) -> None:
+    """POST vision result to pc-agent perception store (Postgres + optional Redis pointer)."""
+    import urllib.request
+
+    base = (_read_env_key("PC_AGENT_BASE_URL") or "http://127.0.0.1:3847").strip().rstrip("/")
+    secret = _read_env_key("PC_AGENT_SECRET").strip()
+    if not secret:
+        print("[narrate-screen] --store skipped: set PC_AGENT_SECRET in .env", file=sys.stderr)
+        return
+    body: dict = {
+        "sourceType": "screen_vision",
+        "descriptionText": description,
+        "metadata": {"origin": "narrate-screen.py"},
+    }
+    if include_image and jpeg_bytes:
+        body["imageBase64"] = base64.standard_b64encode(jpeg_bytes).decode()
+        body["imageMime"] = "image/jpeg"
+    data = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(
+        f"{base}/perception/capture",
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {secret}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            out = json.loads(resp.read().decode())
+        print(f"[narrate-screen] stored id={out.get('id')}", file=sys.stderr)
+    except Exception as e:
+        print(f"[narrate-screen] store failed: {e}", file=sys.stderr)
+
+
 def speak(text: str) -> None:
-    """Fire-and-forget TTS."""
+    """TTS via friday-speak; blocks until playback finishes (caller may rely on process exit)."""
     if not SPEAK_SCRIPT.exists():
         print(text)
         return
     env = {**os.environ, "FRIDAY_TTS_BYPASS_CURSOR_DEFER": "true", "FRIDAY_TTS_PRIORITY": "1"}
-    subprocess.Popen(
-        [sys.executable, str(SPEAK_SCRIPT), text],
-        cwd=str(root),
-        env=env,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
+    run_kw: dict = {
+        "cwd": str(root),
+        "env": env,
+        "timeout": 180,
+    }
+    if sys.platform == "win32":
+        run_kw["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        subprocess.run([sys.executable, str(SPEAK_SCRIPT), text], **run_kw)
+    except subprocess.TimeoutExpired:
+        print("[narrate-screen] TTS timed out", file=sys.stderr)
 
 
 def main():
     ap = argparse.ArgumentParser(description="Narrate screen via Claude vision + TTS")
     ap.add_argument("--silent", action="store_true", help="Print description, don't speak it")
+    ap.add_argument(
+        "--store",
+        action="store_true",
+        help="Save description to OpenClaw perception DB via pc-agent (needs OPENCLAW_DATABASE_URL on agent + PC_AGENT_SECRET)",
+    )
+    ap.add_argument(
+        "--store-image",
+        action="store_true",
+        help="With --store, include JPEG as base64 (large request bodies)",
+    )
     ap.add_argument("--prompt", default=None, help="Custom question about the screen")
     args = ap.parse_args()
 
@@ -171,6 +229,9 @@ def main():
     print(f"[narrate-screen] got response in {time.time()-t0:.1f}s", file=sys.stderr)
 
     print(description)
+
+    if args.store:
+        store_perception(jpeg, description, include_image=args.store_image)
 
     if not args.silent:
         speak(description)

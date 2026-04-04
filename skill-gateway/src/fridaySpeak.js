@@ -236,7 +236,8 @@ export function speakGatewayStartup(log, which = 'gateway', chainOpts = {}) {
 export function speakTaskDone(summary, log) {
   const base  = pick(taskDonePhrases());
   const extra = summary ? ` ${String(summary).slice(0, 100).trim()}` : '';
-  speakFridayPy(base + extra, log);
+  // Always bypass Cursor/IDE defer — task-complete is the “done” cue; startup already bypasses.
+  speakFridayPy(base + extra, log, { bypassCursorDefer: true });
 }
 
 /**

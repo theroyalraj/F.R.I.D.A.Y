@@ -120,6 +120,20 @@ try:
 except Exception:
     pass
 
+_blocked_tts = {v.strip() for v in os.environ.get("FRIDAY_TTS_VOICE_BLOCK", "").split(",") if v.strip()}
+_blocked_tts |= {
+    "en-AU-WilliamNeural",
+    "en-AU-WilliamMultilingualNeural",
+    "en-GB-RyanNeural",
+    "en-GB-ThomasNeural",
+}
+if VOICE in _blocked_tts:
+    _pref = os.environ.get("FRIDAY_TTS_VOICE", "en-US-EmmaMultilingualNeural").strip() or "en-US-EmmaMultilingualNeural"
+    if _pref not in _blocked_tts:
+        VOICE = _pref
+    else:
+        VOICE = "en-US-EmmaMultilingualNeural"
+
 RATE   = os.environ.get("FRIDAY_TTS_RATE",   "+7.5%")
 PITCH  = os.environ.get("FRIDAY_TTS_PITCH",  "+2Hz")
 VOLUME = os.environ.get("FRIDAY_TTS_VOLUME", "+0%")

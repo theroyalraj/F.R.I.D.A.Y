@@ -1,0 +1,16 @@
+---
+description: Do not restart the OpenClaw stack (gateway, agent, restart-local) unless the user explicitly asks
+alwaysApply: true
+---
+
+# Never restart OpenClaw (agent policy)
+
+Unless the user **clearly and explicitly** requests it (e.g. "restart OpenClaw", "restart now", "restart the stack", "run restart-local", "npm run restart:local"):
+
+- **Do not** run `scripts/restart-local.ps1`, `npm run restart:local`, `npm run restart:skip`, or equivalent PowerShell `Start-Process` / shell flows whose purpose is to bounce the stack.
+- **Do not** kill listeners on ports **3847** or **3848** to force a restart.
+- **Do not** tell the user they "must restart" as a substitute for doing it yourself in chat — explain what to run only if they ask how to restart.
+
+**Still allowed:** editing code, `.env`, workflows, Docker files, docs; running tests, linters, one-off `curl` health checks, `clear_friday_locks.py`, or other tools that do **not** stop or respawn the gateway and pc-agent.
+
+**If a change requires a restart to take effect:** say so in text and let the **user** restart when they choose, unless they have already asked you to restart in this turn or the immediate prior instruction.

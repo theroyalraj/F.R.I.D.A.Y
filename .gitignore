@@ -12,4 +12,5 @@ alexa-lambda-python/config.json
 .alexa-cookie.json
 data/*.db
 data/*.db-*
+data/perception/
 .session-voice.json

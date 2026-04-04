@@ -55,17 +55,6 @@ if _ENV_FILE.exists():
 CHILD_VOICE = "en-US-AnaNeural"
 CHILD_ROLL_MAX = 25
 
-# Teen / young-adult — for subagents only (sounds older than Ana).
-TEEN_POOL = [
-    "en-GB-MaisieNeural",   # young female, Scottish-adjacent
-    "en-US-AvaNeural",
-    "en-IE-EmilyNeural",
-    "en-US-MichelleNeural",
-    "en-NZ-MollyNeural",
-    "en-US-SteffanNeural",
-    "en-NZ-MitchellNeural",  # young male, balances pool vs Ana-tier child
-]
-
 # Hindi + Indian English — good for Hindi or Roman Hinglish session TTS (matches indic_tts defaults).
 HINDI_HINGLISH_POOL = [
     "hi-IN-SwaraNeural",
@@ -79,26 +68,35 @@ _BLOCKED_VOICES = {v.strip() for v in os.environ.get("FRIDAY_TTS_VOICE_BLOCK", "
 _BLOCKED_VOICES |= {
     "en-AU-WilliamNeural",
     "en-AU-WilliamMultilingualNeural",
+    "en-GB-RyanNeural",
+    "en-GB-ThomasNeural",
 }
 
-# Main chat adults — balanced Jarvis / FRIDAY style; excludes Ana and teen-only voices.
+# ── Curated whitelist — only the best-quality voices ─────────────────────────
+# Tier 1: Multilingual Neural (newest, most natural, lowest robotic artefacts)
+# Tier 2: Expressive/high-quality single-locale picks
+# Excluded: older standard neural, flat-sounding, or user-blocked voices.
 ADULT_POOL = [v for v in [
-    "en-US-EmmaMultilingualNeural",
-    "en-US-AndrewMultilingualNeural",
-    "en-US-BrianMultilingualNeural",
-    "en-US-RogerNeural",
-    "en-GB-SoniaNeural",
-    "en-GB-LibbyNeural",
-    "en-US-GuyNeural",
-    "en-US-EricNeural",
-    "en-US-JennyNeural",
-    "en-US-AriaNeural",
-    "en-AU-NatashaNeural",
-    "en-IE-ConnorNeural",
-    "en-CA-LiamNeural",
-    "en-CA-ClaraNeural",
-    "en-IN-PrabhatNeural",
-    "en-IN-NeerjaExpressiveNeural",
+    # Tier 1 — Multilingual Neural (top quality)
+    "en-US-AndrewMultilingualNeural",   # warm American male
+    "en-US-BrianMultilingualNeural",    # smooth American male
+    "en-US-EmmaMultilingualNeural",     # expressive American female
+    "en-US-AvaMultilingualNeural",      # bright American female
+    # Tier 2 — Expressive single-locale (consistently good)
+    "en-US-ChristopherNeural",          # deep, confident American male
+    "en-US-GuyNeural",                  # clear American male anchor-style
+    "en-US-EricNeural",                 # calm, natural American male
+    "en-GB-SoniaNeural",                # polished British female
+    "en-IE-ConnorNeural",               # warm Irish male
+] if v not in _BLOCKED_VOICES]
+
+# Teen / subagent pool — also trimmed to best quality only
+TEEN_POOL = [v for v in [
+    "en-US-SteffanNeural",     # crisp young male
+    "en-US-AvaNeural",         # bright young female
+    "en-US-MichelleNeural",    # clear young female
+    "en-GB-MaisieNeural",      # Scottish-adjacent young female
+    "en-IE-EmilyNeural",       # warm Irish young female
 ] if v not in _BLOCKED_VOICES]
 
 # ── Paths ──────────────────────────────────────────────────────────────────────

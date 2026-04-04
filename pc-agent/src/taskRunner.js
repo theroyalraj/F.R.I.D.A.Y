@@ -5,7 +5,7 @@ import { inferClaudeModelForTask, isAutoModelEnabled } from './claudeRouter.js';
 import { sanitizeClaudeModel } from './claudeModel.js';
 
 // Sources that need fast conversational responses — use direct API, not CLI
-const FAST_SOURCES = new Set(['mic-daemon', 'voice', 'friday-mic-daemon']);
+const FAST_SOURCES = new Set(['mic-daemon', 'voice', 'friday-mic-daemon', 'whatsapp']);
 
 /**
  * Shared command path for Alexa→N8N→/task and Jarvis voice UI→/voice/command.
@@ -88,11 +88,13 @@ export async function runTask(body, reqLog, options = {}) {
 
   if (useFastApi) {
     const apiModel = (claudeModel === 'sonnet') ? 'sonnet' : 'haiku';
-    reqLog.info({ mode: 'api', apiModel }, 'invoking claude api (fast path)');
+    const apiTimeoutMs =
+      src === 'whatsapp' ? Math.min(TIMEOUT, 180_000) : Math.min(TIMEOUT, 20_000);
+    reqLog.info({ mode: 'api', apiModel, apiTimeoutMs }, 'invoking claude api (fast path)');
     try {
       const result = await callClaudeApi(t, {
         model:     apiModel,
-        timeoutMs: Math.min(TIMEOUT, 20_000),
+        timeoutMs: apiTimeoutMs,
         log:       reqLog,
       });
       reqLog.info({ mode: 'api', ok: result.ok, ms: result.ms, model: result.model }, 'task done');

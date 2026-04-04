@@ -15,6 +15,7 @@ Env vars (all optional):
   FRIDAY_PLAY_SECONDS  max play seconds (default: 45; --full ignores this)
   FRIDAY_PLAY_EARLY_STOP_SEC  trim this many seconds before natural end when duration metadata looks reliable (default: 2)
   FRIDAY_PLAY_MIN_TRUSTED_DURATION_SEC  if ffprobe duration is below this, metadata is treated as unreliable — no early trim, cap by FRIDAY_PLAY_SECONDS only (default: 30)
+  FRIDAY_PLAY_VOLUME     ffplay startup volume 0–100 (default: 100). Use ~10–20 for quiet background so TTS stays clear.
   FRIDAY_MUSIC_DEVICE  Windows: friendly-name substring for output (e.g. Speakers).
                        Briefly sets default endpoint so ffplay opens on that device,
                        then restores your previous default so TTS can stay on another output.
@@ -118,6 +119,16 @@ EARLY_STOP_SEC = _env_float("FRIDAY_PLAY_EARLY_STOP_SEC", "2")
 MIN_TRUSTED_DURATION_SEC = _env_float("FRIDAY_PLAY_MIN_TRUSTED_DURATION_SEC", "30")
 
 
+def _play_volume_percent() -> int:
+    """ffplay -volume is 0 (silent) through 100 (full)."""
+    raw = os.environ.get("FRIDAY_PLAY_VOLUME", "100").split("#")[0].strip()
+    try:
+        v = int(float(raw))
+    except ValueError:
+        v = 100
+    return max(0, min(100, v))
+
+
 def get_duration(mp3_path: Path) -> float | None:
     """Return audio duration in seconds using ffprobe, or None on failure."""
     try:
@@ -160,7 +171,8 @@ def play(mp3_path: Path):
         play_sec = MAX_SEC
         print(f"[friday-play] playing {'full' if not play_sec else f'{play_sec}s'} -> {SEARCH!r}", flush=True)
 
-    cmd = ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet"]
+    vol = _play_volume_percent()
+    cmd = ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", "-volume", str(vol)]
     if play_sec:
         cmd += ["-t", f"{play_sec:.2f}"]
     cmd.append(str(mp3_path))

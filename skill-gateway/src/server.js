@@ -490,7 +490,7 @@ app.post('/internal/last-result', async (req, res, next) => {
       if (fridaySpeakEnabled()) {
         speakTaskDone(speakSummary, req.log);
       } else {
-        speakWinTts(speakSummary, req.log);
+        speakWinTts(speakSummary, req.log, { bypassCursorDefer: true });
       }
     }
 

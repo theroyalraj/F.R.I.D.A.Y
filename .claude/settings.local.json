@@ -74,7 +74,24 @@
       "Bash(python scripts/gmail.py list --count 3)",
       "Bash(python -c \"import PIL; print\\(''PIL ok''\\); import mss; print\\(''mss ok''\\)\")",
       "Bash(python scripts/narrate-screen.py --silent)",
-      "Bash(curl -s http://127.0.0.1:8181/)"
+      "Bash(curl -s http://127.0.0.1:8181/)",
+      "Bash(curl -s http://127.0.0.1:8181/instance/connect/openclaw -H \"apikey: change-me\")",
+      "Bash(curl -s \"http://127.0.0.1:8181/instance/fetchInstances\" -H \"apikey: change-me\")",
+      "Bash(curl -s -X DELETE \"http://127.0.0.1:8181/instance/logout/openclaw\" -H \"apikey: change-me\")",
+      "Bash(curl -s -X POST \"http://127.0.0.1:8181/instance/restart/openclaw\" -H \"apikey: change-me\")",
+      "Bash(curl -s \"http://127.0.0.1:8181/instance/connect/openclaw\" -H \"apikey: change-me\")",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(d.get\\(''''qrcode'''',{}\\).get\\(''''base64'''',''''''''\\)[:100] or json.dumps\\(d\\)[:300]\\)\")",
+      "Bash(curl -s \"http://127.0.0.1:8181/instance/connectionState/openclaw\" -H \"apikey: change-me\")",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(json.dumps\\({k:v for k,v in d.items\\(\\) if k!=''''base64''''}, indent=2\\)\\)\")",
+      "Bash(docker ps:*)",
+      "Bash(curl -s -X DELETE \"http://127.0.0.1:8181/instance/delete/openclaw\" -H \"apikey: change-me\")",
+      "Bash(curl -s -X POST \"http://127.0.0.1:8181/instance/create\" -H \"apikey: change-me\" -H \"Content-Type: application/json\" -d '{\"\"instanceName\"\":\"\"openclaw\"\",\"\"qrcode\"\":true,\"\"integration\"\":\"\"WHATSAPP-BAILEYS\"\"}')",
+      "Bash(start \"\" \"http://127.0.0.1:8181/manager\")",
+      "Bash(powershell -NoProfile -Command \"Stop-Process -Id 44100,54304 -Force -ErrorAction SilentlyContinue; Start-Sleep 2; Set-Location D:/code/openclaw; Start-Process python -ArgumentList ''scripts/friday-listen.py'' -WorkingDirectory D:/code/openclaw -NoNewWindow; Start-Process python -ArgumentList ''scripts/friday-ambient.py'' -WorkingDirectory D:/code/openclaw -NoNewWindow; Write-Host ''Daemons restarted''\")",
+      "Bash(FRIDAY_TTS_VOICE=en-US-GuyNeural python skill-gateway/scripts/friday-speak.py \"Guy here. Anchor style, American.\")",
+      "Bash(FRIDAY_TTS_VOICE=en-US-GuyNeural FRIDAY_TTS_RATE=+18% python skill-gateway/scripts/friday-speak.py \"Guy here. This is the real neural voice — the decimal rate was breaking edge-TTS and sending everything to Windows SAPI. Fixed now.\")",
+      "Bash(powershell -NoProfile -Command \"Get-ChildItem ''C:/Users/rajut/AppData/Roaming/Cursor/'' -Recurse -Filter ''*.json'' -ErrorAction SilentlyContinue | Select-Object -First 5 FullName\")",
+      "Bash(powershell -NoProfile -Command \"Start-Process node -ArgumentList ''pc-agent/src/server.js'' -WorkingDirectory D:/code/openclaw -NoNewWindow; Start-Sleep 2; Write-Host ''pc-agent started''\")"
     ]
   }
 }

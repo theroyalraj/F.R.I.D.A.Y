@@ -47,6 +47,8 @@ export function getVoiceBlockSet(env = process.env) {
   );
   set.add('en-AU-WilliamNeural');
   set.add('en-AU-WilliamMultilingualNeural');
+  set.add('en-GB-RyanNeural');
+  set.add('en-GB-ThomasNeural');
   return set;
 }
 

@@ -237,6 +237,10 @@ Optional: require a shared secret header on the N8N webhook (leave empty to skip
 WHATSAPP_WEBHOOK_SECRET=optional-matching-secret
 ```
 
+**Allowlist + broadcast replies:** `WHATSAPP_ALLOWED_NUMBERS` (digits only, comma-separated) controls who may trigger commands. Set **`WHATSAPP_ALWAYS_REPLY_NUMBERS`** to the same list (or a superset) if every reply should go to **all** of those handsets — the workflow fans out one Evolution `sendText` per number. If `WHATSAPP_ALWAYS_REPLY_NUMBERS` is empty, only the sender gets the reply.
+
+Inbound WhatsApp tasks use **`source: whatsapp`** on `POST /task` so pc-agent uses the **Claude API fast path** (up to three minutes) instead of waiting on the CLI first.
+
 Restart compose after edits so N8N picks up env vars.
 
 ### 9.3 Start Redis + N8N + Evolution
@@ -276,7 +280,7 @@ If you set **`WHATSAPP_WEBHOOK_SECRET`**, configure Evolution (or a reverse prox
 ### 9.7 End-to-end check
 
 1. **pc-agent** running on the host (`node pc-agent/src/server.js` or your usual command).  
-2. Send a **text** WhatsApp message to the linked number. N8N should run **ParseEvolution → PCAgent → SendWhatsApp**; you get a reply with **`summary`** from Claude.  
+2. Send a **text** WhatsApp message to the linked number. N8N should run **ParseEvolution → PCAgent → FanoutWhatsApp → SendWhatsApp** (one send per entry in `WHATSAPP_ALWAYS_REPLY_NUMBERS`, or one to the sender if unset); you get a reply with **`summary`** from Claude.  
 3. **Groups** are ignored by the sample workflow (only 1:1 chats).  
 4. Do **not** expose N8N or Evolution to the public internet without TLS, auth, and rate limits.
 
