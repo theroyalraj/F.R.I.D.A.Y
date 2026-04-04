@@ -571,28 +571,41 @@ async def speak():
     is_playback = not (OUTPUT or STDOUT)
     if is_playback:
         # ── Global serialisation: wait for any other speak instance to finish ──
-        # This prevents ambient + voice-daemon speaking simultaneously regardless
-        # of which caller triggered us.  Max wait = 60 s; stale files (> 120 s)
+        # Uses O_CREAT|O_EXCL for atomic lock acquisition on NTFS — eliminates
+        # the TOCTOU race where two processes both see the file absent and both
+        # proceed to speak simultaneously.  Max wait = 60 s; stale files (> 120 s)
         # from crashed processes are cleaned up automatically.
         _wait_deadline = time.time() + 60.0
-        while TTS_ACTIVE_FILE.exists():
+        while True:
+            # Atomic try-acquire: only ONE process wins the O_CREAT|O_EXCL race.
             try:
-                existing_pid = int(TTS_ACTIVE_FILE.read_text(encoding="utf-8").strip())
-                if existing_pid == os.getpid():
-                    break  # somehow our own stale file
+                fd = os.open(str(TTS_ACTIVE_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                try:
+                    os.write(fd, str(os.getpid()).encode())
+                finally:
+                    os.close(fd)
+                break  # lock acquired — proceed to speak
+            except FileExistsError:
+                pass  # another process holds the lock — fall through to wait
+
+            # Lock is held — check for stale file (crashed process)
+            try:
                 age = time.time() - TTS_ACTIVE_FILE.stat().st_mtime
                 if age > 120:
                     TTS_ACTIVE_FILE.unlink(missing_ok=True)
-                    break
-            except (ValueError, OSError):
-                break
+                    continue  # retry atomic acquire immediately
+            except OSError:
+                pass  # file vanished between our check and stat — loop retries
+
             if time.time() > _wait_deadline:
+                # 60 s timeout — force-write to avoid permanent silence
+                try:
+                    TTS_ACTIVE_FILE.write_text(str(os.getpid()), encoding="utf-8")
+                except OSError:
+                    pass
                 break
+
             await asyncio.sleep(0.25)
-        try:
-            TTS_ACTIVE_FILE.write_text(str(os.getpid()), encoding="utf-8")
-        except OSError:
-            pass
 
     try:
         await _speak_inner()

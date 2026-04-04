@@ -5,9 +5,10 @@ pick-session-voice.py — assign one random TTS voice per Cursor chat session.
 How it works:
   1. Finds the most-recently-modified chat UUID from the Cursor agent-transcripts folder.
   2. Compares it to the stored chat ID in .session-voice.json (repo root).
-  3. If it's a NEW chat → pick a random voice from VOICE_POOL, persist it.
-  4. If it's the SAME chat → reuse the existing voice.
-  5. Prints the chosen voice name to stdout (so callers can read it).
+  3. If it's a NEW chat → pick a random voice from VOICE_POOL, persist it,
+     then speak a welcome greeting in that new voice.
+  4. If it's the SAME chat → reuse the existing voice silently.
+  5. Prints the chosen voice name to stdout.
 
 Usage:
   python pick-session-voice.py          # prints voice name, e.g. en-AU-WilliamNeural
@@ -16,6 +17,8 @@ Usage:
 import json
 import os
 import random
+import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -49,10 +52,32 @@ VOICE_POOL = [
 # ── Paths ──────────────────────────────────────────────────────────────────────
 _REPO_ROOT        = Path(__file__).resolve().parent.parent.parent
 _STATE_FILE       = _REPO_ROOT / ".session-voice.json"
+_SPEAK_SCRIPT     = Path(__file__).resolve().parent / "friday-speak.py"
 _TRANSCRIPTS_ROOT = Path(os.environ.get(
     "CURSOR_TRANSCRIPTS_DIR",
     r"C:\Users\rajut\.cursor\projects\d-code-openclaw\agent-transcripts"
 ))
+
+# ── Human-readable voice labels ────────────────────────────────────────────────
+_LOCALE_LABELS = {
+    "en-GB": "British",
+    "en-US": "American",
+    "en-AU": "Australian",
+    "en-IE": "Irish",
+    "en-CA": "Canadian",
+    "en-IN": "Indian English",
+}
+
+def _friendly_voice_name(voice: str) -> str:
+    """'en-AU-WilliamNeural' → 'William, Australian Neural voice'"""
+    parts  = voice.split("-", 2)            # ['en', 'AU', 'WilliamNeural']
+    locale = "-".join(parts[:2])            # 'en-AU'
+    label  = _LOCALE_LABELS.get(locale, locale)
+    name   = parts[2] if len(parts) > 2 else voice
+    name   = name.replace("Neural", "").strip()
+    # Insert space before each capital that follows a lowercase letter
+    name   = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", name)
+    return f"{name}, {label}"
 
 
 def _latest_chat_uuid() -> str | None:
@@ -81,21 +106,40 @@ def _save_state(state: dict) -> None:
         pass
 
 
-def pick_voice() -> str:
-    chat_id = _latest_chat_uuid()
-    state   = _load_state()
+def _speak_welcome(voice: str) -> None:
+    """Fire-and-forget: speak the session-start greeting in the new voice."""
+    friendly = _friendly_voice_name(voice)
+    greeting = (
+        f"Friday online, sir. Your session voice today is {friendly}. "
+        f"All responses this chat will use this voice."
+    )
+    try:
+        subprocess.Popen(
+            [sys.executable, str(_SPEAK_SCRIPT), greeting],
+            cwd=str(_REPO_ROOT),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception:
+        pass
 
-    if chat_id and state.get("chat_id") == chat_id and state.get("voice"):
-        # Same chat — return the sticky voice without changing anything
+
+def pick_voice() -> str:
+    chat_id   = _latest_chat_uuid()
+    state     = _load_state()
+    is_new    = not (chat_id and state.get("chat_id") == chat_id and state.get("voice"))
+
+    if not is_new:
+        # Same chat — return sticky voice silently
         return state["voice"]
 
-    # New chat (or no state yet) — pick a fresh random voice
-    # Avoid repeating the last voice if there's a pool big enough
+    # New chat (or no state yet) — pick a fresh random voice, avoid repeating last
     last_voice = state.get("voice", "")
-    pool = [v for v in VOICE_POOL if v != last_voice] or VOICE_POOL
-    new_voice = random.choice(pool)
+    pool       = [v for v in VOICE_POOL if v != last_voice] or VOICE_POOL
+    new_voice  = random.choice(pool)
 
+    # Persist BEFORE spawning the welcome (friday-speak.py reads .session-voice.json at startup)
     _save_state({"chat_id": chat_id, "voice": new_voice})
+    _speak_welcome(new_voice)
     return new_voice
 
 

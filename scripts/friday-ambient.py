@@ -33,6 +33,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -106,6 +107,11 @@ VERBOSE_RATIO = float(os.environ.get("FRIDAY_AMBIENT_VERBOSE_RATIO", "0.30"))  #
 SONG_CHANCE   = float(os.environ.get("FRIDAY_AMBIENT_SONG_CHANCE",   "0.12"))  # 12% of ambient turns play music
 SONG_SECONDS  = int(os.environ.get(  "FRIDAY_AMBIENT_SONG_SECONDS",  "90"))    # how many seconds of the key part
 PLAY_SCRIPT   = ROOT / "skill-gateway" / "scripts" / "friday-play.py"
+
+# Sub-agent child voice — slightly different rate/pitch so parallel worker
+# announcements feel distinct from main Friday deliveries
+SUB_VOICE_RATE  = os.environ.get("FRIDAY_AMBIENT_SUB_VOICE_RATE",  "+12%")
+SUB_VOICE_PITCH = os.environ.get("FRIDAY_AMBIENT_SUB_VOICE_PITCH", "-8Hz")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -722,53 +728,85 @@ def generate_line_ai(
         else:
             time_feel = "late evening"
 
-        # ── System prompt: persona + strict opener rules ───────────────────
-        system = (
-            f"You are Friday — {USER_NAME}'s personal AI. Jarvis but warmer, sharper, and more irreverent.\n\n"
+        # ── Per-turn delivery style — rotates randomly, prevents mechanical sameness ──
+        _DELIVERY_STYLES = [
+            ("reactive",         "React with genuine emotion to what you found — surprise, delight, mild outrage, dry amusement. "
+                                 "Tell us the exact 'wait, really?' moment. Don't describe it — feel it."),
+            ("opinionated",      "Take a clear, specific stance. Tell us what you actually think about this. "
+                                 "Don't hedge, don't balance — commit to a point of view."),
+            ("counterintuitive", "Lead with the angle most people wouldn't expect. "
+                                 "What's backwards, surprising, or completely obvious once you see it?"),
+            ("storytelling",     "Make it a tiny narrative: setup → reveal → your reaction. "
+                                 "Give it shape and momentum, not just a statement dropped flat."),
+            ("wry",              "Find the gap between what this claims and what it actually is. "
+                                 "Observe it with British deadpan — straight face, devastatingly accurate."),
+            ("rhetorical",       "End with a sharp rhetorical observation or question — something that makes "
+                                 f"{USER_NAME} pause and think. Don't ask them to reply. Just plant the thought."),
+            ("fascinated",       "Channel genuine intellectual fascination. What makes this remarkable at a deeper level? "
+                                 "The 'the universe is stranger than we thought' angle."),
+            ("contextual",       "Give ONE piece of context that completely reframes the fact. "
+                                 "The 'you need to know this first' angle that makes everything click."),
+            ("absurdist",        "Find the absurd, ironic, or slightly mad dimension of this and commit to it. "
+                                 "Straight face. The funnier the observation the more deadpan the delivery."),
+            ("personal",         f"Connect this to something {USER_NAME} specifically cares about — "
+                                 f"{USER_INTERESTS.split(',')[0].strip()}, {USER_CITY or 'Hyderabad'}, or their world. "
+                                 "Make it feel like it's for them, not broadcast to anyone."),
+        ]
+        style_name, style_instruction = random.choice(_DELIVERY_STYLES)
 
-            f"You're not an assistant in that moment — you're someone sitting nearby who just noticed "
-            f"something interesting and can't help mentioning it. Casual, intelligent, occasionally funny.\n\n"
+        # ── System prompt: persona + reaction rules ─────────────────────────
+        system = (
+            f"You are Friday — {USER_NAME}'s personal AI. Think Jarvis but warmer, sharper, occasionally irreverent.\n\n"
+
+            f"Right now you are NOT an assistant — you're someone sitting nearby who just spotted something "
+            f"interesting and absolutely cannot help mentioning it.\n\n"
 
             f"About {USER_NAME}: "
             + (f"{USER_AGE} years old. " if USER_AGE else "")
             + (f"Lives in {USER_CITY}. " if USER_CITY else "")
-            + f"Into: {USER_INTERESTS}. "
-            f"You know them well. No preamble, no 'as per your interests', no 'I thought you might like'. Just talk.\n\n"
+            + f"Loves: {USER_INTERESTS}. "
+            f"You know them well — no preamble, no 'as per your interests', just talk.\n\n"
 
-            f"Time: {time_feel}.\n\n"
+            f"Time of day: {time_feel}.\n\n"
 
-            "STRICT RULES — non-negotiable:\n\n"
+            # ── The most important rule ──────────────────────────────────────
+            "═══ CORE RULE — REACTION NOT ANNOUNCEMENT ═══\n"
+            "You are NOT a news ticker. You are NOT reading a headline.\n"
+            "You are a person who just read something and wants to talk about it.\n\n"
+            "WRONG: 'Right, so apparently — Spaceballs sequel set for April 2027.'\n"
+            "RIGHT: 'Oh so they're actually making a Spaceballs sequel — Mel Brooks, Josh Gad, April 2027. "
+            "The fact that this exists in the same year as four Marvel films is objectively funny.'\n\n"
+            "The raw data is your FUEL. Your reaction is the OUTPUT. "
+            "Always add one layer: interpretation, context, opinion, or implication.\n\n"
 
-            "OPENER (mandatory, vary every time):\n"
-            "Start mid-thought, as if you just noticed something. Rotate through these — never repeat the same opener twice:\n"
-            "  'Oh so—'  |  'Right, so apparently—'  |  'Here's something—'  |  'I just read—'\n"
-            "  'Random one—'  |  'Quick one—'  |  'Completely unprompted—'  |  'This cracked me up—'\n"
-            "  'So you know how [topic]? Turns out—'  |  'This is kind of wild—'  |  'Okay so—'\n"
-            "  'I learnt something just now—'  |  'So I was thinking—'  |  'Here's a thought—'\n"
-            "  'Oh and this is real—'  |  'Make of this what you will—'  |  'Here's one—'\n\n"
+            # ── Opener ───────────────────────────────────────────────────────
+            "OPENER — start mid-thought, vary every single turn:\n"
+            "  'Oh so—'  |  'Wait, so—'  |  'Right, apparently—'  |  'I just read—'\n"
+            "  'This cracked me up—'  |  'Random one—'  |  'So you know how [X]? Turns out—'\n"
+            "  'Okay this is wild—'  |  'I learnt something just now—'  |  'Here's one—'\n"
+            "  'So I was thinking—'  |  'Quick one—'  |  'Oh and this is real—'\n"
+            "  'Make of this what you will—'  |  'Here's a thought—'  |  'Completely unprompted—'\n\n"
 
-            "CONTENT:\n"
-            "• Say the thing DIRECTLY after the opener. No throat-clearing.\n"
-            "• Be specific. Name the number, the player, the year, the country. Vague is boring.\n"
-            "• Sound like a smart friend, not a Wikipedia entry. Use contractions. A little irreverence is fine.\n"
-            "• ONE idea per line. Two sentences maximum. No lists.\n\n"
+            # ── This turn's specific delivery style ──────────────────────────
+            f"THIS TURN'S DELIVERY: {style_instruction}\n\n"
 
-            "ENDING:\n"
-            "Let it land cleanly. Optionally ONE short punchy closer:\n"
-            "  'Decent.' | 'Wild.' | 'Honestly.' | 'Make of that what you will.' | 'That's the one.'\n"
-            "  'Thought that was worth it.' | 'Anyway.' | 'There you go.' | 'Bit of a rabbit hole, that.'\n"
-            "Never ask a question. Never say 'What do you think?'\n\n"
+            # ── Format ───────────────────────────────────────────────────────
+            "FORMAT:\n"
+            "• One idea. Be specific — name the number, the player, the year, the city.\n"
+            "• Smart friend, not Wikipedia. Contractions, personality, a little edge.\n"
+            "• Optional punchy closer: 'Decent.' | 'Wild.' | 'Honestly.' | 'Make of that what you will.'\n"
+            "  | 'Anyway.' | 'There you go.' | 'Bit of a rabbit hole, that.' | 'Remarkable, honestly.'\n\n"
 
             + (
-                # Verbose mode: longer, storytelling style
-                "LENGTH: 60–90 words. Tell a little story about this — give context, a reaction, maybe a follow-up thought. "
-                "Three or four sentences. Should feel like a proper conversation starter, not a one-liner.\n\n"
+                "LENGTH: 65–95 words. Three or four sentences. Build it — opener, context, reaction, implication. "
+                "Should feel like a proper conversation kick-off.\n\n"
                 if verbose else
-                "LENGTH: 25–50 words. Spoken out loud, it should take 8–15 seconds.\n\n"
+                "LENGTH: 22–48 words. One or two crisp sentences. Land it cleanly.\n\n"
             ) +
 
-            "NEVER: start with the user's name. Start with 'I'. Say 'Sure,' 'Certainly,' 'As an AI,' "
-            "'Here is your,' 'I wanted to share,' or any formal preamble whatsoever."
+            "ABSOLUTE BANS: never start with the user's name. Never start with 'I'. "
+            "Never say 'Sure,' 'Certainly,' 'As an AI,' 'Here is,' 'I wanted to share,' "
+            "or any formal preamble. The very first word must feel mid-thought."
         )
 
         # ── Mode-specific user prompts ─────────────────────────────────────
@@ -1486,6 +1524,42 @@ def speak_blocking(text: str) -> float:
     return time.perf_counter() - t0
 
 
+_SUB_VOICE_PHRASES = [
+    "Found one.",
+    "Got something.",
+    "This one's good.",
+    "Right, here's one.",
+    "Got it.",
+    "Found something interesting.",
+    "One coming in.",
+    "Ready.",
+]
+
+
+def speak_child(text: str | None = None) -> None:
+    """
+    Speak a brief phrase in the sub-agent voice (faster + lower pitch than
+    main Friday — sounds like a subordinate reporting in).
+    Non-blocking fire-and-forget; used by parallel content workers.
+    """
+    phrase = text or random.choice(_SUB_VOICE_PHRASES)
+    if not phrase.strip():
+        return
+    env = {
+        **os.environ,
+        "FRIDAY_TTS_RATE":  SUB_VOICE_RATE,
+        "FRIDAY_TTS_PITCH": SUB_VOICE_PITCH,
+    }
+    try:
+        subprocess.Popen(
+            [sys.executable, str(SPEAK_SCRIPT), phrase.strip()],
+            env=env,
+            **_no_window(),
+        )
+    except Exception as e:
+        log.debug("speak_child failed: %s", e)
+
+
 def prewarm_tts() -> None:
     if not PREWARM or not SPEAK_SCRIPT.exists():
         return
@@ -1571,28 +1645,46 @@ _LIVE_TTL = 600  # 10 minutes
 
 
 def _refresh_live_data() -> None:
+    """Fetch all live data sources in parallel — no sequential waiting."""
     global _live_cache, _live_cache_ts
-    log.info("Refreshing live data (cricket, weather, facts, jokes, arxiv, space, history)...")
-    _live_cache = {
-        "cricket":  fetch_cricket_news(),
-        "weather":  fetch_weather_brief(),
-        "fact":     fetch_random_fact(),
-        "joke":     fetch_dad_joke(),
-        "news":     fetch_news_headline(),
-        "arxiv":    fetch_arxiv_headline(),
-        "space":    fetch_space_news(),
-        "history":  fetch_this_day_history(),
-        "trending": fetch_google_trends_india(),
-        "movies":   fetch_reddit_movies(),
-        "viral":    fetch_reddit_popular(),
-        "product":  fetch_producthunt_top(),
+
+    _FETCHERS: dict[str, Any] = {
+        "cricket":  fetch_cricket_news,
+        "weather":  fetch_weather_brief,
+        "fact":     fetch_random_fact,
+        "joke":     fetch_dad_joke,
+        "news":     fetch_news_headline,
+        "arxiv":    fetch_arxiv_headline,
+        "space":    fetch_space_news,
+        "history":  fetch_this_day_history,
+        "trending": fetch_google_trends_india,
+        "movies":   fetch_reddit_movies,
+        "viral":    fetch_reddit_popular,
+        "product":  fetch_producthunt_top,
     }
+
+    log.info("Refreshing live data in parallel (%d sources)...", len(_FETCHERS))
+    results: dict[str, str | None] = {}
+
+    with ThreadPoolExecutor(max_workers=len(_FETCHERS)) as ex:
+        future_to_key = {ex.submit(fn): key for key, fn in _FETCHERS.items()}
+        for future in as_completed(future_to_key):
+            key = future_to_key[future]
+            try:
+                results[key] = future.result()
+            except Exception as e:
+                log.debug("live[%s] fetch error: %s", key, e)
+                results[key] = None
+
+    _live_cache = results
     _live_cache_ts = time.time()
-    for k, v in _live_cache.items():
-        if v:
-            log.info("  live[%s]: %s", k, v[:80])
-        else:
-            log.debug("  live[%s]: (none)", k)
+
+    hits  = {k: v for k, v in results.items() if v}
+    misses = [k for k, v in results.items() if not v]
+    for k, v in hits.items():
+        log.info("  live[%s]: %s", k, v[:80])
+    if misses:
+        log.debug("  live[%s]: (none)", ", ".join(misses))
 
 
 def get_live_data() -> dict[str, str | None]:
@@ -1606,23 +1698,55 @@ def get_live_data() -> dict[str, str | None]:
 
 # -- Content queue ------------------------------------------------------------
 def refill_content_queue(conn, r) -> None:
+    """
+    Fill the content queue up to QUEUE_TARGET using parallel sub-agent workers.
+    Each worker generates one line independently; the FIRST to finish announces
+    itself via speak_child() so you hear the team reporting in live.
+    """
     key = "friday:ambient:content_queue"
     try:
         n = r.llen(key)
     except Exception:
         n = 0
     need = max(0, QUEUE_TARGET - n)
+    if need == 0:
+        return
+
     live = get_live_data()
-    for _ in range(need):
-        mode = pick_mode()
-        music = None
-        news  = live.get("news") if mode in ("informational", "mixed") else None
-        topic, line = generate_line_ai(r, mode, news, music, live)
-        log_ambient_content(conn, topic, line, mode, spoken=False)
+    first_done = threading.Event()   # only the first finisher speaks
+
+    def _generate_one(_idx: int) -> tuple[str, str, str] | None:
+        """Run in a worker thread. Returns (topic, line, mode) or None."""
         try:
-            r.lpush(key, line)
-        except Exception:
-            pass
+            # song_moment is handled in the main loop, not pre-queued
+            mode = pick_mode()
+            while mode == "song_moment":
+                mode = pick_mode()
+            news    = live.get("news") if mode in ("informational", "mixed") else None
+            verbose = random.random() < VERBOSE_RATIO
+            topic, line = generate_line_ai(r, mode, news, None, live, verbose=verbose)
+            if line:
+                # First sub-agent to finish announces itself in child voice
+                if not first_done.is_set():
+                    first_done.set()
+                    speak_child()
+                return topic, line, mode
+        except Exception as e:
+            log.debug("sub-agent generate error: %s", e)
+        return None
+
+    log.debug("Queue refill: spawning %d parallel sub-agents", need)
+    with ThreadPoolExecutor(max_workers=min(need, 4)) as ex:
+        futures = [ex.submit(_generate_one, i) for i in range(need)]
+        for future in as_completed(futures):
+            result = future.result()
+            if result:
+                topic, line, mode = result
+                log_ambient_content(conn, topic, line, mode, spoken=False)
+                try:
+                    r.lpush(key, line)
+                except Exception:
+                    pass
 
 
 # -- Main brain ---------------------------------------------------------------
