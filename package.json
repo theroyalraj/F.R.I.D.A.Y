@@ -1,0 +1,28 @@
+{
+  "name": "openclaw",
+  "private": true,
+  "type": "module",
+  "description": "Friday-style Alexa + N8N + Claude Code assistant",
+  "workspaces": [
+    "skill-gateway",
+    "pc-agent"
+  ],
+  "scripts": {
+    "start:gateway": "node skill-gateway/src/server.js",
+    "start:agent": "node pc-agent/src/server.js",
+    "dev:gateway": "npm run dev --prefix skill-gateway",
+    "dev:agent": "npm run dev --prefix pc-agent",
+    "tunnel:ngrok": "ngrok http 3848",
+    "tunnel:friday": "ngrok http 3847",
+    "tunnel:n8n": "ngrok http 5678",
+    "heartbeat": "powershell -ExecutionPolicy Bypass -File scripts/openclaw-heartbeat.ps1",
+    "start:all": "node scripts/start.mjs",
+    "restart:local": "powershell -ExecutionPolicy Bypass -File scripts/restart-local.ps1",
+    "restart:skip": "powershell -ExecutionPolicy Bypass -File scripts/restart-local.ps1 -SkipDocker",
+    "test:notify": "node scripts/test-task-complete-notify.mjs",
+    "voice:daemon": "python scripts/friday-listen.py",
+    "setup:alexa": "node scripts/setup-alexa-cookie.mjs",
+    "play": "python skill-gateway/scripts/friday-play.py",
+    "install:all": "npm install"
+  }
+}

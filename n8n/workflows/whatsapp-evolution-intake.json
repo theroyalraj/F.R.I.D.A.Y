@@ -1,0 +1,106 @@
+{
+  "name": "Openclaw WhatsApp (Evolution)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "whatsapp-intake",
+        "responseMode": "onReceived",
+        "options": { "responseCode": 202 }
+      },
+      "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "openclaw-whatsapp-intake"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nconst headers = item.headers || {};\nconst want = $env.WHATSAPP_WEBHOOK_SECRET;\nif (want) {\n  const got =\n    headers['x-openclaw-whatsapp-secret'] ||\n    headers['X-Openclaw-Whatsapp-Secret'] ||\n    headers['X-Openclaw-WhatsApp-Secret'];\n  if (got !== want) throw new Error('Invalid or missing X-Openclaw-WhatsApp-Secret');\n}\nconst body = item.body ?? item;\nconst data = body.data ?? body;\nconst key = data.key ?? data.message?.key;\nif (key && key.fromMe === true) return [];\nconst inner = data.message ?? data;\nconst m = inner.message ?? inner;\nfunction textOf(x) {\n  if (!x) return '';\n  if (typeof x.conversation === 'string') return x.conversation;\n  if (x.extendedTextMessage?.text) return String(x.extendedTextMessage.text);\n  if (x.imageMessage?.caption) return String(x.imageMessage.caption);\n  return '';\n}\nconst commandText = textOf(m).trim();\nif (!commandText) return [];\nconst jid = (key && key.remoteJid) || inner.key?.remoteJid || '';\nif (String(jid).includes('@g.us')) return [];\nconst digits = String(jid).split('@')[0].replace(/\\D/g, '');\nif (!digits) return [];\nconst inst = body.instance || $env.EVOLUTION_INSTANCE || 'default';\nreturn [\n  {\n    json: {\n      commandText,\n      userId: 'wa:' + jid,\n      correlationId: (key && key.id) || String(Date.now()),\n      replyNumber: digits,\n      evolutionInstance: inst,\n    },\n  },\n];\n"
+      },
+      "id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      "name": "ParseEvolution",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [240, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:3847/task",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.PC_AGENT_SECRET }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { text: $json.commandText, userId: $json.userId, correlationId: $json.correlationId } }}",
+        "options": { "timeout": 300000 }
+      },
+      "id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      "name": "PCAgent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://evolution-api:8080/message/sendText/{{ $node['ParseEvolution'].json.evolutionInstance }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "apikey", "value": "={{ $env.EVOLUTION_API_KEY }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { number: $node['ParseEvolution'].json.replyNumber, text: ($json.summary || 'Done.').slice(0, 4000) } }}",
+        "options": {}
+      },
+      "id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "name": "SendWhatsApp",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [720, -80]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.GATEWAY_INTERNAL_URL }}/internal/last-result",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "X-Openclaw-Secret", "value": "={{ $env.N8N_WEBHOOK_SECRET }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { userId: $json.userId, message: $json.summary } }}",
+        "options": {}
+      },
+      "id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "name": "PushSummary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [720, 100]
+    }
+  ],
+  "connections": {
+    "Webhook": { "main": [[{ "node": "ParseEvolution", "type": "main", "index": 0 }]] },
+    "ParseEvolution": { "main": [[{ "node": "PCAgent", "type": "main", "index": 0 }]] },
+    "PCAgent": {
+      "main": [
+        [
+          { "node": "SendWhatsApp", "type": "main", "index": 0 },
+          { "node": "PushSummary", "type": "main", "index": 0 }
+        ]
+      ]
+    }
+  },
+  "settings": { "executionOrder": "v1" }
+}

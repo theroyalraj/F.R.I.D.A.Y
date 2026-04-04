@@ -1,0 +1,915 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Friday · Voice</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="/favicon.svg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Exo+2:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --void: #030308;
+      --deep: #0a0e1a;
+      --glass: rgba(12, 18, 38, 0.65);
+      --stroke: rgba(100, 200, 255, 0.22);
+      --cyan: #3ee0ff;
+      --violet: #a78bfa;
+      --magenta: #f472b6;
+      --text: #e8f4ff;
+      --muted: rgba(200, 220, 255, 0.45);
+      --think: #fbbf24;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      font-family: "Exo 2", system-ui, sans-serif;
+      background: var(--void);
+      color: var(--text);
+      overflow-x: hidden;
+    }
+    .bg {
+      position: fixed;
+      inset: 0;
+      z-index: 0;
+      background:
+        radial-gradient(ellipse 120% 80% at 50% -20%, rgba(62, 224, 255, 0.12), transparent 55%),
+        radial-gradient(ellipse 80% 60% at 100% 50%, rgba(167, 139, 250, 0.08), transparent 50%),
+        radial-gradient(ellipse 60% 50% at 0% 80%, rgba(244, 114, 182, 0.06), transparent 45%),
+        linear-gradient(180deg, #060912 0%, var(--void) 40%, #020205 100%);
+    }
+    .grid {
+      position: fixed;
+      inset: 0;
+      z-index: 0;
+      background-image:
+        linear-gradient(rgba(62, 224, 255, 0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(62, 224, 255, 0.03) 1px, transparent 1px);
+      background-size: 48px 48px;
+      mask-image: radial-gradient(ellipse 70% 70% at 50% 45%, black 20%, transparent 70%);
+      pointer-events: none;
+    }
+    .wrap {
+      position: relative;
+      z-index: 1;
+      min-height: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: clamp(1rem, 4vw, 2rem);
+      padding-bottom: max(1.5rem, env(safe-area-inset-bottom));
+    }
+    header {
+      text-align: center;
+      margin-bottom: 0.5rem;
+    }
+    header h1 {
+      font-size: clamp(1.1rem, 3vw, 1.35rem);
+      font-weight: 600;
+      letter-spacing: 0.35em;
+      text-transform: uppercase;
+      margin: 0;
+      background: linear-gradient(90deg, var(--cyan), var(--violet), var(--magenta));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    header p {
+      margin: 0.5rem 0 0;
+      font-size: 0.8rem;
+      color: var(--muted);
+      max-width: 22rem;
+      line-height: 1.45;
+    }
+    .stage {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      width: 100%;
+      max-width: 28rem;
+      gap: 1.25rem;
+    }
+    .orb-wrap {
+      position: relative;
+      width: min(52vw, 220px);
+      height: min(52vw, 220px);
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .orb-halo {
+      position: absolute;
+      inset: -12%;
+      border-radius: 50%;
+      border: 1px solid var(--stroke);
+      opacity: 0.6;
+      transition: transform 0.4s ease, opacity 0.4s ease, border-color 0.4s;
+    }
+    .orb-core {
+      position: absolute;
+      inset: 0;
+      border-radius: 50%;
+      background: radial-gradient(circle at 35% 30%, rgba(255,255,255,0.25), transparent 45%),
+        radial-gradient(circle at 50% 100%, var(--violet), transparent 55%),
+        radial-gradient(circle at 50% 50%, rgba(62, 224, 255, 0.35), rgba(10, 14, 26, 0.95));
+      box-shadow:
+        0 0 60px rgba(62, 224, 255, 0.25),
+        0 0 120px rgba(167, 139, 250, 0.12),
+        inset 0 0 40px rgba(62, 224, 255, 0.08);
+      transition: transform 0.35s ease, box-shadow 0.5s ease;
+    }
+    .orb-wrap[data-state="idle"] .orb-core {
+      animation: float 5s ease-in-out infinite;
+    }
+    .orb-wrap[data-state="listening"] .orb-halo {
+      animation: halo-pulse 1.8s ease-in-out infinite;
+      border-color: rgba(62, 224, 255, 0.5);
+    }
+    .orb-wrap[data-state="listening"] .orb-core {
+      box-shadow:
+        0 0 80px rgba(62, 224, 255, 0.45),
+        0 0 140px rgba(62, 224, 255, 0.15),
+        inset 0 0 50px rgba(62, 224, 255, 0.12);
+      animation: breathe 2.2s ease-in-out infinite;
+    }
+    .orb-wrap[data-state="thinking"] .orb-halo {
+      border-color: rgba(251, 191, 36, 0.4);
+      animation: halo-spin 3s linear infinite;
+    }
+    .orb-wrap[data-state="thinking"] .orb-core {
+      box-shadow:
+        0 0 70px rgba(251, 191, 36, 0.25),
+        inset 0 0 40px rgba(251, 191, 36, 0.08);
+    }
+    .orb-wrap[data-state="speaking"] .orb-halo {
+      border-color: rgba(244, 114, 182, 0.45);
+      animation: halo-pulse 0.9s ease-in-out infinite;
+    }
+    .orb-wrap[data-state="speaking"] .orb-core {
+      box-shadow:
+        0 0 90px rgba(244, 114, 182, 0.35),
+        0 0 160px rgba(167, 139, 250, 0.12),
+        inset 0 0 45px rgba(244, 114, 182, 0.1);
+      animation: speak-pulse 0.5s ease-in-out infinite alternate;
+    }
+    @keyframes float {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(-6px); }
+    }
+    @keyframes breathe {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.03); }
+    }
+    @keyframes halo-pulse {
+      0%, 100% { transform: scale(1); opacity: 0.5; }
+      50% { transform: scale(1.08); opacity: 0.85; }
+    }
+    @keyframes halo-spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+    @keyframes speak-pulse {
+      from { transform: scale(1); }
+      to { transform: scale(1.02); }
+    }
+    .state-label {
+      font-size: 0.7rem;
+      letter-spacing: 0.28em;
+      text-transform: uppercase;
+      color: var(--muted);
+      min-height: 1.2em;
+      transition: color 0.3s;
+    }
+    .orb-wrap[data-state="listening"] + .state-label { color: var(--cyan); }
+    .orb-wrap[data-state="thinking"] + .state-label { color: var(--think); }
+    .orb-wrap[data-state="speaking"] + .state-label { color: var(--magenta); }
+    .hint {
+      font-size: 0.72rem;
+      color: var(--muted);
+      text-align: center;
+      max-width: 18rem;
+      line-height: 1.4;
+    }
+    .transcript {
+      width: 100%;
+      max-width: 26rem;
+      max-height: min(28vh, 200px);
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      padding: 0 0.25rem;
+      scrollbar-width: thin;
+      scrollbar-color: var(--stroke) transparent;
+    }
+    .bubble {
+      padding: 0.65rem 0.85rem;
+      border-radius: 12px;
+      font-size: 0.82rem;
+      line-height: 1.45;
+      animation: fade-in 0.35s ease;
+    }
+    @keyframes fade-in {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .bubble.you {
+      align-self: flex-end;
+      max-width: 92%;
+      background: rgba(62, 224, 255, 0.1);
+      border: 1px solid rgba(62, 224, 255, 0.2);
+      color: #c5f3ff;
+    }
+    .bubble.agent {
+      align-self: flex-start;
+      max-width: 95%;
+      background: var(--glass);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--stroke);
+      color: var(--text);
+      font-family: inherit;
+      font-size: 0.84rem;
+      line-height: 1.5;
+    }
+    .bubble .tag {
+      font-size: 0.62rem;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 0.35rem;
+    }
+    .controls {
+      width: 100%;
+      max-width: 26rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      justify-content: center;
+      margin-top: 0.5rem;
+    }
+    button.ctrl {
+      font-family: inherit;
+      font-size: 0.75rem;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      padding: 0.65rem 1.1rem;
+      border-radius: 999px;
+      border: 1px solid var(--stroke);
+      background: rgba(20, 28, 48, 0.8);
+      color: var(--text);
+      cursor: pointer;
+      transition: background 0.2s, border-color 0.2s, box-shadow 0.2s;
+    }
+    button.ctrl:hover {
+      border-color: rgba(62, 224, 255, 0.4);
+      box-shadow: 0 0 20px rgba(62, 224, 255, 0.08);
+    }
+    button.ctrl.primary {
+      background: linear-gradient(135deg, rgba(62, 224, 255, 0.25), rgba(167, 139, 250, 0.2));
+      border-color: rgba(62, 224, 255, 0.35);
+    }
+    button.ctrl.danger {
+      border-color: rgba(248, 113, 113, 0.35);
+      color: #fca5a5;
+    }
+    button.ctrl:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+    details.panel {
+      width: 100%;
+      max-width: 26rem;
+      margin-top: 0.75rem;
+      border-radius: 12px;
+      border: 1px solid var(--stroke);
+      background: rgba(8, 12, 24, 0.5);
+      overflow: hidden;
+    }
+    details.panel summary {
+      padding: 0.65rem 1rem;
+      font-size: 0.72rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+      cursor: pointer;
+      list-style: none;
+    }
+    details.panel summary::-webkit-details-marker { display: none; }
+    .panel-inner {
+      padding: 0 1rem 1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+    .panel-inner textarea {
+      width: 100%;
+      min-height: 4rem;
+      resize: vertical;
+      border-radius: 8px;
+      border: 1px solid var(--stroke);
+      background: rgba(0, 0, 0, 0.35);
+      color: var(--text);
+      padding: 0.6rem 0.75rem;
+      font-family: inherit;
+      font-size: 0.85rem;
+    }
+    .panel-inner label {
+      font-size: 0.65rem;
+      color: var(--muted);
+      letter-spacing: 0.08em;
+    }
+    .row-voice {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+    input[type="range"] { width: 100px; accent-color: var(--cyan); }
+    .model-bar {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      margin-top: 0.65rem;
+      max-width: 26rem;
+    }
+    .model-bar label {
+      font-size: 0.65rem;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .model-bar select {
+      min-width: 11rem;
+      border-radius: 999px;
+      border: 1px solid var(--stroke);
+      background: rgba(0, 0, 0, 0.35);
+      color: var(--text);
+      padding: 0.45rem 0.85rem;
+      font-family: inherit;
+      font-size: 0.78rem;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <div class="bg" aria-hidden="true"></div>
+  <div class="grid" aria-hidden="true"></div>
+  <div class="wrap">
+    <header>
+      <h1>Friday</h1>
+      <p>Two-way voice: you speak → Friday runs your PC (apps + Claude) → she speaks back. <strong>While she talks, speak again to interrupt</strong> (or tap the orb).</p>
+      <p class="hint" id="ttsHint" style="margin-top: 0.35rem; max-width: 24rem"></p>
+      <div class="model-bar">
+        <label for="claudeModel">Claude model</label>
+        <select id="claudeModel" aria-label="Claude model for voice and typed commands">
+          <option value="">Server default (.env / Haiku)</option>
+          <option value="haiku">Haiku — fastest</option>
+          <option value="sonnet">Sonnet — balanced</option>
+          <option value="opus">Opus — strongest</option>
+          <option value="inherit">CLI default (no —model)</option>
+        </select>
+      </div>
+    </header>
+    <div class="stage">
+      <div class="orb-wrap" id="orb" data-state="idle" title="Tap to interrupt while speaking">
+        <div class="orb-halo"></div>
+        <div class="orb-core"></div>
+      </div>
+      <div class="state-label" id="stateLabel">Ready</div>
+      <p class="hint" id="hint">Start a session to enable the microphone. Works best in Chrome or Edge on this PC.</p>
+      <div class="transcript" id="transcript" aria-live="polite"></div>
+      <div class="controls">
+        <button type="button" class="ctrl primary" id="btnSession">Begin session</button>
+        <button type="button" class="ctrl danger" id="btnEnd" disabled>End session</button>
+      </div>
+      <details class="panel">
+        <summary>Type instead · voice tuning</summary>
+        <div class="panel-inner">
+          <label for="typed">Typed command (Enter or Send)</label>
+          <textarea id="typed" placeholder="Open Notepad, or explain this repo…"></textarea>
+          <button type="button" class="ctrl primary" id="btnSend">Send typed</button>
+          <div class="row-voice">
+            <label for="rate">Speech rate</label>
+            <input type="range" id="rate" min="0.7" max="1.35" step="0.05" value="0.95" />
+            <label for="pitch">Pitch</label>
+            <input type="range" id="pitch" min="0.85" max="1.15" step="0.05" value="1" />
+          </div>
+        </div>
+      </details>
+    </div>
+  </div>
+  <script>
+    (function () {
+      const api = (path) => new URL(path, window.location.origin).href;
+      /** ngrok free tier: any value skips the browser warning page on requests. */
+      const tunnelHeaders = {
+        'ngrok-skip-browser-warning': '69420',
+        Accept: 'application/json',
+      };
+      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+      const orb = document.getElementById('orb');
+      const stateLabel = document.getElementById('stateLabel');
+      const hint = document.getElementById('hint');
+      const transcript = document.getElementById('transcript');
+      const btnSession = document.getElementById('btnSession');
+      const btnEnd = document.getElementById('btnEnd');
+      const typed = document.getElementById('typed');
+      const btnSend = document.getElementById('btnSend');
+      const rateEl = document.getElementById('rate');
+      const pitchEl = document.getElementById('pitch');
+      const ttsHint = document.getElementById('ttsHint');
+      const claudeModelEl = document.getElementById('claudeModel');
+      const LS_CLAUDE_MODEL = 'friday.claudeModel';
+
+      try {
+        const saved = localStorage.getItem(LS_CLAUDE_MODEL);
+        if (saved != null && [...claudeModelEl.options].some((o) => o.value === saved)) {
+          claudeModelEl.value = saved;
+        }
+      } catch (_) {
+        /* private mode */
+      }
+      claudeModelEl.addEventListener('change', () => {
+        try {
+          localStorage.setItem(LS_CLAUDE_MODEL, claudeModelEl.value);
+        } catch (_) {
+          /* ignore */
+        }
+      });
+
+      function claudeModelBody() {
+        const m = (claudeModelEl.value || '').trim();
+        return m ? { claudeModel: m } : {};
+      }
+
+      let agentActive = false;
+      let busy = false;
+      let rec = null;
+      let bargeRec = null;
+      let utterGen = 0;
+      let currentAudio = null;
+
+      const labels = {
+        idle: 'Ready',
+        listening: 'Listening',
+        thinking: 'Thinking',
+        speaking: 'Speaking',
+      };
+
+      function setOrb(state) {
+        orb.dataset.state = state;
+        stateLabel.textContent = labels[state] || state;
+      }
+
+      function pickVoice() {
+        const v = speechSynthesis.getVoices();
+        if (!v || !v.length) return null;
+        const pick = (pred) => v.find(pred);
+        return (
+          pick(
+            (x) =>
+              /Microsoft.*(Aria|Jenny|Guy|Davis|Zira|Andrew|Sonia|Libby|Emma|Brian|Christopher)/i.test(x.name) &&
+              /^en/i.test(x.lang),
+          ) ||
+          pick((x) => /Google[™]?\s+.*(US English|UK English|en-US)/i.test(x.name)) ||
+          pick((x) => /Samantha|Daniel|Karen|Moira|Fiona|Tessa|Arthur/i.test(x.name) && /^en/i.test(x.lang)) ||
+          pick((x) => /(Neural|Natural|Premium)/i.test(x.name) && /^en/i.test(x.lang)) ||
+          pick((x) => x.lang === 'en-US') ||
+          pick((x) => /^en/i.test(x.lang)) ||
+          v[0]
+        );
+      }
+
+      speechSynthesis.onvoiceschanged = () => {
+        speechSynthesis.getVoices();
+      };
+
+      function forSpeech(raw) {
+        if (!raw || typeof raw !== 'string') return 'Done.';
+        let t = raw.replace(/```[\s\S]*?```/g, ' ').replace(/`[^`]+`/g, ' ');
+        t = t.replace(/\s+/g, ' ').trim();
+        if (t.length > 3800) t = t.slice(0, 3800) + '…';
+        return t || 'Done.';
+      }
+
+      function stopRec() {
+        if (!rec) return;
+        try {
+          rec.stop();
+        } catch (_) {}
+        rec = null;
+      }
+
+      function stopBargeRec() {
+        if (!bargeRec) return;
+        const r = bargeRec;
+        bargeRec = null;
+        try {
+          r.onend = null;
+          r.onresult = null;
+          r.stop();
+        } catch (_) {}
+      }
+
+      /** Listen while Friday speaks; final speech → stop TTS and run the new command (headset works best). */
+      function startBargeInWhileSpeaking(speakUtterId) {
+        stopBargeRec();
+        if (!SR || !agentActive) return;
+        let handled = false;
+        const r = new SR();
+        r.lang = 'en-US';
+        r.continuous = true;
+        r.interimResults = true;
+        r.onresult = (ev) => {
+          if (handled || speakUtterId !== utterGen) return;
+          if (orb.dataset.state !== 'speaking') return;
+          let finalText = '';
+          for (let i = ev.resultIndex; i < ev.results.length; i++) {
+            if (ev.results[i].isFinal) finalText += ev.results[i][0].transcript;
+          }
+          const said = finalText.trim();
+          if (said.length < 2) return;
+          handled = true;
+          utterGen += 1;
+          cancelSpeech();
+          stopBargeRec();
+          stopRec();
+          runCommand(said, { fromVoice: true });
+        };
+        r.onerror = () => {};
+        r.onend = () => {
+          if (handled || speakUtterId !== utterGen) return;
+          if (!agentActive || orb.dataset.state !== 'speaking') return;
+          bargeRec = r;
+          try {
+            r.start();
+          } catch (_) {
+            setTimeout(() => {
+              if (handled || speakUtterId !== utterGen || orb.dataset.state !== 'speaking') return;
+              bargeRec = r;
+              try {
+                r.start();
+              } catch (_2) {}
+            }, 250);
+          }
+        };
+        bargeRec = r;
+        try {
+          r.start();
+        } catch (_) {
+          bargeRec = null;
+        }
+      }
+
+      function cancelSpeech() {
+        speechSynthesis.cancel();
+        if (currentAudio) {
+          try {
+            currentAudio.pause();
+            currentAudio.removeAttribute('src');
+            currentAudio.load();
+          } catch (_) {}
+          currentAudio = null;
+        }
+      }
+
+      function splitSentences(text) {
+        const s = forSpeech(text);
+        const parts = s.match(/[^.!?\n]+[.!?]?/g);
+        if (!parts || parts.length === 0) return [s];
+        return parts.map((x) => x.trim()).filter(Boolean);
+      }
+
+      async function speakBrowserNatural(text, id, onEnd) {
+        const chunks = splitSentences(text);
+        const gapMs = 90;
+        const rate = Math.min(1.05, Math.max(0.72, parseFloat(rateEl.value) * 0.93));
+        const pitch = parseFloat(pitchEl.value) || 1;
+        for (const chunk of chunks) {
+          if (id !== utterGen) return;
+          const c = chunk.trim();
+          if (!c) continue;
+          await new Promise((resolve) => {
+            const u = new SpeechSynthesisUtterance(c);
+            u.rate = rate;
+            u.pitch = pitch;
+            const voice = pickVoice();
+            if (voice) u.voice = voice;
+            // Some browsers silently drop utterances in background tabs — timeout per chunk.
+            const chunkTimer = setTimeout(resolve, Math.max(10_000, c.length * 120));
+            u.onend = () => { clearTimeout(chunkTimer); setTimeout(resolve, gapMs); };
+            u.onerror = () => { clearTimeout(chunkTimer); resolve(); };
+            speechSynthesis.speak(u);
+          });
+        }
+        if (id === utterGen) onEnd && onEnd();
+      }
+
+      async function speak(text, onEnd) {
+        cancelSpeech();
+        const id = ++utterGen;
+        startBargeInWhileSpeaking(id);
+        const cleaned = forSpeech(text);
+
+        let doneFired = false;
+        let watchdog;
+        const done = () => {
+          if (doneFired) return;
+          doneFired = true;
+          clearTimeout(watchdog);
+          stopBargeRec();
+          if (id === utterGen) onEnd && onEnd();
+        };
+        // Safety net: if the audio element or browser TTS never fires end/error, unblock after 90s.
+        watchdog = setTimeout(done, 90_000);
+
+        try {
+          const r = await fetch(api('/voice/tts'), {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'ngrok-skip-browser-warning': tunnelHeaders['ngrok-skip-browser-warning'],
+              Accept: 'audio/wav, audio/mpeg, application/json',
+            },
+            body: JSON.stringify({ text: cleaned }),
+            cache: 'no-store',
+          });
+          const ct = (r.headers.get('content-type') || '').toLowerCase();
+          if (r.ok && (ct.includes('audio/mpeg') || ct.includes('audio/wav'))) {
+            const blob = await r.blob();
+            const url = URL.createObjectURL(blob);
+            const audio = new Audio();
+            currentAudio = audio;
+            audio.src = url;
+            const cleanup = () => {
+              URL.revokeObjectURL(url);
+              if (currentAudio === audio) currentAudio = null;
+            };
+            audio.onended = () => {
+              cleanup();
+              done();
+            };
+            audio.onerror = () => {
+              cleanup();
+              done();
+            };
+            await audio.play();
+            return;
+          }
+        } catch (_) {
+          /* use browser */
+        }
+
+        // Pre-empted by a new utterance while fetching TTS — clear watchdog and exit cleanly.
+        if (id !== utterGen) { done(); return; }
+        await speakBrowserNatural(cleaned, id, done);
+      }
+
+      function addBubble(role, text) {
+        const div = document.createElement('div');
+        div.className = 'bubble ' + (role === 'you' ? 'you' : 'agent');
+        const tag = document.createElement('div');
+        tag.className = 'tag';
+        tag.textContent = role === 'you' ? 'You' : 'Friday';
+        div.appendChild(tag);
+        const body = document.createElement('div');
+        body.textContent = text;
+        div.appendChild(body);
+        transcript.appendChild(div);
+        transcript.scrollTop = transcript.scrollHeight;
+      }
+
+      async function runCommand(text, { fromVoice } = {}) {
+        const t = (text || '').trim();
+        if (!t) return;
+        if (busy && orb.dataset.state !== 'speaking') return;
+        busy = true;
+        addBubble('you', t);
+        stopRec();
+        stopBargeRec();
+        setOrb('thinking');
+        hint.textContent = fromVoice
+          ? 'Thinking — Claude often needs 10–30s. Pick Haiku above for speed.'
+          : 'Thinking — Claude often needs 10–30s.';
+
+        try {
+          const r = await fetch(api('/voice/command'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...tunnelHeaders },
+            body: JSON.stringify({
+              text: t,
+              userId: 'friday-web',
+              correlationId: crypto.randomUUID(),
+              ...claudeModelBody(),
+            }),
+            cache: 'no-store',
+          });
+          const raw = await r.text();
+          const trimmed = raw.trim();
+          if (trimmed.startsWith('<') || trimmed.startsWith('<!')) {
+            addBubble(
+              'agent',
+              'Tunnel returned HTML (wrong target port, or not pc-agent). Point ngrok at the same port as Friday (3847) and restart pc-agent.',
+            );
+            speak('That did not reach Friday.', () => cycleAfterSpeech());
+            return;
+          }
+          let j = {};
+          try {
+            j = JSON.parse(raw);
+          } catch {
+            j = { error: raw.slice(0, 400) || 'Bad response' };
+          }
+          if (!r.ok) {
+            const err = [j.error, j.hint].filter(Boolean).join(' — ') || r.statusText || 'Request failed';
+            addBubble('agent', err);
+            speak('Sorry, that request failed.', () => cycleAfterSpeech());
+            return;
+          }
+          const reply = typeof j.summary === 'string' ? j.summary : JSON.stringify(j);
+          addBubble('agent', reply);
+          setOrb('speaking');
+          hint.textContent = 'Speak to interrupt, or tap the orb.';
+          speak(reply, () => cycleAfterSpeech());
+        } catch (e) {
+          const msg = String(e.message || e);
+          addBubble('agent', msg);
+          speak('Connection failed.', () => cycleAfterSpeech());
+        }
+      }
+
+      function cycleAfterSpeech() {
+        busy = false;
+        if (!agentActive) {
+          setOrb('idle');
+          hint.textContent = 'Session ended.';
+          return;
+        }
+        hint.textContent = 'Speak when ready.';
+        startListenTurn();
+      }
+
+      function startListenTurn() {
+        if (!agentActive || busy) return;
+        if (!SR) {
+          hint.textContent = 'Speech recognition not available in this browser.';
+          setOrb('idle');
+          return;
+        }
+        setOrb('listening');
+        stopRec();
+        let buffer = '';
+        const r = new SR();
+        r.lang = 'en-US';
+        r.continuous = false;
+        r.interimResults = true;
+        r.onresult = (ev) => {
+          buffer = '';
+          let interim = '';
+          for (let i = 0; i < ev.results.length; i++) {
+            const t = ev.results[i][0].transcript;
+            if (ev.results[i].isFinal) buffer += t;
+            else interim += t;
+          }
+          // Show live transcript so the user can see the mic is actually capturing.
+          const live = (buffer + interim).trim();
+          if (live) hint.textContent = live;
+        };
+        r.onerror = (e) => {
+          if (e.error === 'aborted' || e.error === 'no-speech') return;
+          if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+            agentActive = false;
+            btnSession.disabled = false;
+            btnEnd.disabled = true;
+            setOrb('idle');
+            hint.textContent = 'Mic blocked — allow microphone access in the browser address bar, then Begin session again.';
+            return;
+          }
+          if (e.error === 'audio-capture') {
+            hint.textContent = 'No microphone found — check your mic is connected and not in use by another app.';
+            return;
+          }
+          hint.textContent = 'Mic error: ' + (e.error || 'unknown');
+        };
+        r.onend = () => {
+          rec = null;
+          if (!agentActive || busy) return;
+          const said = buffer.trim();
+          buffer = '';
+          if (said) runCommand(said, { fromVoice: true });
+          else {
+            hint.textContent = 'Speak when ready.';
+            startListenTurn();
+          }
+        };
+        rec = r;
+        try {
+          r.start();
+        } catch (e) {
+          rec = null;
+          hint.textContent = String(e.message || e);
+          if (agentActive) setTimeout(startListenTurn, 600);
+        }
+      }
+
+      orb.addEventListener('click', () => {
+        if (orb.dataset.state === 'speaking') {
+          utterGen += 1;
+          cancelSpeech();
+          stopBargeRec();
+          busy = false;
+          if (agentActive) {
+            hint.textContent = 'Interrupted. Listening…';
+            startListenTurn();
+          } else {
+            setOrb('idle');
+          }
+        }
+      });
+
+      btnSession.addEventListener('click', () => {
+        if (!SR) {
+          hint.textContent = 'Use Chrome or Edge for speech recognition.';
+          return;
+        }
+        speechSynthesis.getVoices();
+        agentActive = true;
+        busy = false;
+        btnSession.disabled = true;
+        btnEnd.disabled = false;
+        transcript.innerHTML = '';
+        cancelSpeech();
+        stopRec();
+        stopBargeRec();
+        hint.textContent = 'Listening for you…';
+        startListenTurn();
+      });
+
+      btnEnd.addEventListener('click', () => {
+        agentActive = false;
+        busy = false;
+        stopRec();
+        stopBargeRec();
+        cancelSpeech();
+        btnSession.disabled = false;
+        btnEnd.disabled = true;
+        setOrb('idle');
+        hint.textContent = 'Session ended. Tap Begin when you want to continue.';
+      });
+
+      btnSend.addEventListener('click', () => {
+        const t = typed.value.trim();
+        if (!t) return;
+        typed.value = '';
+        if (orb.dataset.state === 'speaking') {
+          utterGen += 1;
+          cancelSpeech();
+          stopBargeRec();
+          busy = false;
+        }
+        stopRec();
+        runCommand(t, { fromVoice: false });
+      });
+
+      typed.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          btnSend.click();
+        }
+      });
+
+      if (!SR) {
+        btnSession.disabled = true;
+        hint.textContent = 'Speech recognition unavailable. You can still use typed commands below.';
+      }
+
+      fetch(api('/voice/ping'), { headers: { ...tunnelHeaders } })
+        .then((r) => r.json())
+        .then((j) => {
+          if (!ttsHint || !j.tts) return;
+          const p = j.tts.provider;
+          if (p === 'piper') {
+            ttsHint.textContent = 'Voice: Piper (local neural — free, offline).';
+          } else if (p === 'edge') {
+            const v = j.tts.edgeVoice || 'Aria';
+            ttsHint.textContent = `Voice: Microsoft Edge TTS — ${v} (free neural, requires internet).`;
+          } else if (p === 'openai') {
+            ttsHint.textContent = 'Voice: OpenAI TTS (paid cloud neural).';
+          } else {
+            ttsHint.textContent =
+              'Voice: browser fallback — set FRIDAY_EDGE_TTS_VOICE in .env to pick a different Edge voice.';
+          }
+        })
+        .catch(() => {});
+
+      speechSynthesis.getVoices();
+    })();
+  </script>
+</body>
+</html>

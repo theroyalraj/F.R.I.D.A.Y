@@ -1,0 +1,56 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - openclaw_redis:/data
+    command: redis-server --appendonly yes
+
+  n8n:
+    image: n8nio/n8n:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5678:5678"
+    environment:
+      - N8N_HOST=0.0.0.0
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - WEBHOOK_URL=http://localhost:5678/
+      - GENERIC_TIMEZONE=${GENERIC_TIMEZONE:-UTC}
+      - TZ=${TZ:-UTC}
+      # Passed into workflow expressions as {{ $env.PC_AGENT_SECRET }}
+      - PC_AGENT_SECRET=${PC_AGENT_SECRET:-}
+      - N8N_WEBHOOK_SECRET=${N8N_WEBHOOK_SECRET:-}
+      - GATEWAY_INTERNAL_URL=http://host.docker.internal:3848
+      - EVOLUTION_API_KEY=${EVOLUTION_API_KEY:-}
+      - EVOLUTION_INSTANCE=${EVOLUTION_INSTANCE:-}
+      - EVOLUTION_BASE_URL=http://evolution-api:8080
+      - WHATSAPP_WEBHOOK_SECRET=${WHATSAPP_WEBHOOK_SECRET:-}
+    volumes:
+      - openclaw_n8n:/home/node/.n8n
+    depends_on:
+      - redis
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # Optional: docker compose --profile whatsapp up -d
+  evolution-api:
+    image: atendai/evolution-api:latest
+    restart: unless-stopped
+    profiles:
+      - whatsapp
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      - AUTHENTICATION_API_KEY=${EVOLUTION_API_KEY:-change-me}
+    volumes:
+      - openclaw_evolution:/evolution/store
+    depends_on:
+      - redis
+
+volumes:
+  openclaw_redis:
+  openclaw_n8n:
+  openclaw_evolution:
