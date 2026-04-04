@@ -12,7 +12,7 @@
  */
 
 import { spawn, execSync } from 'node:child_process';
-import { existsSync }      from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath }   from 'node:url';
 import path                from 'node:path';
 import http                from 'node:http';
@@ -20,11 +20,34 @@ import http                from 'node:http';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
+/** Read FRIDAY_AMBIENT from .env (no dependency on dotenv). */
+function readFridayAmbientFromDotEnv() {
+  const p = path.join(ROOT, '.env');
+  if (!existsSync(p)) return false;
+  try {
+    const text = readFileSync(p, 'utf8');
+    for (const line of text.split('\n')) {
+      const t = line.trim();
+      if (!t || t.startsWith('#')) continue;
+      const eq = t.indexOf('=');
+      if (eq < 1) continue;
+      const k = t.slice(0, eq).trim();
+      if (k !== 'FRIDAY_AMBIENT') continue;
+      let v = t.slice(eq + 1).trim();
+      if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'")))
+        v = v.slice(1, -1);
+      return ['1', 'true', 'yes', 'on'].includes(v.toLowerCase());
+    }
+  } catch { /* ignore */ }
+  return false;
+}
+
 // ── Colours ──────────────────────────────────────────────────────────────────
 const C = {
   gateway:  '\x1b[36m',   // cyan
   agent:    '\x1b[32m',   // green
   listener: '\x1b[35m',   // magenta
+  ambient:  '\x1b[96m',   // bright cyan
   warn:     '\x1b[33m',
   reset:    '\x1b[0m',
 };
@@ -215,6 +238,15 @@ ${C.reset}\n`);
     await start('listener', 'python', ['scripts/friday-listen.py'], { delayMs: 3000 });
   } else {
     process.stdout.write(`${C.warn}[openclaw] friday-listen.py not found — voice daemon skipped${C.reset}\n`);
+  }
+
+  const ambientOn =
+    readFridayAmbientFromDotEnv() ||
+    ['1', 'true', 'yes', 'on'].includes(String(process.env.FRIDAY_AMBIENT || '').toLowerCase());
+  const ambientScript = path.join(ROOT, 'scripts', 'friday-ambient.py');
+  if (ambientOn && existsSync(ambientScript)) {
+    log('ambient', 'Jarvis ambient daemon will start in 4.5 s...');
+    await start('ambient', 'python', ['scripts/friday-ambient.py'], { delayMs: 4500 });
   }
 
   process.stdout.write(`${C.warn}[openclaw] All services running. Press Ctrl+C to stop everything.${C.reset}\n\n`);

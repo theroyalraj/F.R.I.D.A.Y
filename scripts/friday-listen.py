@@ -74,6 +74,15 @@ DEAF_SEC     = float(os.environ.get("LISTEN_DEAF_SEC", "60"))
 
 MIC_INDEX  = int(MIC_INDEX) if MIC_INDEX else None
 PLAY_PID   = Path(tempfile.gettempdir()) / "friday-play.pid"
+TTS_TS_FILE = Path(tempfile.gettempdir()) / "friday-tts-ts"
+
+
+def _write_last_spoken_ts() -> None:
+    """When SAPI fallback runs (no friday-speak subprocess), still reset ambient silence clock."""
+    try:
+        TTS_TS_FILE.write_text(str(time.time()), encoding="utf-8")
+    except OSError:
+        pass
 
 logging.basicConfig(
     level=logging.INFO,
@@ -187,15 +196,18 @@ def speak(text: str):
                         log.warning("speak FAILED (exit %d) — falling back to SAPI. stderr=%s",
                                     result.returncode, err[:200])
                         _speak_fallback(text)
+                        _write_last_spoken_ts()
                     else:
                         out = (result.stdout or b"").decode(errors="replace").strip()
                         log.info("speak OK: %s", out)
                 except subprocess.TimeoutExpired:
                     log.warning("speak timed out — falling back to SAPI")
                     _speak_fallback(text)
+                    _write_last_spoken_ts()
                 except Exception as e:
                     log.warning("speak exception: %s — falling back to SAPI", e)
                     _speak_fallback(text)
+                    _write_last_spoken_ts()
         finally:
             time.sleep(_POST_SPEAK_COOLDOWN)   # keep mic deaf briefly after audio ends
             _speaking.clear()

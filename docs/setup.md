@@ -141,6 +141,17 @@ The page sends **`ngrok-skip-browser-warning`** so API calls get JSON, not the f
   The Friday page will then call **`POST /voice/tts`** and play WAV from Piper.
 - **Optional paid:** OpenAI TTS is **disabled by default**. To use it, set `FRIDAY_TTS_OPENAI=true` and `OPENAI_API_KEY` (or `FRIDAY_OPENAI_API_KEY`). You can tune `FRIDAY_TTS_VOICE` and `FRIDAY_TTS_MODEL`.
 
+### Jarvis ambient intelligence (optional)
+
+Proactive **Friday** chatter when nobody has spoken for a while: filler TTS + short Haiku lines, **now-playing** logging (Windows + **py-now-playing**), **Redis** cache/queue, **SQLite** at `data/friday.db`.
+
+1. **`docker compose up -d`** (Redis on `127.0.0.1:6379`) — optional; without Redis the daemon uses an in-memory fallback.
+2. **`pip install -r scripts/requirements-ambient.txt`** (or install `redis`, `anthropic`, `aiohttp`, `py-now-playing` yourself).
+3. In **`.env`**: set **`FRIDAY_AMBIENT=true`**, tune **`FRIDAY_AMBIENT_*`** and **`FRIDAY_USER_*`** (see **`.env.example`**). **`ANTHROPIC_API_KEY`** enables Haiku lines; without it, witty fallbacks still run.
+4. Run **`npm run start:ambient`** or **`npm run start:all`** (starts ambient automatically when **`FRIDAY_AMBIENT=true`** in `.env`).
+
+`friday-speak.py` updates **`%TEMP%\friday-tts-ts`** after each playback so the ambient loop respects real TTS silence.
+
 ## 7) Alexa custom skill
 
 1. Create a **Custom** skill, **HTTPS** endpoint (not Alexa-hosted).

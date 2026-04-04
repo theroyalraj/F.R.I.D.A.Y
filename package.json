@@ -21,6 +21,7 @@
     "restart:skip": "powershell -ExecutionPolicy Bypass -File scripts/restart-local.ps1 -SkipDocker",
     "test:notify": "node scripts/test-task-complete-notify.mjs",
     "voice:daemon": "python scripts/friday-listen.py",
+    "start:ambient": "python scripts/friday-ambient.py",
     "setup:alexa": "node scripts/setup-alexa-cookie.mjs",
     "play": "python skill-gateway/scripts/friday-play.py",
     "install:all": "npm install"

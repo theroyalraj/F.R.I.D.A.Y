@@ -72,6 +72,17 @@ else:
 if CACHE_DIR is not None:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
+# Timestamp file for ambient silence monitor (playback paths only; not --output/--stdout).
+TTS_TS_FILE = Path(tempfile.gettempdir()) / "friday-tts-ts"
+
+
+def _write_last_spoken_ts() -> None:
+    """Record wall-clock time when TTS playback finished (friday-ambient.py polls this)."""
+    try:
+        TTS_TS_FILE.write_text(str(time.time()), encoding="utf-8")
+    except OSError:
+        pass
+
 
 # ── MP3 cache ─────────────────────────────────────────────────────────────────
 def _cache_key() -> str:
@@ -185,6 +196,7 @@ def _play_ffplay(mp3_data: bytes) -> None:
             check=True,
             **kwargs,
         )
+        _write_last_spoken_ts()
     except subprocess.CalledProcessError as e:
         print(f"friday-speak: ffplay error {e.returncode}", file=sys.stderr)
         sys.exit(1)
@@ -344,6 +356,7 @@ async def speak():
                      f"$s.Speak('{safe}')"],
                     timeout=30,
                 )
+                _write_last_spoken_ts()
             except Exception as sapi_err:
                 print(f"friday-speak: SAPI also failed — {sapi_err}", file=sys.stderr)
         sys.exit(1)

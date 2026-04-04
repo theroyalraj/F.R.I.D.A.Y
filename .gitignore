@@ -1,3 +1,5 @@
+__pycache__/
+*.pyc
 node_modules/
 .env
 *.log
@@ -8,3 +10,5 @@ alexa-lambda-python/config.json
 .openclaw-skip-notify-prompt
 .alexa-token-cache.json
 .alexa-cookie.json
+data/*.db
+data/*.db-*
