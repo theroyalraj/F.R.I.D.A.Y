@@ -11,7 +11,8 @@ Live data sources (no API keys required unless noted):
   - While special mode on: ~50% IPL-focused Google News headlines vs general cricket RSS (FRIDAY_IPL_HEADLINE_RATIO).
     Headlines, scores, CricAPI JSON, and IPL on/off are cached in Redis with tunable TTLs.
   - ESPN Cricinfo RSS (English), Amar Ujala cricket RSS (Hindi), Google News IPL feeds
-  - Optional: CRICAPI_API_KEY for live scores + off-season IPL fixture detection
+  - Optional: CRICAPI_API_KEY — live scores, match_info commentary snippet, off-season IPL detection
+  - Parallel key cricket_commentary: Google News fallback if API returns no commentary text
   - Weather: wttr.in (free, no key)
   - Random facts: uselessfacts.jsph.pl
   - Dad jokes: icanhazdadjoke.com
@@ -367,6 +368,7 @@ DB_PATH = Path(_db_raw) if Path(_db_raw).is_absolute() else ROOT / _db_raw
 
 TTS_TS_FILE     = Path(tempfile.gettempdir()) / "friday-tts-ts"
 TTS_ACTIVE_FILE = Path(tempfile.gettempdir()) / "friday-tts-active"   # written by friday-speak.py
+AMBIENT_SPEAKING_FILE = Path(tempfile.gettempdir()) / "friday-ambient-speaking.txt"
 AMBIENT_PID_FILE= Path(tempfile.gettempdir()) / "friday-ambient.pid"
 SPEAK_SCRIPT    = ROOT / "skill-gateway" / "scripts" / "friday-speak.py"
 
@@ -751,6 +753,114 @@ def _format_cricapi_match(m: dict[str, Any]) -> str | None:
     return out or None
 
 
+def _cricapi_rank_tuple(mm: dict[str, Any]) -> tuple[int, str]:
+    n = (mm.get("name") or "").lower()
+    st = (mm.get("status") or "").lower()
+    pri = 0
+    if "ipl" in n or "indian premier" in n:
+        pri -= 3
+    if "live" in st or mm.get("matchStarted") and not mm.get("matchEnded"):
+        pri -= 2
+    return pri, n
+
+
+def _cricapi_pick_live_ipl_match(data: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not data or (data.get("status") or "").lower() != "success":
+        return None
+    matches = [m for m in (data.get("data") or []) if isinstance(m, dict)]
+    if not matches:
+        return None
+    matches = sorted(matches, key=_cricapi_rank_tuple)
+    for m in matches:
+        if _cricapi_is_ipl_match_name(m.get("name") or "") and _cricapi_match_live_or_in_progress(m):
+            return m
+    return None
+
+
+def _cricapi_match_id(m: dict[str, Any]) -> str | None:
+    for k in ("id", "matchId", "match_id", "unique_id", "uniqueId"):
+        v = m.get(k)
+        if v is not None and str(v).strip():
+            return str(v).strip()
+    return None
+
+
+def _cricapi_fetch_match_info(match_id: str) -> dict[str, Any] | None:
+    """Single-match payload (commentary / scorecard) — CricketData CricAPI v1."""
+    if not CRICAPI_API_KEY:
+        return None
+    q = urllib.parse.quote(CRICAPI_API_KEY, safe="")
+    mid = urllib.parse.quote(str(match_id), safe="")
+    for base in (
+        f"https://api.cricapi.com/v1/match_info?id={mid}&apikey={q}",
+        f"https://api.cricapi.com/v1/get_match_info?id={mid}&apikey={q}",
+    ):
+        raw = _get(base, timeout=10)
+        if not raw:
+            continue
+        try:
+            d = json.loads(raw)
+            if (d.get("status") or "").lower() == "success":
+                return d if isinstance(d, dict) else None
+        except Exception as e:
+            log.debug("cricapi match_info parse: %s", e)
+    return None
+
+
+def _extract_commentary_snippet(info: dict[str, Any]) -> str | None:
+    """Pull the latest spoken-friendly lines from varied CricketData JSON shapes."""
+    found: list[str] = []
+
+    def _pull_from_list(items: list[Any]) -> None:
+        for item in items[-8:]:
+            if isinstance(item, str) and item.strip():
+                found.append(item.strip())
+            elif isinstance(item, dict):
+                for key in (
+                    "text", "commentary", "comm", "ball", "description",
+                    "detail", "det", "c", "narration",
+                ):
+                    t = item.get(key)
+                    if isinstance(t, str) and t.strip():
+                        found.append(t.strip())
+                        break
+
+    def _scan(obj: Any, depth: int = 0) -> None:
+        if depth > 6 or len(found) > 12:
+            return
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                lk = str(k).lower()
+                if isinstance(v, list) and v and (
+                    "comment" in lk
+                    or "ball" in lk
+                    or lk in ("balls", "overs", "innings")
+                ):
+                    _pull_from_list(v)
+                elif isinstance(v, (dict, list)):
+                    _scan(v, depth + 1)
+        elif isinstance(obj, list) and obj:
+            if all(isinstance(x, (str, dict)) for x in obj):
+                _pull_from_list(obj)
+            else:
+                for x in obj[-3:]:
+                    _scan(x, depth + 1)
+
+    if isinstance(info.get("data"), dict):
+        _scan(info["data"])
+    _scan(info)
+
+    if not found:
+        return None
+    tail = found[-3:]
+    out = " ".join(tail)
+    out = re.sub(r"<[^>]+>", " ", out)
+    out = re.sub(r"\s+", " ", out).strip()
+    if len(out) < 8:
+        return None
+    return out[:400]
+
+
 def fetch_cricket_scores_cricapi(r: Any) -> str | None:
     """Live / recent match one-liner via CricAPI (shared JSON cached in Redis)."""
     if not CRICAPI_API_KEY:
@@ -764,17 +874,7 @@ def fetch_cricket_scores_cricapi(r: Any) -> str | None:
         if not matches:
             return None
 
-        def _rank(mm: dict[str, Any]) -> tuple[int, str]:
-            n = (mm.get("name") or "").lower()
-            st = (mm.get("status") or "").lower()
-            pri = 0
-            if "ipl" in n or "indian premier" in n:
-                pri -= 3
-            if "live" in st or mm.get("matchStarted") and not mm.get("matchEnded"):
-                pri -= 2
-            return pri, n
-
-        matches = sorted(matches, key=_rank)
+        matches = sorted(matches, key=_cricapi_rank_tuple)
         for m in matches:
             if isinstance(m, dict):
                 line = _format_cricapi_match(m)
@@ -829,6 +929,47 @@ def fetch_ipl_news_en() -> str | None:
     return _rss_pick_title(
         f"https://news.google.com/rss/search?q={q}&hl=en-IN&gl=IN&ceid=IN:en",
         prefer_ipl=True,
+    )
+
+
+def fetch_google_ipl_live_action_snippet() -> str | None:
+    """Search-style fallback when match_info has no commentary (headline / recap tone)."""
+    q = urllib.parse.quote("IPL live match latest over today")
+    return _rss_pick_title(
+        f"https://news.google.com/rss/search?q={q}&hl=en-IN&gl=IN&ceid=IN:en",
+        prefer_ipl=True,
+    )
+
+
+def fetch_live_ipl_commentary(r: Any) -> str | None:
+    """
+    Latest ball / commentary text for the current live IPL match (CricAPI match_info),
+    else a Google News 'live action' line. Cached per match id or RSS key.
+    """
+    if not _ipl_speech_on:
+        return None
+    data = _cricapi_matches_payload(r) if CRICAPI_API_KEY else None
+    if data and _cricapi_payload_has_live_ipl(data):
+        m = _cricapi_pick_live_ipl_match(data)
+        mid = _cricapi_match_id(m) if m else None
+        if mid:
+            ttl = max(15, int(os.environ.get("FRIDAY_IPL_COMMENTARY_CACHE_SEC", "45")))
+
+            def _load_commentary() -> str | None:
+                info = _cricapi_fetch_match_info(mid)
+                if not info:
+                    return None
+                return _extract_commentary_snippet(info)
+
+            sn = _redis_cached_str(r, f"friday:amb:v2:mi_comm:{mid}", ttl, _load_commentary)
+            if sn:
+                return sn
+    rss_ttl = max(60, int(os.environ.get("FRIDAY_IPL_COMMENTARY_RSS_CACHE_SEC", "180")))
+    return _redis_cached_str(
+        r,
+        "friday:amb:v2:ipl_live_action_rss",
+        rss_ttl,
+        fetch_google_ipl_live_action_snippet,
     )
 
 
@@ -1174,8 +1315,10 @@ def generate_line_ai(
 
     # -- Try cached line first
     _hi_flag = int(cin) if mode == "cricket" else 0
+    _raw_comm = (live_data.get("cricket_commentary") or "").strip()
+    _comm_h = hashlib.md5(_raw_comm.encode()).hexdigest()[:12] if mode == "cricket" and _raw_comm else ""
     cache_key = "friday:ambient:content_cache:" + hashlib.sha256(
-        f"{topic}|{mode}|{USER_INTERESTS}|{_hi_flag}".encode()
+        f"{topic}|{mode}|{USER_INTERESTS}|{_hi_flag}|{_comm_h}".encode()
     ).hexdigest()
     try:
         hit = r.get(cache_key)
@@ -1185,7 +1328,12 @@ def generate_line_ai(
         pass
 
     # -- Compose prompt context from live data
-    cricket_line  = live_data.get("cricket")
+    cricket_line = live_data.get("cricket")
+    if mode == "cricket" and _raw_comm:
+        if cricket_line:
+            cricket_line = f"{cricket_line}\n\nLatest from the field (feed): {_raw_comm}"
+        else:
+            cricket_line = _raw_comm
     weather_line  = live_data.get("weather")
     fact_line     = live_data.get("fact")
     joke_line     = live_data.get("joke")
@@ -1296,6 +1444,16 @@ def generate_line_ai(
                 "Start mid-thought with a natural Hindi opener (अरे, देखो, अभी, सुनो, वैसे, यार). "
                 "No English sentences.\n"
                 if mode == "cricket" and cin else ""
+            )
+            + (
+                "\n\nCRICKET — LIVE FEED:\n"
+                "The user message may include a 'Latest from the field' fragment (ball-by-ball or recap text).\n"
+                + (
+                    "Weave it into Hindi commentary — same energy as Harsha or Star; do not read it verbatim like a teleprompter.\n"
+                    if cin else
+                    "Sound like British or Indian English TV/radio commentary — tight, rhythmic, names as given; do not list facts dryly.\n"
+                )
+                if mode == "cricket" and _raw_comm else ""
             )
         )
 
@@ -2031,15 +2189,21 @@ def speak_blocking(text: str, voice: str | None = None) -> float:
     if should_defer_voice_for_cursor():
         return 0.0
     env = {**os.environ, "FRIDAY_TTS_USE_SESSION_STICKY_VOICE": "false"}
+    env.pop("FRIDAY_TTS_PRIORITY", None)
     if voice:
         env["FRIDAY_TTS_VOICE"] = voice
     else:
         av = os.environ.get("FRIDAY_AMBIENT_TTS_VOICE", "").strip()
         if av:
             env["FRIDAY_TTS_VOICE"] = av
+    line = text.strip()[:4000]
+    try:
+        AMBIENT_SPEAKING_FILE.write_text(line, encoding="utf-8")
+    except OSError:
+        pass
     try:
         subprocess.run(
-            [sys.executable, str(SPEAK_SCRIPT), text.strip()],
+            [sys.executable, str(SPEAK_SCRIPT), line],
             env=env,
             capture_output=True,
             timeout=120,
@@ -2047,6 +2211,11 @@ def speak_blocking(text: str, voice: str | None = None) -> float:
         )
     except Exception as e:
         log.warning("speak failed: %s", e)
+    finally:
+        try:
+            AMBIENT_SPEAKING_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
     return time.perf_counter() - t0
 
 
@@ -2187,8 +2356,12 @@ def _refresh_live_data(r: Any | None = None) -> None:
     def _cricket_slot() -> str | None:
         return fetch_cricket_combined(rr)
 
+    def _cricket_commentary_slot() -> str | None:
+        return fetch_live_ipl_commentary(rr)
+
     _FETCHERS: dict[str, Any] = {
-        "cricket":  _cricket_slot,
+        "cricket":             _cricket_slot,
+        "cricket_commentary":  _cricket_commentary_slot,
         "weather":  fetch_weather_brief,
         "fact":     fetch_random_fact,
         "joke":     fetch_dad_joke,

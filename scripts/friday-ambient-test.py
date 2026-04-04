@@ -25,6 +25,7 @@ print(combo or "(none — outside IPL window or no feeds)")
 print()
 print("English RSS headline:", mod.fetch_cricket_news() or "(none)")
 print("Hindi RSS headline:", mod.fetch_cricket_news_hindi() or "(none)")
+print("Live commentary / search snippet:", mod.fetch_live_ipl_commentary(r) or "(none)")
 
 print()
 print("=" * 60)
