@@ -2422,31 +2422,28 @@ def _no_window() -> dict:
 
 
 def speak_blocking(text: str, voice: str | None = None) -> float:
+    from friday_speaker import speaker
+
     t0 = time.perf_counter()
     if not text.strip():
         return 0.0
     if should_defer_voice_for_cursor():
         return 0.0
-    env = {**os.environ, "FRIDAY_TTS_USE_SESSION_STICKY_VOICE": "false"}
-    env.pop("FRIDAY_TTS_PRIORITY", None)
-    if voice:
-        env["FRIDAY_TTS_VOICE"] = voice
-    elif not _ambient_main_voice_only():
+    resolved_voice = voice
+    if not resolved_voice and not _ambient_main_voice_only():
         av = os.environ.get("FRIDAY_AMBIENT_TTS_VOICE", "").strip()
         if av:
-            env["FRIDAY_TTS_VOICE"] = av
+            resolved_voice = av
     line = text.strip()[:4000]
     try:
         AMBIENT_SPEAKING_FILE.write_text(line, encoding="utf-8")
     except OSError:
         pass
     try:
-        subprocess.run(
-            [sys.executable, str(SPEAK_SCRIPT), line],
-            env=env,
-            capture_output=True,
-            timeout=120,
-            **_no_window(),
+        speaker.speak_blocking(
+            line,
+            voice=resolved_voice,
+            use_session_sticky=False,
         )
     except Exception as e:
         log.warning("speak failed: %s", e)
@@ -2511,33 +2508,26 @@ def speak_subagent_blocking(text: str) -> float:
     Blocking TTS using the ambient sub-agent voice (rate/pitch + optional FRIDAY_AMBIENT_SUB_TTS_VOICE).
     Used for periodic check-ins; ignores FRIDAY_AMBIENT_MAIN_VOICE_ONLY so timbre stays distinct.
     """
+    from friday_speaker import speaker
+
     t0 = time.perf_counter()
     if not text.strip():
         return 0.0
     if should_defer_voice_for_cursor():
         return 0.0
-    env = {
-        **os.environ,
-        "FRIDAY_TTS_USE_SESSION_STICKY_VOICE": "false",
-        "FRIDAY_TTS_RATE": SUB_VOICE_RATE,
-        "FRIDAY_TTS_PITCH": SUB_VOICE_PITCH,
-    }
-    env.pop("FRIDAY_TTS_PRIORITY", None)
-    subv = os.environ.get("FRIDAY_AMBIENT_SUB_TTS_VOICE", "").strip()
-    if subv:
-        env["FRIDAY_TTS_VOICE"] = subv
+    subv = os.environ.get("FRIDAY_AMBIENT_SUB_TTS_VOICE", "").strip() or None
     line = text.strip()[:4000]
     try:
         AMBIENT_SPEAKING_FILE.write_text(line, encoding="utf-8")
     except OSError:
         pass
     try:
-        subprocess.run(
-            [sys.executable, str(SPEAK_SCRIPT), line],
-            env=env,
-            capture_output=True,
-            timeout=120,
-            **_no_window(),
+        speaker.speak_blocking(
+            line,
+            voice=subv,
+            rate=SUB_VOICE_RATE,
+            pitch=SUB_VOICE_PITCH,
+            use_session_sticky=False,
         )
     except Exception as e:
         log.warning("speak_subagent_blocking failed: %s", e)
@@ -2555,29 +2545,29 @@ def speak_child(text: str | None = None) -> None:
     main Friday — sounds like a subordinate reporting in).
     Non-blocking fire-and-forget; used by parallel content workers.
     """
+    from friday_speaker import speaker
+
     phrase = text or random.choice(_SUB_VOICE_PHRASES)
     if not phrase.strip():
         return
     if should_defer_voice_for_cursor():
         return
-    env = {
-        **os.environ,
-        "FRIDAY_TTS_USE_SESSION_STICKY_VOICE": "false",
-    }
+    voice = None
+    rate = None
+    pitch = None
     if not _ambient_main_voice_only():
-        env["FRIDAY_TTS_RATE"] = SUB_VOICE_RATE
-        env["FRIDAY_TTS_PITCH"] = SUB_VOICE_PITCH
+        rate = SUB_VOICE_RATE
+        pitch = SUB_VOICE_PITCH
         subv = os.environ.get("FRIDAY_AMBIENT_SUB_TTS_VOICE", "").strip()
         if subv:
-            env["FRIDAY_TTS_VOICE"] = subv
-    try:
-        subprocess.Popen(
-            [sys.executable, str(SPEAK_SCRIPT), phrase.strip()],
-            env=env,
-            **_no_window(),
-        )
-    except Exception as e:
-        log.debug("speak_child failed: %s", e)
+            voice = subv
+    speaker.speak(
+        phrase.strip(),
+        voice=voice,
+        rate=rate,
+        pitch=pitch,
+        use_session_sticky=False,
+    )
 
 
 def prewarm_tts() -> None:
@@ -2586,11 +2576,12 @@ def prewarm_tts() -> None:
     log.info("Pre-warming TTS cache (%d phrases)...", len(PREWARM_PHRASES))
     cache_dir = Path(os.environ.get("FRIDAY_TTS_CACHE", "") or Path(tempfile.gettempdir()) / "friday-tts-cache")
     cache_dir.mkdir(parents=True, exist_ok=True)
+    speak_script = str(SPEAK_SCRIPT)
     for phrase in PREWARM_PHRASES:
         try:
             out = cache_dir / f"prewarm-{hashlib.md5(phrase.encode()).hexdigest()}.mp3"
             subprocess.run(
-                [sys.executable, str(SPEAK_SCRIPT), "--output", str(out), phrase],
+                [sys.executable, speak_script, "--output", str(out), phrase],
                 env={**os.environ}, capture_output=True, timeout=90, **_no_window(),
             )
         except Exception:
