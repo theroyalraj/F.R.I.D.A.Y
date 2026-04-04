@@ -48,22 +48,41 @@ services:
       - "host.docker.internal:host-gateway"
 
   # Optional: docker compose --profile whatsapp up -d
+  evolution-postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    profiles:
+      - whatsapp
+    environment:
+      - POSTGRES_DB=evolution
+      - POSTGRES_USER=evolution
+      - POSTGRES_PASSWORD=evolution
+    volumes:
+      - openclaw_evolution_pg:/var/lib/postgresql/data
+
   evolution-api:
     image: atendai/evolution-api:latest
     restart: unless-stopped
     profiles:
       - whatsapp
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8181:8080"
     environment:
       - AUTHENTICATION_API_KEY=${EVOLUTION_API_KEY:-change-me}
+      - DATABASE_PROVIDER=postgresql
+      - DATABASE_CONNECTION_URI=postgresql://evolution:evolution@evolution-postgres:5432/evolution
+      - CACHE_REDIS_ENABLED=true
+      - CACHE_REDIS_URI=redis://redis:6379
+      - CACHE_REDIS_PREFIX_KEY=evolution
     volumes:
       - openclaw_evolution:/evolution/store
     depends_on:
       - redis
+      - evolution-postgres
 
 volumes:
   openclaw_redis:
   openclaw_redis_insight:
   openclaw_n8n:
   openclaw_evolution:
+  openclaw_evolution_pg:
