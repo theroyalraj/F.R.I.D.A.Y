@@ -8,6 +8,10 @@ session-voice.json "chat_id"; any other UUID is treated as a Task subagent trans
 Env (defaults on unless explicitly false/off/0/no):
   FRIDAY_CURSOR_SPEAK_REPLY — narrate main Composer assistant text
   FRIDAY_CURSOR_SPEAK_SUBAGENT_REPLY — narrate subagent assistant text
+  FRIDAY_CURSOR_SPEAK_THINKING — capture and speak extended-thinking content before Cursor
+    redacts it (default: true). Thinking blocks appear briefly in the JSONL before being
+    replaced with [REDACTED]. This watcher catches them on the first poll pass and speaks
+    them, preserving the reasoning as audio.
 
 When FRIDAY_CURSOR_NARRATION is on, the Cursor agent already speaks live (ack / status / done),
 so main and subagent JSONL TTS default OFF to avoid double voice. Opt back in:
@@ -23,6 +27,7 @@ Run:  python scripts/cursor-reply-watch.py
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -53,8 +58,11 @@ _SESSION_VOICE = _REPO_ROOT / ".session-voice.json"
 _PICK_SCRIPT = _REPO_ROOT / "skill-gateway" / "scripts" / "pick-session-voice.py"
 _SPEAK_SCRIPT = _REPO_ROOT / "skill-gateway" / "scripts" / "friday-speak.py"
 
-POLL_SEC = 0.5
+POLL_SEC = 0.35
+POLL_ACTIVE_SEC = 0.15
 RESCAN_SEC = 10.0
+_ACTIVE_WINDOW_SEC = 5.0
+_SPOKEN_HASHES_MAX = 500
 
 
 def _env_bool(key: str, default: bool = True) -> bool:
@@ -113,6 +121,50 @@ def _assistant_text_from_line(line: str) -> str:
         if isinstance(t, str) and t.strip():
             parts.append(t)
     return "\n\n".join(parts).strip()
+
+
+def _thinking_text_from_line(line: str) -> str:
+    """Extract thinking/reasoning content from an assistant JSONL line.
+
+    Cursor extended-thinking appears as either:
+      - {"type": "thinking", "thinking": "..."} blocks in the content array
+      - Inline in text blocks before [REDACTED] markers (the visible pre-redaction text)
+    Both are captured here. Returns empty string if nothing found or already redacted.
+    """
+    try:
+        obj = json.loads(line)
+    except Exception:
+        return ""
+    if obj.get("role") != "assistant":
+        return ""
+    msg = obj.get("message") or {}
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type", "")
+        # Explicit thinking blocks (Anthropic extended-thinking format)
+        if btype == "thinking":
+            t = block.get("thinking") or block.get("text") or ""
+            if isinstance(t, str) and t.strip() and not _is_fully_redacted(t):
+                parts.append(t.strip())
+        # Text blocks that contain pre-redaction thinking (visible text before [REDACTED])
+        elif btype == "text":
+            t = block.get("text") or ""
+            if isinstance(t, str) and "[REDACTED]" in t:
+                before = t.split("[REDACTED]")[0].strip()
+                if before and len(before) > 30:
+                    parts.append(before)
+    return "\n\n".join(parts).strip()
+
+
+def _is_fully_redacted(text: str) -> bool:
+    """True if the text is essentially just redaction markers with no useful content."""
+    cleaned = _RE_REDACTED.sub("", text).strip()
+    return len(cleaned) < 10
 
 
 _RE_FENCED = re.compile(r"```[\w]*\s*.*?```", re.DOTALL)
@@ -180,38 +232,24 @@ def strip_to_prose(raw: str) -> str:
 
 
 def _speak_main(text: str) -> None:
-    env = {
-        **os.environ,
-        "FRIDAY_TTS_SESSION": "cursor-reply",
-        "FRIDAY_TTS_BYPASS_CURSOR_DEFER": "true",
-    }
-    try:
-        subprocess.Popen(
-            [sys.executable, str(_SPEAK_SCRIPT), text],
-            cwd=str(_REPO_ROOT),
-            env=env,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-    except Exception:
-        pass
+    from friday_speaker import speaker
+
+    speaker.speak(
+        text,
+        session="cursor-reply",
+        bypass_cursor_defer=True,
+    )
 
 
 def _speak_subagent(text: str) -> None:
-    env = {
-        **os.environ,
-        "FRIDAY_TTS_SESSION": "subagent",
-        "FRIDAY_TTS_PRIORITY": "1",
-        "FRIDAY_TTS_BYPASS_CURSOR_DEFER": "true",
-    }
-    try:
-        subprocess.Popen(
-            [sys.executable, str(_SPEAK_SCRIPT), text],
-            cwd=str(_REPO_ROOT),
-            env=env,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-    except Exception:
-        pass
+    from friday_speaker import speaker
+
+    speaker.speak(
+        text,
+        session="subagent",
+        priority=True,
+        bypass_cursor_defer=True,
+    )
 
 
 def _ensure_cursor_reply_voice() -> None:
@@ -265,6 +303,10 @@ def _maybe_seed_chat_id_if_single_transcript() -> None:
         pass
 
 
+def _content_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
 def _merge_new_paths(state_map: dict[str, dict], *, seek_end: bool) -> None:
     for p in _list_transcript_files():
         ps = str(p.resolve())
@@ -274,41 +316,52 @@ def _merge_new_paths(state_map: dict[str, dict], *, seek_end: bool) -> None:
             off = p.stat().st_size if seek_end else 0
         except OSError:
             off = 0
-        state_map[ps] = {"offset": off, "carry": ""}
+        state_map[ps] = {
+            "offset": off,
+            "carry": "",
+            "spoken_hashes": set(),
+            "last_activity": 0.0,
+        }
 
 
 def main() -> None:
     req_main = _env_bool("FRIDAY_CURSOR_SPEAK_REPLY", True)
     req_sub = _env_bool("FRIDAY_CURSOR_SPEAK_SUBAGENT_REPLY", True)
+    req_thinking = _env_bool("FRIDAY_CURSOR_SPEAK_THINKING", True)
     speak_main = req_main
     speak_sub = req_sub
-    # Live agent-speaker + transcript tail on the same text = overlapping voices.
+    speak_thinking = req_thinking
     if _narration_enabled():
+        # Agent narration already speaks reasoning live — suppress watcher
+        # duplicates unless explicitly opted back in.
         if speak_main and not _env_bool("FRIDAY_CURSOR_SPEAK_REPLY_WITH_NARRATION", False):
             speak_main = False
         if speak_sub and not _env_bool("FRIDAY_CURSOR_SPEAK_SUBAGENT_WITH_NARRATION", False):
             speak_sub = False
-    if not speak_main and not speak_sub:
-        if _narration_enabled() and (req_main or req_sub):
+        if speak_thinking and not _env_bool("FRIDAY_CURSOR_SPEAK_THINKING_WITH_NARRATION", False):
+            speak_thinking = False
+    any_active = speak_main or speak_sub or speak_thinking
+    if not any_active:
+        if _narration_enabled() and (req_main or req_sub or req_thinking):
             print(
                 "cursor-reply-watch: FRIDAY_CURSOR_NARRATION is on — transcript TTS suppressed "
-                "(set FRIDAY_CURSOR_SPEAK_REPLY_WITH_NARRATION / _SUBAGENT_WITH_NARRATION to re-enable). Exiting.",
+                "(narrate-thinking rule speaks reasoning live; watcher thinking also off). "
+                "Set _WITH_NARRATION vars to re-enable. Exiting.",
                 flush=True,
             )
         else:
             print(
-                "cursor-reply-watch: both FRIDAY_CURSOR_SPEAK_REPLY and FRIDAY_CURSOR_SPEAK_SUBAGENT_REPLY are off — exiting.",
+                "cursor-reply-watch: all speak channels off — exiting.",
                 flush=True,
             )
         return
 
     if speak_main:
         _ensure_cursor_reply_voice()
-    if speak_sub:
+    if speak_sub or speak_thinking:
         _ensure_subagent_voice()
     _maybe_seed_chat_id_if_single_transcript()
 
-    # path -> { offset: int, carry: str }
     state_map: dict[str, dict] = {}
     last_rescan = 0.0
     warned_no_chat = False
@@ -316,7 +369,7 @@ def main() -> None:
     _merge_new_paths(state_map, seek_end=True)
 
     print(
-        f"cursor-reply-watch: root={_TRANSCRIPTS_ROOT} main={speak_main} subagent={speak_sub}",
+        f"cursor-reply-watch: root={_TRANSCRIPTS_ROOT} main={speak_main} subagent={speak_sub} thinking={speak_thinking}",
         flush=True,
     )
 
@@ -331,7 +384,12 @@ def main() -> None:
                         off = Path(p).stat().st_size
                     except OSError:
                         off = 0
-                    state_map[p] = {"offset": off, "carry": ""}
+                    state_map[p] = {
+                        "offset": off,
+                        "carry": "",
+                        "spoken_hashes": set(),
+                        "last_activity": 0.0,
+                    }
             for old in list(state_map.keys()):
                 if old not in known:
                     del state_map[old]
@@ -346,6 +404,7 @@ def main() -> None:
                 flush=True,
             )
 
+        any_recently_active = False
         for path_str, st in list(state_map.items()):
             p = Path(path_str)
             try:
@@ -358,6 +417,8 @@ def main() -> None:
                 st["carry"] = ""
             if sz == off:
                 continue
+            st["last_activity"] = now
+            any_recently_active = True
             try:
                 with p.open("r", encoding="utf-8", errors="replace") as f:
                     f.seek(off)
@@ -370,10 +431,31 @@ def main() -> None:
             lines = data.split("\n")
             st["carry"] = lines.pop() if lines else ""
             folder_uuid = p.parent.name
+            spoken_hashes: set = st["spoken_hashes"]
 
             for line in lines:
                 if not line.strip():
                     continue
+
+                if not main_uuid:
+                    continue
+
+                is_main = bool(folder_uuid == main_uuid)
+                is_sub = not is_main
+
+                # --- thinking capture (runs even when reply TTS is off) ---
+                if speak_thinking:
+                    thinking_raw = _thinking_text_from_line(line)
+                    if thinking_raw:
+                        thinking_prose = strip_to_prose(thinking_raw)
+                        if thinking_prose:
+                            h = _content_hash(thinking_prose)
+                            if h not in spoken_hashes:
+                                spoken_hashes.add(h)
+                                print(f"cursor-reply-watch: [thinking] speaking {len(thinking_prose)} chars", flush=True)
+                                _speak_subagent(thinking_prose)
+
+                # --- regular reply TTS ---
                 raw_text = _assistant_text_from_line(line)
                 if not raw_text:
                     continue
@@ -381,18 +463,29 @@ def main() -> None:
                 if not prose:
                     continue
 
-                is_main = bool(main_uuid and folder_uuid == main_uuid)
-                is_sub = bool(main_uuid and folder_uuid != main_uuid)
-                if not main_uuid:
-                    # No composer chat id yet — skip (avoids mis-labelling subagent as main).
+                h = _content_hash(prose)
+                if h in spoken_hashes:
                     continue
+                spoken_hashes.add(h)
+
+                if len(spoken_hashes) > _SPOKEN_HASHES_MAX:
+                    to_remove = list(spoken_hashes)[:_SPOKEN_HASHES_MAX // 2]
+                    for old_h in to_remove:
+                        spoken_hashes.discard(old_h)
 
                 if is_main and speak_main:
                     _speak_main(prose)
                 elif is_sub and speak_sub:
                     _speak_subagent(prose)
 
-        time.sleep(POLL_SEC)
+        # Adaptive polling: faster when transcripts are actively being written
+        if any_recently_active or any(
+            now - st.get("last_activity", 0) < _ACTIVE_WINDOW_SEC
+            for st in state_map.values()
+        ):
+            time.sleep(POLL_ACTIVE_SEC)
+        else:
+            time.sleep(POLL_SEC)
 
 
 if __name__ == "__main__":

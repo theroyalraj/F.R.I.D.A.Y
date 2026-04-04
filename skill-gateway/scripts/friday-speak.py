@@ -162,6 +162,8 @@ TTS_TS_FILE     = Path(tempfile.gettempdir()) / "friday-tts-ts"
 TTS_ACTIVE_FILE = Path(tempfile.gettempdir()) / "friday-tts-active"  # exists while speech is playing
 # Written by friday-ambient speak_blocking while a line is playing (for priority replay).
 AMBIENT_SPEAKING_FILE = Path(tempfile.gettempdir()) / "friday-ambient-speaking.txt"
+# Thinking singleton — at most one thinking-narration speak in the pipeline at a time.
+THINKING_SINGLETON_FILE = Path(tempfile.gettempdir()) / "friday-thinking-singleton"
 
 
 def _write_last_spoken_ts() -> None:
@@ -674,6 +676,7 @@ def _release_own_tts_lock() -> None:
 
 
 atexit.register(_release_own_tts_lock)
+atexit.register(_release_thinking_singleton)
 
 
 def _sigterm_handler(*_args) -> None:
@@ -686,6 +689,54 @@ try:
 except (OSError, ValueError):
     # Can fail if not the main thread or on unsupported platforms — safe to ignore.
     pass
+
+
+_THINKING_SINGLETON_TTL = 45.0  # seconds — auto-expire stale singleton
+
+
+def _try_acquire_thinking_singleton() -> bool:
+    """Atomic try-acquire for thinking narration. Returns True if this process won."""
+    try:
+        fd = os.open(str(THINKING_SINGLETON_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        try:
+            os.write(fd, f"{os.getpid()}\n{time.time()}".encode())
+        finally:
+            os.close(fd)
+        return True
+    except FileExistsError:
+        pass
+    # Check if stale (holder dead or TTL expired)
+    try:
+        raw = THINKING_SINGLETON_FILE.read_text(encoding="utf-8").strip()
+        lines = raw.split("\n", 1)
+        holder_pid = int(lines[0])
+        created_at = float(lines[1]) if len(lines) > 1 else 0.0
+        stale = (time.time() - created_at) > _THINKING_SINGLETON_TTL
+        if stale or not _pid_alive(holder_pid):
+            THINKING_SINGLETON_FILE.unlink(missing_ok=True)
+            try:
+                fd = os.open(str(THINKING_SINGLETON_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                try:
+                    os.write(fd, f"{os.getpid()}\n{time.time()}".encode())
+                finally:
+                    os.close(fd)
+                return True
+            except FileExistsError:
+                return False
+    except Exception:
+        pass
+    return False
+
+
+def _release_thinking_singleton() -> None:
+    """Release the thinking singleton only if this process owns it."""
+    try:
+        raw = THINKING_SINGLETON_FILE.read_text(encoding="utf-8").strip()
+        pid_str = raw.split("\n", 1)[0]
+        if int(pid_str) == os.getpid():
+            THINKING_SINGLETON_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 def _read_preempted_ambient_line() -> str | None:
@@ -838,6 +889,9 @@ async def speak():
         "yes",
         "on",
     )
+    _is_thinking = os.environ.get("FRIDAY_TTS_THINKING", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
     preempted_replay: str | None = None
     if is_playback:
         # Cursor / IDE voice: do not play TTS over the same session as dictation.
@@ -866,6 +920,12 @@ async def speak():
                     sys.exit(0)
             except Exception:
                 pass
+        # ── Thinking singleton: at most one thinking narration in the pipeline ──
+        if _is_thinking:
+            if not _try_acquire_thinking_singleton():
+                print("[friday-speak] thinking singleton busy — skipping (another thinking speak is active)", flush=True)
+                sys.exit(0)
+
         if _priority:
             # User-facing reply: cut over ambient / stuck TTS instead of waiting behind it.
             preempted_replay = _preempt_for_priority_tts()
@@ -931,6 +991,8 @@ async def speak():
     finally:
         if is_playback:
             _release_own_tts_lock()
+            if _is_thinking:
+                _release_thinking_singleton()
 
     if is_playback and _priority and preempted_replay:
         _play_priority_followup(preempted_replay)

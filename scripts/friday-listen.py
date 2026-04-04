@@ -267,54 +267,40 @@ def _wait_for_tts_clear(timeout: float = 45.0) -> None:
 
 
 def speak(text: str, *, jarvis: bool = False, priority: bool = True):
+    from friday_speaker import speaker
+
     log.info("-> speak: %s", text[:80])
     def _run():
         _speaking.set()
         try:
             with _speak_lock:
-                # Priority (default): interrupt ambient / other TTS so replies are never stuck
-                # waiting behind a long chatter line. Non-priority: wait for lock to clear.
                 if not priority:
                     _wait_for_tts_clear()
                 try:
                     override = edge_voice_override_for_text(text)
-                    env = {**os.environ, "FRIDAY_TTS_VOICE": override or VOICE}
-                    if override:
-                        env["FRIDAY_TTS_USE_SESSION_STICKY_VOICE"] = "false"
+                    voice = override or VOICE
+                    use_sticky = not bool(override)
+                    rate = None
+                    pitch = None
                     if jarvis:
-                        gr, gp = sample_greeting_rate_pitch()
-                        env["FRIDAY_TTS_RATE"] = gr
-                        env["FRIDAY_TTS_PITCH"] = gp
-                    if priority:
-                        env["FRIDAY_TTS_PRIORITY"] = "1"
-                    else:
-                        env.pop("FRIDAY_TTS_PRIORITY", None)
-                    # Mic daemon replies are the primary voice UX — never mute because Cursor is focused.
-                    env["FRIDAY_TTS_BYPASS_CURSOR_DEFER"] = "true"
-                    result = subprocess.run(
-                        [sys.executable, str(SPEAK_SCRIPT), text],
-                        env=env,
-                        capture_output=True, timeout=90,   # edge-tts may retry up to ~60s
+                        rate, pitch = sample_greeting_rate_pitch()
+                    speaker.speak_blocking(
+                        text,
+                        voice=voice,
+                        priority=priority,
+                        bypass_cursor_defer=True,
+                        use_session_sticky=use_sticky,
+                        rate=rate,
+                        pitch=pitch,
+                        timeout=90.0,
                     )
-                    if result.returncode != 0:
-                        err = (result.stderr or b"").decode(errors="replace").strip()
-                        log.warning("speak FAILED (exit %d) — falling back to SAPI. stderr=%s",
-                                    result.returncode, err[:200])
-                        _speak_fallback(text)
-                        _write_last_spoken_ts()
-                    else:
-                        out = (result.stdout or b"").decode(errors="replace").strip()
-                        log.info("speak OK: %s", out)
-                except subprocess.TimeoutExpired:
-                    log.warning("speak timed out — falling back to SAPI")
-                    _speak_fallback(text)
-                    _write_last_spoken_ts()
+                    log.info("speak OK")
                 except Exception as e:
                     log.warning("speak exception: %s — falling back to SAPI", e)
                     _speak_fallback(text)
                     _write_last_spoken_ts()
         finally:
-            time.sleep(_POST_SPEAK_COOLDOWN)   # keep mic deaf briefly after audio ends
+            time.sleep(_POST_SPEAK_COOLDOWN)
             _speaking.clear()
     threading.Thread(target=_run, daemon=True).start()
 

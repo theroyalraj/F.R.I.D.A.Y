@@ -388,6 +388,38 @@ def pick_voice(*, subagent: bool = False, cursor_reply: bool = False) -> str:
     return new_voice
 
 
+def check_voices() -> None:
+    """Print current session voice assignments as a human-readable summary."""
+    state = _load_state()
+    chat_id = state.get("chat_id", "")
+    lines = [
+        "Session voice assignments:",
+        f"  main       : {state.get('voice', '(not set)'):<42} chat: {chat_id[:12] + '...' if len(chat_id) > 12 else chat_id or '(none)'}",
+        f"  subagent   : {state.get('subagent_voice', '(not set)'):<42} (global sticky)",
+        f"  cursor-reply: {state.get('cursor_reply_voice', '(not set)'):<42} chat: {(state.get('cursor_reply_chat_id') or '(none)')[:12]}...",
+    ]
+    # Redis voice context (if available)
+    try:
+        url = (
+            os.environ.get("OPENCLAW_REDIS_URL", "").strip()
+            or os.environ.get("FRIDAY_AMBIENT_REDIS_URL", "").strip()
+            or "redis://127.0.0.1:6379"
+        )
+        import redis as _redis
+        r = _redis.Redis.from_url(url, decode_responses=True)
+        for ctx in ("cursor:main", "cursor:subagent", "cursor:reply"):
+            data = r.hgetall(f"friday:voice:context:{ctx}")
+            if data:
+                lines.append(f"  redis {ctx}: voice={data.get('voice','?')} last_used={data.get('last_used','?')} status={data.get('status','?')}")
+    except Exception:
+        lines.append("  (redis not available for context lookup)")
+    # Blocked voices
+    blocked = sorted(_BLOCKED_VOICES)
+    if blocked:
+        lines.append(f"  blocked    : {', '.join(blocked)}")
+    print("\n".join(lines), flush=True)
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Pick sticky Edge-TTS voice for Cursor session.")
     ap.add_argument(
@@ -400,7 +432,15 @@ if __name__ == "__main__":
         action="store_true",
         help="Pick third voice for cursor-reply-watch TTS (distinct from main and subagent when possible).",
     )
+    ap.add_argument(
+        "--check",
+        action="store_true",
+        help="Display current session voice assignments per session type (no pick).",
+    )
     args = ap.parse_args()
+    if args.check:
+        check_voices()
+        sys.exit(0)
     if args.subagent and args.cursor_reply:
         print("pick-session-voice: use only one of --subagent or --cursor-reply", file=sys.stderr)
         sys.exit(2)

@@ -56,7 +56,15 @@ export function speakFridayPy(text, log, opts = {}) {
     return;
   }
 
-  const safeText = String(text || '').replace(/["`]/g, "'").trim().slice(0, 300);
+  let safeText = String(text || '').replace(/["`]/g, "'").trim().slice(0, 300);
+  safeText = safeText
+    .replace(/\*+\s*redacted\s*\*+/gi, ' ')
+    .replace(/`\s*redacted\s*`/gi, ' ')
+    .replace(/<\s*redacted[^>]*>/gi, ' ')
+    .replace(/\[\s*redacted\s*\]/gi, ' ')
+    .replace(/\bredacted\b/gi, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
   if (!safeText) {
     try {
       onClose?.();

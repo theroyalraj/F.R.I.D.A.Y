@@ -30,6 +30,7 @@
     "setup:alexa": "node scripts/setup-alexa-cookie.mjs",
     "play": "python skill-gateway/scripts/friday-play.py",
     "clear:locks": "python skill-gateway/scripts/clear_friday_locks.py",
-    "install:all": "npm install"
+    "install:all": "npm install",
+    "test:friday-page": "node scripts/smoke-friday-page.mjs"
   }
 }

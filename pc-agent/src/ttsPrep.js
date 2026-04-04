@@ -19,9 +19,24 @@ function _numToWords(n) {
   return String(n);
 }
 
+function _stripRedacted(s) {
+  if (!s) return s;
+  return s
+    .replace(/\*+\s*redacted\s*\*+/gi, ' ')
+    .replace(/`\s*redacted\s*`/gi, ' ')
+    .replace(/<\s*redacted[^>]*>/gi, ' ')
+    .replace(/\[\s*redacted\s*\]/gi, ' ')
+    .replace(/\{\s*redacted\s*\}/gi, ' ')
+    .replace(/\(\s*redacted\s*\)/gi, ' ')
+    .replace(/\bredacted\s*[:;.,!?…]+\s*/gi, ' ')
+    .replace(/\bredacted\b/gi, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
 export function prepareTextForTts(raw) {
   if (!raw || typeof raw !== 'string') return 'Done.';
-  let t = raw;
+  let t = _stripRedacted(raw);
 
   // ── Code blocks / inline code ─────────────────────────────────────────────
   t = t.replace(/```[\s\S]*?```/g, ' ');
@@ -121,5 +136,6 @@ export function prepareTextForTts(raw) {
   // ── Length cap (OpenAI 4096 / Edge practical ~3800) ───────────────────────
   if (t.length > 3800) t = t.slice(0, 3800) + '.';
 
+  t = _stripRedacted(t);
   return t || 'Done.';
 }
