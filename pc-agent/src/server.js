@@ -8,6 +8,7 @@ import dotenv from 'dotenv';
 import pinoHttp from 'pino-http';
 import { rootLogger } from './log.js';
 import { runTask } from './taskRunner.js';
+import { pythonChildExecutable } from './winPython.js';
 import { prepareTextForTts } from './ttsPrep.js';
 import { piperConfigured, synthesizePiperWav } from './piperTts.js';
 import {
@@ -18,7 +19,9 @@ import {
   filteredEdgeTtsCatalogue,
   getVoiceBlockSet,
   isVoiceBlocked,
+  restoreSessionVoiceFromRedis,
 } from './edgeTts.js';
+import { getAllVoiceContexts } from './voiceRedis.js';
 import { openAiTtsApiKey, openAiTtsConfigured, synthesizeOpenAiMp3 } from './openaiTts.js';
 import { createPerceptionRouter } from './perceptionRoutes.js';
 import { createSettingsRouter } from './settingsRoutes.js';
@@ -50,6 +53,25 @@ const PORT = Number(process.env.PC_AGENT_PORT || 3847);
 
 // ── Friday startup voice ──────────────────────────────────────────────────────
 const SPEAK_SCRIPT = path.resolve(__dirname, '../../skill-gateway/scripts/friday-speak.py');
+const PLAY_SCRIPT  = path.resolve(__dirname, '../../skill-gateway/scripts/friday-play.py');
+
+function playDoneSong(log) {
+  const song = (process.env.FRIDAY_DONE_SONG || '').trim();
+  if (!song || !existsSync(PLAY_SCRIPT)) return;
+  const child = spawn(pythonChildExecutable(), [PLAY_SCRIPT, song], {
+    env: { ...process.env },
+    stdio: ['ignore', 'ignore', 'pipe'],
+    windowsHide: true,
+    detached: true,
+  });
+  child.unref();
+  child.stderr?.on('data', (buf) => {
+    const line = buf.toString().trim();
+    if (line) log?.warn({ line: line.slice(0, 400) }, 'done-song stderr');
+  });
+  child.on('error', (e) => log?.warn({ err: String(e.message) }, 'done-song spawn failed'));
+  log?.info({ song }, 'done-song: spawned friday-play.py');
+}
 
 function pcAgentStartupGreetingPhrase() {
   const n = (process.env.FRIDAY_USER_NAME || 'Raj').trim() || 'Raj';
@@ -248,6 +270,7 @@ voiceRouter.post('/command', async (req, res, next) => {
   try {
     const out = await runTask(req.body, req.log);
     res.status(out.status).json(out.json);
+    if (out.json?.ok) playDoneSong(req.log);
   } catch (e) {
     next(e);
   }
@@ -408,7 +431,18 @@ voiceRouter.get('/voices', (_req, res) => {
   });
 });
 
-/** Set the active Edge TTS voice for this server session (resets on restart). */
+/** Return live status of every tracked voice context from Redis. */
+voiceRouter.get('/status', async (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    const contexts = await getAllVoiceContexts();
+    res.json({ ok: true, contexts });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: String(err.message || err) });
+  }
+});
+
+/** Set the active Edge TTS voice for this server session (persisted to Redis). */
 voiceRouter.post('/set-voice', (req, res) => {
   const { voice } = req.body || {};
   if (!voice || typeof voice !== 'string') {
@@ -566,6 +600,8 @@ server = app.listen(PORT, BIND, () => {
   );
 
   broadcastEvent('server_start', { text: 'PC Agent online. All systems go.' });
+  // Restore the last API session voice from Redis so it survives restarts
+  restoreSessionVoiceFromRedis().catch(() => {});
   speakStartup();
 });
 server.on('error', (err) => {

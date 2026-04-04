@@ -20,6 +20,12 @@ import http                from 'node:http';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
+function pythonChildForScripts() {
+  const o = process.env.FRIDAY_PYTHON_CHILD?.trim();
+  if (o) return o;
+  return process.platform === 'win32' ? 'pythonw' : 'python3';
+}
+
 /** When set (e.g. by restart-local.ps1 -NoKill), do not kill listeners on 3847/3848 before spawn. */
 const NO_FREE_PORTS = ['1', 'true', 'yes'].includes(
   String(process.env.OPENCLAW_NO_FREE_PORTS || '').toLowerCase()
@@ -55,12 +61,43 @@ function readFridayAmbientFromDotEnv() {
   return ['1', 'true', 'yes', 'on'].includes(String(process.env.FRIDAY_AMBIENT || '').toLowerCase());
 }
 
+function readCursorNarrationFromDotEnv() {
+  return ['1', 'true', 'yes', 'on'].includes(
+    String(process.env.FRIDAY_CURSOR_NARRATION || '').trim().toLowerCase(),
+  );
+}
+
+/** Cursor JSONL → TTS: on if either toggle is on (empty env = on), unless live narration suppresses it. */
+function readCursorReplyWatchFromDotEnv() {
+  function enabled(key) {
+    const v = String(process.env[key] || '').trim().toLowerCase();
+    if (v === '') return true;
+    if (['0', 'false', 'no', 'off'].includes(v)) return false;
+    return true;
+  }
+  let main = enabled('FRIDAY_CURSOR_SPEAK_REPLY');
+  let sub = enabled('FRIDAY_CURSOR_SPEAK_SUBAGENT_REPLY');
+  if (readCursorNarrationFromDotEnv()) {
+    const mainWith = ['1', 'true', 'yes', 'on'].includes(
+      String(process.env.FRIDAY_CURSOR_SPEAK_REPLY_WITH_NARRATION || '').trim().toLowerCase(),
+    );
+    const subWith = ['1', 'true', 'yes', 'on'].includes(
+      String(process.env.FRIDAY_CURSOR_SPEAK_SUBAGENT_WITH_NARRATION || '').trim().toLowerCase(),
+    );
+    if (main && !mainWith) main = false;
+    if (sub && !subWith) sub = false;
+  }
+  return main || sub;
+}
+
 // ── Colours ──────────────────────────────────────────────────────────────────
 const C = {
   gateway:  '\x1b[36m',   // cyan
   agent:    '\x1b[32m',   // green
   listener: '\x1b[35m',   // magenta
+  cursor:   '\x1b[95m',   // bright magenta — Composer reply TTS
   ambient:  '\x1b[96m',   // bright cyan
+  music:    '\x1b[93m',   // bright yellow
   warn:     '\x1b[33m',
   reset:    '\x1b[0m',
 };
@@ -114,7 +151,9 @@ function shutdown(reason) {
   // Stop any playing song before killing node services
   const playScript = path.join(ROOT, 'skill-gateway', 'scripts', 'friday-play.py');
   if (existsSync(playScript)) {
-    try { spawn('python', [playScript, '--stop'], { stdio: 'ignore', windowsHide: true }); } catch { /* ignore */ }
+    try {
+      spawn(pythonChildForScripts(), [playScript, '--stop'], { stdio: 'ignore', windowsHide: true });
+    } catch { /* ignore */ }
   }
 
   for (const { name, child } of procs) {
@@ -220,7 +259,7 @@ async function main() {
   process.stdout.write(`${C.warn}
   ╔══════════════════════════════════════════════════╗
   ║          OpenClaw  —  All Services               ║
-  ║   gateway :3848  │  agent :3847  │  mic daemon   ║
+  ║ gateway :3848 │ agent :3847 │ mic │ Composer TTS ║
   ╚══════════════════════════════════════════════════╝
 ${C.reset}\n`);
 
@@ -250,6 +289,12 @@ ${C.reset}\n`);
     process.stdout.write(`${C.warn}[openclaw] friday-listen.py not found — voice daemon skipped${C.reset}\n`);
   }
 
+  const cursorWatchScript = path.join(ROOT, 'scripts', 'cursor-reply-watch.py');
+  if (readCursorReplyWatchFromDotEnv() && existsSync(cursorWatchScript)) {
+    log('cursor', 'Composer reply TTS watcher will start shortly after the voice daemon...');
+    await start('cursor', 'python', ['scripts/cursor-reply-watch.py'], { delayMs: 500 });
+  }
+
   const ambientOn =
     readFridayAmbientFromDotEnv() ||
     ['1', 'true', 'yes', 'on'].includes(String(process.env.FRIDAY_AMBIENT || '').toLowerCase());
@@ -257,6 +302,16 @@ ${C.reset}\n`);
   if (ambientOn && existsSync(ambientScript)) {
     log('ambient', 'Jarvis ambient daemon will start in 4.5 s...');
     await start('ambient', 'python', ['scripts/friday-ambient.py'], { delayMs: 4500 });
+  }
+
+  // Background music scheduler — plays a song every FRIDAY_MUSIC_INTERVAL_MIN minutes
+  const musicSchedOn = ['1', 'true', 'yes', 'on'].includes(
+    String(process.env.FRIDAY_MUSIC_SCHEDULER || '').toLowerCase(),
+  );
+  const musicSchedScript = path.join(ROOT, 'scripts', 'friday-music-scheduler.py');
+  if (musicSchedOn && existsSync(musicSchedScript)) {
+    log('music', 'background music scheduler will start in 6 s...');
+    await start('music', 'python', ['scripts/friday-music-scheduler.py'], { delayMs: 6000 });
   }
 
   process.stdout.write(`${C.warn}[openclaw] All services running. Press Ctrl+C to stop everything.${C.reset}\n\n`);

@@ -1,4 +1,5 @@
 import { matchOpenIntent, openApp } from './open.js';
+import { matchPlayMusicIntent, playMusicSearch } from './playMusic.js';
 import { runClaude } from './claude.js';
 import { callClaudeApi, isApiKeyAvailable } from './claudeApi.js';
 import { inferClaudeModelForTask, isAutoModelEnabled } from './claudeRouter.js';
@@ -45,6 +46,37 @@ export async function runTask(body, reqLog, options = {}) {
       json: {
         ok: r.ok,
         mode: 'open_app',
+        userId,
+        correlationId,
+        summary: r.detail,
+      },
+    };
+  }
+
+  if (action === 'play_music' && typeof body?.query === 'string' && body.query.trim()) {
+    const r = await playMusicSearch(body.query.trim());
+    reqLog.info({ mode: 'play_music', ok: r.ok, ms: Date.now() - t0 }, 'task done');
+    return {
+      status: 200,
+      json: {
+        ok: r.ok,
+        mode: 'play_music',
+        userId,
+        correlationId,
+        summary: r.detail,
+      },
+    };
+  }
+
+  const playQuery = t ? matchPlayMusicIntent(t) : null;
+  if (playQuery) {
+    const r = await playMusicSearch(playQuery);
+    reqLog.info({ mode: 'play_music', query: playQuery, ok: r.ok, ms: Date.now() - t0 }, 'task done');
+    return {
+      status: 200,
+      json: {
+        ok: r.ok,
+        mode: 'play_music',
         userId,
         correlationId,
         summary: r.detail,

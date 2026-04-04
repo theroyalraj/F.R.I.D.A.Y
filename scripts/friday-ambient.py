@@ -478,8 +478,10 @@ AMBIENT_SPEAKING_FILE = Path(tempfile.gettempdir()) / "friday-ambient-speaking.t
 AMBIENT_PID_FILE= Path(tempfile.gettempdir()) / "friday-ambient.pid"
 SPEAK_SCRIPT    = ROOT / "skill-gateway" / "scripts" / "friday-speak.py"
 
-VERBOSE_RATIO = float(os.environ.get("FRIDAY_AMBIENT_VERBOSE_RATIO", "0.30"))  # 30% of turns are longer / richer
-SONG_CHANCE   = float(os.environ.get("FRIDAY_AMBIENT_SONG_CHANCE",   "0.12"))  # 12% of ambient turns play music
+VERBOSE_RATIO   = float(os.environ.get("FRIDAY_AMBIENT_VERBOSE_RATIO", "0.30"))  # 30% of turns are longer / richer
+SONG_CHANCE     = float(os.environ.get("FRIDAY_AMBIENT_SONG_CHANCE",   "0.12"))  # 12% of ambient turns play music
+_autoplay_v     = os.environ.get("FRIDAY_AUTOPLAY", "true").lower()
+AUTOPLAY_ENABLED = _autoplay_v not in ("false", "0", "off", "no")
 # After this many completed ambient speech turns (not counting song intros), force song_moment next.
 # 0 = disabled (only SONG_CHANCE). Same quiet hours and _is_music_playing() guards as random songs.
 SONG_AFTER_SPEECHES = int(os.environ.get("FRIDAY_AMBIENT_SONG_AFTER_SPEECHES", "3"))
@@ -488,6 +490,21 @@ SONG_SECONDS  = int(os.environ.get("FRIDAY_AMBIENT_SONG_SECONDS",    "10"))
 SONG_SEC_MIN  = int(os.environ.get("FRIDAY_AMBIENT_SONG_SECONDS_MIN",  "8"))
 SONG_SEC_MAX  = int(os.environ.get("FRIDAY_AMBIENT_SONG_SECONDS_MAX",  "14"))
 PLAY_SCRIPT   = ROOT / "skill-gateway" / "scripts" / "friday-play.py"
+
+
+def _python_for_friday_play() -> str:
+    """Windows: pythonw.exe avoids a flashing console when spawning friday-play (see FRIDAY_PYTHON_CHILD)."""
+    if sys.platform != "win32":
+        return sys.executable
+    override = os.environ.get("FRIDAY_PYTHON_CHILD", "").strip()
+    if override:
+        return override
+    base = Path(sys.executable)
+    w = base.parent / "pythonw.exe"
+    if w.is_file():
+        return str(w)
+    return sys.executable
+
 
 # Sub-agent child voice — slightly different rate/pitch so parallel worker
 # announcements feel distinct from main Friday deliveries
@@ -2038,13 +2055,17 @@ def play_song_ambient(query: str, seconds: int) -> None:
     """
     Launch friday-play.py in the background (non-blocking).
     The play script has its own fade / PID management.
+    Skipped when FRIDAY_AUTOPLAY=false.
     """
+    if not AUTOPLAY_ENABLED:
+        log.info("[song] autoPlay disabled — skipping ambient song")
+        return
     if not PLAY_SCRIPT.exists():
         log.warning("PLAY_SCRIPT not found: %s", PLAY_SCRIPT)
         return
     try:
         subprocess.Popen(
-            [sys.executable, str(PLAY_SCRIPT), query, f"--seconds={seconds}"],
+            [_python_for_friday_play(), str(PLAY_SCRIPT), query, f"--seconds={seconds}"],
             env={**os.environ},
             **_no_window(),
         )

@@ -1,0 +1,116 @@
+---
+description: Human-like thinking and generating sounds — speak filler phrases while working so silence doesn't feel broken
+alwaysApply: true
+---
+
+# Friday Thinking Sounds — Narrate Like a Human
+
+The agent must never grind silently. Every phase of work has a natural human sound. Pick ONE phrase at random from the appropriate pool below and fire it async (`block_until_ms: 0`) before starting that phase.
+
+**Rule:** Never pick the same phrase twice in a row within a single task. Vary it. Sound like a person, not a script.
+
+---
+
+## Phase 1 — Starting research / reading files
+
+Pick one at random:
+
+- "Right, let me have a look at that."
+- "Okay, pulling that up now."
+- "Hmm, let me dig into this."
+- "One moment — checking."
+- "Let me see what's in there."
+- "On it."
+- "Right, searching for that now."
+- "Let me have a think about this one."
+- "Okay, reading through the code."
+
+## Phase 2 — Running a command / install / shell operation
+
+Pick one at random:
+
+- "Running that now."
+- "Firing that off."
+- "Okay, executing."
+- "Let me run this."
+- "Installing — give it a moment."
+- "Running the command."
+- "Kicking that off now."
+- "Right, let's run it and see."
+
+## Phase 3 — Writing code / editing a file
+
+Pick one at random:
+
+- "Writing this out now."
+- "Patching that in."
+- "Let me wire this up."
+- "Okay, making the change."
+- "Writing the fix."
+- "Updating the file."
+- "Almost there — writing the last bit."
+- "Dropping that in now."
+
+## Phase 4 — Waiting on a slow process / long-running task
+
+Pick one at random:
+
+- "Still on it — this takes a moment."
+- "Working through it now."
+- "Nearly there."
+- "Still running — hang tight."
+- "Just a moment more."
+- "Getting there."
+
+## Phase 5 — Found something / surfaced a result
+
+Pick one at random:
+
+- "Got it."
+- "Found it — here's what I see."
+- "Right, there it is."
+- "Okay, I see the issue."
+- "Interesting — found something."
+- "There we go."
+
+---
+
+## How to use
+
+Fire one of these **async** (`block_until_ms: 0`) immediately before the relevant tool call, in the same message batch:
+
+```powershell
+# Example: about to read a file
+cd d:\code\openclaw; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "Right, let me have a look at that."
+```
+
+For subagents, always add priority:
+
+```powershell
+cd d:\code\openclaw; $env:FRIDAY_TTS_SESSION='subagent'; $env:FRIDAY_TTS_PRIORITY='1'; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "Running that now."
+```
+
+---
+
+## What NOT to say
+
+Never narrate like a robot reading a filename:
+
+- BAD: "Updating friday-speak.py."
+- BAD: "Running npm install."
+- BAD: "Reading the file."
+
+Always sound like a person who happens to be describing what they're doing:
+
+- GOOD: "Let me wire that up."
+- GOOD: "Kicking the install off now."
+- GOOD: "Reading through the code."
+
+---
+
+## Frequency
+
+- **Start of every major phase**: always speak (even just "On it.")
+- **Mid-task if it takes more than two tool call rounds**: speak a check-in from Phase 4
+- **On discovery**: speak a Phase 5 line before reporting findings
+- **Do not** speak a filler before every single small tool call — that becomes noise. One phrase per logical step is right.

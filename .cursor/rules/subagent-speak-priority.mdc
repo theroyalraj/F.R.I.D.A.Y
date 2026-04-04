@@ -1,0 +1,44 @@
+---
+description: Subagent TTS must always use FRIDAY_TTS_PRIORITY=1 so they are heard immediately and never silently queue
+alwaysApply: true
+---
+
+# Subagent TTS — Priority is Mandatory
+
+Every `friday-speak.py` call inside a Task subagent (explore / shell / generalPurpose) **MUST** include `FRIDAY_TTS_PRIORITY=1`. Subagents use the adult voice pool — never Ana or any child/teen voice.
+
+## Why this matters
+
+Without priority, a subagent's TTS waits behind the global speak lock — which the main agent or ambient may already hold. The result is **silent subagents**: they technically "speak" but the audio is swallowed or delayed until the lock clears.
+
+`FRIDAY_TTS_PRIORITY=1` pre-empts any competing TTS, kills friday-player, releases the Redis lock, and speaks immediately — exactly like a user-facing voice reply.
+
+## Required subagent speak pattern (copy verbatim into every Task prompt)
+
+```powershell
+# Voice setup — run once at subagent start
+cd d:\code\openclaw; $env:FRIDAY_TTS_SESSION='subagent'; python skill-gateway/scripts/pick-session-voice.py --subagent
+
+# Every subsequent friday-speak.py call MUST include PRIORITY and BYPASS
+cd d:\code\openclaw; $env:FRIDAY_TTS_SESSION='subagent'; $env:FRIDAY_TTS_PRIORITY='1'; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "your message here"
+```
+
+## Test command — verify subagent TTS is working
+
+Run this to confirm a subagent voice fires with priority and is heard through the speakers:
+
+```powershell
+cd d:\code\openclaw; $env:FRIDAY_TTS_SESSION='subagent'; $env:FRIDAY_TTS_PRIORITY='1'; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "Subagent priority TTS test. If you hear this, the fix is working."
+```
+
+Expected: a teen/young-adult voice speaks the test line immediately, pre-empting any ambient TTS. If you hear nothing within three seconds, check that `pick-session-voice.py --subagent` has been run first to assign the subagent voice pool.
+
+## Enforcement checklist
+
+When writing any Task subagent prompt, verify the prompt contains:
+
+- [ ] `$env:FRIDAY_TTS_SESSION='subagent'`
+- [ ] `$env:FRIDAY_TTS_PRIORITY='1'`
+- [ ] `$env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'`
+
+All three on every single `friday-speak.py` invocation. Missing any one of these is a bug.

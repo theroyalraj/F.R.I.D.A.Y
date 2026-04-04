@@ -76,17 +76,19 @@ The text goes directly to a voice synthesiser. Every word must sound natural whe
 
 ## When to narrate during work
 
-| Moment | What to say |
-|--------|-------------|
-| Starting research / exploration | `"Researching [topic]."` |
-| Found something important | `"Found it. [one-line summary]."` |
-| About to edit a file | `"Updating [filename]."` |
-| Running a command / install | `"Running [command]."` |
-| Waiting on a slow process | `"Still running. Hang tight."` |
-| Spawning a subagent | `"Launching parallel agent for [task]."` |
+See `friday-thinking-sounds.mdc` for the full phrase pools. The table below shows the moment and example phrasing — always pick naturally, never repeat robotically.
+
+| Moment | Example (pick one — vary each time) |
+|--------|--------------------------------------|
+| Starting research / exploration | "Right, let me have a look at that." / "On it." / "Let me dig into this." |
+| Found something important | "Got it." / "There it is." / "Okay, I see the issue." |
+| About to edit a file | "Writing this out now." / "Patching that in." / "Let me wire this up." |
+| Running a command / install | "Running that now." / "Firing that off." / "Kicking that off." |
+| Waiting on a slow process | "Still on it — hang tight." / "Getting there." / "Nearly there." |
+| Spawning a subagent | "Spinning up an agent for [task]." |
 | **Task complete** | **⚠️ Mandatory verbose spoken summary — see above** |
 
-Mid-task narration (research, file edits, running commands) can stay short — one sentence is fine. Only the **completion summary** needs to be verbose.
+Mid-task narration must sound like a person, not a script reading filenames. One phrase per logical step — not before every tool call.
 
 ---
 
@@ -102,9 +104,13 @@ speak → "Both agents running. Reporting back when done."
 speak → "All done. [verbose summary]."
 ```
 
-**Subagent voice (mandatory in subagent prompts):** each Task subagent must use the teen / young-adult pool only. Tell the subagent to run pick and speak with:
+**Subagent voice (mandatory in subagent prompts):** each Task subagent must use the adult subagent voice pool — never Ana or any child/teen voice. Tell the subagent to run pick and speak with:
 
-`$env:FRIDAY_TTS_SESSION='subagent'` and `pick-session-voice.py --subagent` before any `friday-speak.py`, and the same env plus `FRIDAY_TTS_BYPASS_CURSOR_DEFER=true` on every `friday-speak.py` call. Main Cursor chat uses `FRIDAY_TTS_VOICE` from the environment (Jarvis by default); subagents stay on the separate sticky teen pool.
+`$env:FRIDAY_TTS_SESSION='subagent'` and `pick-session-voice.py --subagent` before any `friday-speak.py`, and the same env plus `FRIDAY_TTS_PRIORITY='1'` and `FRIDAY_TTS_BYPASS_CURSOR_DEFER=true` on **every** `friday-speak.py` call.
+
+`FRIDAY_TTS_PRIORITY=1` is non-negotiable for subagents — without it, subagents queue silently behind ambient TTS and the user never hears them. Priority pre-empts ambient, clears any TTS lock, and speaks immediately.
+
+Main Cursor chat uses `FRIDAY_TTS_VOICE` from the environment (Jarvis by default); subagents stay on the separate sticky teen pool.
 
 ---
 

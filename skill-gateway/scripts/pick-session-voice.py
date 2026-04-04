@@ -16,17 +16,28 @@ Voice policy (main Cursor chat — default):
 Optional party mode:
   • Set FRIDAY_TTS_MAIN_RANDOM_VOICES=true to restore random adult voices + rare Ana roll.
     The same 50% Hindi / Hinglish branch applies first; otherwise Ana roll + adult pool as before.
+  • Set FRIDAY_TTS_SESSION_USE_ENV_VOICE_ONLY=true to skip Hindi/Hinglish and pools — always
+    FRIDAY_TTS_VOICE from .env (fallback if blocked).
 
 Subagents (Task tool):
   Run:  FRIDAY_TTS_SESSION=subagent  python pick-session-voice.py --subagent
-  Uses a separate sticky subagent_voice from a teen / young-adult pool — never Ana.
+  Uses a GLOBAL sticky subagent_voice from the adult pool — same voice across ALL chats, never Ana.
+
+Cursor-reply TTS (cursor-reply-watch.py — distinct from main + subagent):
+  python pick-session-voice.py --cursor-reply
+  Pick stores cursor_reply_voice + cursor_reply_chat_id; speak with FRIDAY_TTS_SESSION=cursor-reply.
 
 Usage:
-  python pick-session-voice.py              # main Cursor chat
-  python pick-session-voice.py --subagent   # Task subagent (set FRIDAY_TTS_SESSION too)
+  python pick-session-voice.py                 # main Cursor chat
+  python pick-session-voice.py --subagent     # Task subagent (set FRIDAY_TTS_SESSION too)
+  python pick-session-voice.py --cursor-reply # third voice for transcript narration
+
+Automation (e.g. cursor-reply-watch) can set FRIDAY_PICK_SESSION_NO_WELCOME=true when invoking this script
+so a new main session updates chat_id and voice without the spoken welcome.
 """
 
 import argparse
+import datetime
 import json
 import os
 import random
@@ -90,13 +101,15 @@ ADULT_POOL = [v for v in [
     "en-IE-ConnorNeural",               # warm Irish male
 ] if v not in _BLOCKED_VOICES]
 
-# Teen / subagent pool — also trimmed to best quality only
-TEEN_POOL = [v for v in [
-    "en-US-SteffanNeural",     # crisp young male
-    "en-US-AvaNeural",         # bright young female
-    "en-US-MichelleNeural",    # clear young female
-    "en-GB-MaisieNeural",      # Scottish-adjacent young female
-    "en-IE-EmilyNeural",       # warm Irish young female
+# Subagent pool — adult voices only; distinct enough from the main pool to be recognisable
+SUBAGENT_POOL = [v for v in [
+    "en-US-ChristopherNeural",          # deep, confident American male
+    "en-US-GuyNeural",                  # clear American male anchor-style
+    "en-US-EricNeural",                 # calm, natural American male
+    "en-GB-SoniaNeural",                # polished British female
+    "en-IE-ConnorNeural",               # warm Irish male
+    "en-US-AndrewMultilingualNeural",   # warm American male
+    "en-US-BrianMultilingualNeural",    # smooth American male
 ] if v not in _BLOCKED_VOICES]
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
@@ -157,6 +170,29 @@ def _save_state(state: dict) -> None:
         pass
 
 
+def _redis_touch_voice_context(context: str, voice: str) -> None:
+    """Write/update a voice context entry in Redis (fire-and-forget, never raises)."""
+    try:
+        url = (
+            os.environ.get("OPENCLAW_REDIS_URL", "").strip()
+            or os.environ.get("FRIDAY_AMBIENT_REDIS_URL", "").strip()
+            or "redis://127.0.0.1:6379"
+        )
+        import redis as _redis  # type: ignore
+        r = _redis.Redis.from_url(url, decode_responses=True)
+        now = datetime.datetime.utcnow().isoformat() + "Z"
+        key = f"friday:voice:context:{context}"
+        existing = r.hget(key, "voice")
+        if existing != voice:
+            # Voice changed (or first write) — reset set_at too
+            r.hset(key, mapping={"voice": voice, "set_at": now, "last_used": now, "status": "active"})
+        else:
+            # Same voice — just update last_used
+            r.hset(key, mapping={"last_used": now, "status": "active"})
+    except Exception:
+        pass
+
+
 def _user_display_name() -> str:
     return (os.environ.get("FRIDAY_USER_NAME", "Raj") or "Raj").strip() or "Raj"
 
@@ -179,8 +215,22 @@ def _env_main_voice_raw() -> str:
     return os.environ.get("FRIDAY_TTS_VOICE", "en-US-EmmaMultilingualNeural").strip() or "en-US-EmmaMultilingualNeural"
 
 
+def _session_use_env_voice_only() -> bool:
+    """When true, new Cursor chats use only FRIDAY_TTS_VOICE (no random Hindi/Hinglish or adult pool)."""
+    v = os.environ.get("FRIDAY_TTS_SESSION_USE_ENV_VOICE_ONLY", "").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
 def _pick_main_chat_voice(state: dict) -> str:
     last_voice = state.get("voice", "")
+    if _session_use_env_voice_only():
+        preferred = _env_main_voice_raw()
+        if preferred not in _BLOCKED_VOICES:
+            return preferred
+        if ADULT_POOL:
+            return _pick_from_pool_excluding(ADULT_POOL, last_voice)
+        return "en-US-EmmaMultilingualNeural"
+
     use_hindi_hinglish = random.random() < 0.5
 
     if use_hindi_hinglish:
@@ -217,6 +267,10 @@ def _jarvis_greeting_env(voice: str) -> dict:
 
 def _speak_welcome(voice: str) -> None:
     """Fire-and-forget: speak the session-start greeting in the new voice."""
+    if os.environ.get("FRIDAY_PICK_SESSION_NO_WELCOME", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    ):
+        return
     who = _user_display_name()
     if _main_random_voices_enabled():
         friendly = _friendly_voice_name(voice)
@@ -246,34 +300,69 @@ def _speak_welcome(voice: str) -> None:
         pass
 
 
-def pick_voice(*, subagent: bool = False) -> str:
+def _env_cursor_reply_voice_override() -> str:
+    return os.environ.get("FRIDAY_CURSOR_REPLY_VOICE", "").strip()
+
+
+def pick_voice(*, subagent: bool = False, cursor_reply: bool = False) -> str:
     chat_id = _latest_chat_uuid()
     state   = _load_state()
 
-    if subagent:
-        is_new = not (
-            chat_id
-            and state.get("subagent_chat_id") == chat_id
-            and state.get("subagent_voice")
-        )
-        if not is_new:
-            cur = state.get("subagent_voice", "")
-            if cur in _BLOCKED_VOICES:
-                last_voice = state.get("subagent_voice", "")
-                pool = [v for v in TEEN_POOL if v not in _BLOCKED_VOICES]
-                pool = [v for v in pool if v != last_voice] or pool or TEEN_POOL
-                new_voice = random.choice(pool)
-                state["subagent_voice"] = new_voice
-                _save_state(state)
-                return new_voice
-            return cur
+    if cursor_reply:
+        # Anchor to main Composer chat id (authoritative); fall back to latest folder if unset.
+        anchor = state.get("chat_id") or chat_id
+        override = _env_cursor_reply_voice_override()
+        if override:
+            if override in _BLOCKED_VOICES:
+                override = ""
+        if override:
+            cur = state.get("cursor_reply_voice", "")
+            if state.get("cursor_reply_chat_id") == anchor and cur == override and cur not in _BLOCKED_VOICES:
+                _redis_touch_voice_context("cursor:reply", cur)
+                return cur
+            state["cursor_reply_chat_id"] = anchor
+            state["cursor_reply_voice"] = override
+            _save_state(state)
+            _redis_touch_voice_context("cursor:reply", override)
+            return override
 
-        last_voice = state.get("subagent_voice", "")
-        pool       = [v for v in TEEN_POOL if v != last_voice and v not in _BLOCKED_VOICES] or TEEN_POOL
-        new_voice  = random.choice(pool)
-        state["subagent_chat_id"] = chat_id
-        state["subagent_voice"]   = new_voice
+        main_v = state.get("voice", "")
+        sub_v = state.get("subagent_voice", "")
+        pool = [v for v in ADULT_POOL if v not in _BLOCKED_VOICES and v != main_v and v != sub_v]
+        if not pool:
+            pool = [v for v in ADULT_POOL if v not in _BLOCKED_VOICES] or ["en-US-EmmaMultilingualNeural"]
+
+        last = state.get("cursor_reply_voice", "")
+        if (
+            anchor
+            and state.get("cursor_reply_chat_id") == anchor
+            and last
+            and last not in _BLOCKED_VOICES
+        ):
+            _redis_touch_voice_context("cursor:reply", last)
+            return last
+
+        choices = [v for v in pool if v != last] or pool
+        new_voice = random.choice(choices)
+        state["cursor_reply_chat_id"] = anchor
+        state["cursor_reply_voice"] = new_voice
         _save_state(state)
+        _redis_touch_voice_context("cursor:reply", new_voice)
+        return new_voice
+
+    if subagent:
+        # Subagent voice is GLOBAL — same adult voice across all chats until blocked or reset.
+        cur = state.get("subagent_voice", "")
+        if cur and cur not in _BLOCKED_VOICES:
+            _redis_touch_voice_context("cursor:subagent", cur)
+            return cur
+        # Not set yet, or blocked — pick a fresh adult voice.
+        last_voice = cur
+        pool       = [v for v in SUBAGENT_POOL if v not in _BLOCKED_VOICES and v != last_voice] or SUBAGENT_POOL
+        new_voice  = random.choice(pool)
+        state["subagent_voice"] = new_voice
+        _save_state(state)
+        _redis_touch_voice_context("cursor:subagent", new_voice)
         return new_voice
 
     # ── Main chat ─────────────────────────────────────────────────────────────
@@ -284,7 +373,9 @@ def pick_voice(*, subagent: bool = False) -> str:
             new_voice = _pick_main_chat_voice(state)
             state["voice"] = new_voice
             _save_state(state)
+            _redis_touch_voice_context("cursor:main", new_voice)
             return new_voice
+        _redis_touch_voice_context("cursor:main", cur)
         return cur
 
     new_voice = _pick_main_chat_voice(state)
@@ -292,6 +383,7 @@ def pick_voice(*, subagent: bool = False) -> str:
     state["chat_id"] = chat_id
     state["voice"]   = new_voice
     _save_state(state)
+    _redis_touch_voice_context("cursor:main", new_voice)
     _speak_welcome(new_voice)
     return new_voice
 
@@ -301,7 +393,15 @@ if __name__ == "__main__":
     ap.add_argument(
         "--subagent",
         action="store_true",
-        help="Use teen / young-adult pool only; sticky per subagent transcript id.",
+        help="Use adult voice pool; global sticky subagent voice.",
+    )
+    ap.add_argument(
+        "--cursor-reply",
+        action="store_true",
+        help="Pick third voice for cursor-reply-watch TTS (distinct from main and subagent when possible).",
     )
     args = ap.parse_args()
-    print(pick_voice(subagent=args.subagent), flush=True)
+    if args.subagent and args.cursor_reply:
+        print("pick-session-voice: use only one of --subagent or --cursor-reply", file=sys.stderr)
+        sys.exit(2)
+    print(pick_voice(subagent=args.subagent, cursor_reply=args.cursor_reply), flush=True)

@@ -50,12 +50,14 @@ All four tool calls fire in the same message. Voice narration and actual work ha
 
 `pick-session-voice.py` saves the main chat voice to `.session-voice.json` (default: `FRIDAY_TTS_VOICE` from the environment — Emma multilingual by default). Sticky voices in `FRIDAY_TTS_VOICE_BLOCK` are ignored and replaced. Every subsequent `friday-speak.py` in this chat uses that sticky voice for acknowledgements and status unless you opt into random main voices via `FRIDAY_TTS_MAIN_RANDOM_VOICES=true`.
 
-**Task subagents (explore / shell / generalPurpose):** use a separate teen / young-adult voice — never the rare child persona. In **every** Shell that runs pick or speak from a subagent, prefix the session kind (PowerShell):
+**Task subagents (explore / shell / generalPurpose):** use a separate adult voice from the subagent pool — never Ana or any child/teen voice. In **every** Shell that runs pick or speak from a subagent, prefix the session kind (PowerShell):
 
 ```powershell
 cd d:\code\openclaw; $env:FRIDAY_TTS_SESSION='subagent'; python skill-gateway/scripts/pick-session-voice.py --subagent
-cd d:\code\openclaw; $env:FRIDAY_TTS_SESSION='subagent'; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "Got it. …"
+cd d:\code\openclaw; $env:FRIDAY_TTS_SESSION='subagent'; $env:FRIDAY_TTS_PRIORITY='1'; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "Got it. …"
 ```
+
+`FRIDAY_TTS_PRIORITY=1` is **mandatory** for all subagent speak calls — it pre-empts any ambient TTS or competing lock so subagents are always heard instead of silently queuing behind other speech.
 
 The parent chat keeps using the main commands above **without** `FRIDAY_TTS_SESSION` or `--subagent`.
 

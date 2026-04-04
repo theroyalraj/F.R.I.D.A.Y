@@ -1128,7 +1128,7 @@
             u.pitch    = pitch;
             const voice = resolveVoice();
             if (voice) u.voice = voice;
-            const chunkTimer = setTimeout(resolve, Math.max(10_000, c.length * 120));
+            const chunkTimer = setTimeout(resolve, Math.max(6_000, c.length * 65));
             u.onend  = () => { clearTimeout(chunkTimer); setTimeout(resolve, gapMs); };
             u.onerror= () => { clearTimeout(chunkTimer); resolve(); };
             speechSynthesis.speak(u);

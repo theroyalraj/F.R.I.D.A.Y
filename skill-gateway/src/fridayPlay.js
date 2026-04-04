@@ -14,6 +14,7 @@ import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { pythonChildExecutable } from './winPython.js';
 
 const __dirname    = path.dirname(fileURLToPath(import.meta.url));
 const PLAY_SCRIPT  = path.resolve(__dirname, '../scripts/friday-play.py');
@@ -23,6 +24,12 @@ export function fridayPlayEnabled(env = process.env) {
   return existsSync(PLAY_SCRIPT);
 }
 
+/** Returns false when FRIDAY_AUTOPLAY=false/0/off/no — gates automatic (non-user-initiated) songs. */
+export function autoPlayEnabled(env = process.env) {
+  const v = (env.FRIDAY_AUTOPLAY ?? '').toLowerCase();
+  return !(v === 'false' || v === '0' || v === 'off' || v === 'no');
+}
+
 /**
  * Play a song fire-and-forget via friday-play.py → yt-dlp → Echo Dot.
  * @param {string} searchPhrase   e.g. "Back in Black AC DC"
@@ -30,11 +37,15 @@ export function fridayPlayEnabled(env = process.env) {
  */
 export function playLocalSong(searchPhrase, log) {
   if (!fridayPlayEnabled()) return;
+  if (!autoPlayEnabled()) {
+    log?.info('autoPlay disabled — skipping auto song');
+    return;
+  }
 
   const safePhrase = String(searchPhrase || '').trim();
   if (!safePhrase) return;
 
-  const child = spawn('python', [PLAY_SCRIPT, safePhrase], {
+  const child = spawn(pythonChildExecutable(), [PLAY_SCRIPT, safePhrase], {
     env: {
       ...process.env,
       FRIDAY_TTS_DEVICE:    process.env.FRIDAY_TTS_DEVICE    || 'Echo Dot',

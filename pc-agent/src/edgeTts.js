@@ -23,6 +23,7 @@ import { execFile }   from 'node:child_process';
 import { promisify }  from 'node:util';
 import crypto         from 'node:crypto';
 import { readFile, unlink } from 'node:fs/promises';
+import { setVoiceContext, touchVoiceContext, restoreApiVoice } from './voiceRedis.js';
 
 const execFileAsync = promisify(execFile);
 const __dirname     = path.dirname(fileURLToPath(import.meta.url));
@@ -34,7 +35,7 @@ export function edgeTtsConfigured(env = process.env) {
   return existsSync(SPEAK_SCRIPT);
 }
 
-/** Runtime voice override — set via POST /voice/set-voice, resets on server restart. */
+/** Runtime voice override — set via POST /voice/set-voice, persisted to Redis. */
 let _sessionVoice = null;
 
 /** @param {NodeJS.ProcessEnv} [env] */
@@ -64,6 +65,10 @@ export function setSessionVoice(name) {
     return false;
   }
   _sessionVoice = v;
+  // Persist to Redis (fire-and-forget) so the choice survives a server restart
+  if (v) {
+    setVoiceContext('api', v).catch(() => {});
+  }
   return true;
 }
 
@@ -77,10 +82,26 @@ export function edgeTtsVoice(env = process.env) {
     (envMain && !blocked.has(envMain) && envMain) || 'en-US-EmmaMultilingualNeural';
   const edgeOverride = env.FRIDAY_EDGE_TTS_VOICE?.trim() || '';
   const candidates = [_sessionVoice, edgeOverride, envMain, 'en-US-EmmaMultilingualNeural'].filter(Boolean);
+  let resolved = fallback;
   for (const c of candidates) {
-    if (!blocked.has(c)) return c;
+    if (!blocked.has(c)) { resolved = c; break; }
   }
-  return fallback;
+  // Keep Redis last_used fresh for the api context (fire-and-forget)
+  touchVoiceContext('api', resolved).catch(() => {});
+  return resolved;
+}
+
+/**
+ * Restore the API session voice from Redis — call once at server startup.
+ * If Redis has a saved voice (and it's not blocked), re-apply it as the session voice.
+ */
+export async function restoreSessionVoiceFromRedis() {
+  try {
+    const saved = await restoreApiVoice();
+    if (saved && !isVoiceBlocked(saved)) {
+      _sessionVoice = saved;
+    }
+  } catch { /* Redis unavailable — no-op */ }
 }
 
 /** Catalogue entries allowed for GET /voice/voices and set-voice. */

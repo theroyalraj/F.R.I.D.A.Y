@@ -19,6 +19,8 @@ Env vars (all optional):
   FRIDAY_MUSIC_DEVICE  Windows: friendly-name substring for output (e.g. Speakers).
                        Briefly sets default endpoint so ffplay opens on that device,
                        then restores your previous default so TTS can stay on another output.
+  FRIDAY_PYTHON_CHILD  Optional full path to pythonw.exe (Windows) if not on PATH — avoids a console
+                       window when pc-agent or ambient spawns this script.
 """
 
 import hashlib
@@ -59,6 +61,13 @@ MUSIC_DEVICE_HINT = os.environ.get("FRIDAY_MUSIC_DEVICE", "").strip()
 # PID file so other processes (friday-listen.py) can stop playback
 PID_FILE  = Path(tempfile.gettempdir()) / "friday-play.pid"
 
+
+def _win_no_window_kw() -> dict:
+    """Avoid extra console windows for yt-dlp / ffprobe when parent was started with python.exe."""
+    if platform.system() == "Windows":
+        return {"creationflags": subprocess.CREATE_NO_WINDOW}
+    return {}
+
 if not SEARCH:
     # Called with --stop: kill any running playback
     if "--stop" in flags:
@@ -86,6 +95,7 @@ def get_audio_file(search: str) -> Path:
         return dest
 
     print(f"[friday-play] downloading: {search!r} ...", flush=True)
+    run_kw = {"capture_output": True, "timeout": 90, **_win_no_window_kw()}
     result = subprocess.run(
         [
             sys.executable, "-m", "yt_dlp",
@@ -94,7 +104,7 @@ def get_audio_file(search: str) -> Path:
             "--output", str(CACHE_DIR / f"{key}.%(ext)s"),
             "--no-playlist", "--quiet", "--no-warnings",
         ],
-        capture_output=True, timeout=90,
+        **run_kw,
     )
 
     if result.returncode != 0 or not dest.exists():
@@ -132,6 +142,7 @@ def _play_volume_percent() -> int:
 def get_duration(mp3_path: Path) -> float | None:
     """Return audio duration in seconds using ffprobe, or None on failure."""
     try:
+        probe_kw = {"capture_output": True, "text": True, "timeout": 10, **_win_no_window_kw()}
         r = subprocess.run(
             [
                 "ffprobe", "-v", "error",
@@ -139,7 +150,7 @@ def get_duration(mp3_path: Path) -> float | None:
                 "-of", "default=noprint_wrappers=1:nokey=1",
                 str(mp3_path),
             ],
-            capture_output=True, text=True, timeout=10,
+            **probe_kw,
         )
         return float(r.stdout.strip())
     except Exception:

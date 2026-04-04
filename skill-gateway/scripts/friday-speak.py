@@ -49,10 +49,12 @@ Latency notes:
   • Semantic cache: text is normalised before hashing so near-identical phrases
     ("Done. sir." / "done, sir") share the same cached MP3.
 """
+import atexit
 import asyncio
 import hashlib
 import io
 import os
+import unicodedata
 import re
 import signal as _signal
 import subprocess
@@ -104,7 +106,8 @@ VOICE  = os.environ.get("FRIDAY_TTS_VOICE",  "en-US-EmmaMultilingualNeural")
 
 # Session-sticky voice: .session-voice.json overrides the env default above
 # unless FRIDAY_TTS_USE_SESSION_STICKY_VOICE is false (ambient alternate voice).
-# FRIDAY_TTS_SESSION=subagent → use subagent_voice (teen pool; pick-session-voice --subagent).
+# FRIDAY_TTS_SESSION=subagent → use subagent_voice (pick-session-voice --subagent).
+# FRIDAY_TTS_SESSION=cursor-reply → use cursor_reply_voice (pick-session-voice --cursor-reply).
 _SESSION_KIND = os.environ.get("FRIDAY_TTS_SESSION", "").strip().lower()
 _SESSION_STICKY = os.environ.get("FRIDAY_TTS_USE_SESSION_STICKY_VOICE", "true").strip().lower() not in (
     "0", "false", "no", "off",
@@ -115,6 +118,8 @@ try:
     _sv = _json.loads(_SESSION_VOICE_FILE.read_text(encoding="utf-8"))
     if _SESSION_KIND == "subagent" and _sv.get("subagent_voice"):
         VOICE = _sv["subagent_voice"]
+    elif _SESSION_KIND == "cursor-reply" and _sv.get("cursor_reply_voice"):
+        VOICE = _sv["cursor_reply_voice"]
     elif _sv.get("voice") and _SESSION_STICKY:
         VOICE = _sv["voice"]
 except Exception:
@@ -184,6 +189,32 @@ def _n2w(n: str) -> str:
     return n
 
 
+def _strip_redacted_placeholders(text: str) -> str:
+    """Remove privacy / tool-result tokens so Edge never speaks the word redacted."""
+    if not text:
+        return text
+    t = text
+    # Unicode-normalise (homoglyph tricks in logs)
+    try:
+        t = unicodedata.normalize("NFKC", t)
+    except Exception:
+        pass
+    subs = (
+        r"(?i)\*+\s*redacted\s*\*+",
+        r"(?i)`\s*redacted\s*`",
+        r"(?i)<\s*redacted[^>]*>",
+        r"(?i)\[\s*redacted\s*\]",
+        r"(?i)\{\s*redacted\s*\}",
+        r"(?i)\(\s*redacted\s*\)",
+        r"(?i)\bredacted\s*[:;.,!?…]+\s*",
+        r"(?i)\bredacted\b",
+        r"(?i)\bREDACTED\b",
+    )
+    for pat in subs:
+        t = re.sub(pat, " ", t)
+    return re.sub(r"\s{2,}", " ", t).strip()
+
+
 def normalize_for_speech(text: str) -> str:
     """
     Convert any text to clean, speakable English before handing it to edge-tts.
@@ -193,7 +224,7 @@ def normalize_for_speech(text: str) -> str:
     """
     if not text:
         return text
-    t = text
+    t = _strip_redacted_placeholders(text)
 
     # Devanagari (Hindi, etc.): skip English-centric rewrites — they garble TTS.
     if re.search(r"[\u0900-\u097F]", t):
@@ -205,7 +236,8 @@ def normalize_for_speech(text: str) -> str:
         t = re.sub(r"\s{2,}", " ", t).strip()
         if len(t) > 3800:
             t = t[:3800] + "."
-        return t or "Done."
+        t = _strip_redacted_placeholders(t)
+        return t.strip()
 
     # Code blocks and inline code
     t = re.sub(r"```[\s\S]*?```", " ", t)
@@ -307,7 +339,9 @@ def normalize_for_speech(text: str) -> str:
     if len(t) > 3800:
         t = t[:3800] + "."
 
-    return t or "Done."
+    t = _strip_redacted_placeholders(t)
+    t = re.sub(r"\s{2,}", " ", t).strip()
+    return t
 
 
 # ── Semantic / normalised cache key ───────────────────────────────────────────
@@ -624,6 +658,36 @@ def _try_break_redis_tts_lock() -> None:
         pass
 
 
+def _release_own_tts_lock() -> None:
+    """
+    Remove TTS_ACTIVE_FILE only if this process is the recorded holder.
+    Safe to call multiple times; no-ops if the file is absent or owned by
+    a different PID.  Called from both the speak() finally-block AND atexit
+    so the lock is always released even when the process is killed (SIGTERM).
+    """
+    try:
+        raw = TTS_ACTIVE_FILE.read_text(encoding="utf-8").strip()
+        if raw and int(raw) == os.getpid():
+            TTS_ACTIVE_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+atexit.register(_release_own_tts_lock)
+
+
+def _sigterm_handler(*_args) -> None:
+    """Convert SIGTERM into a normal Python exit so atexit handlers fire."""
+    sys.exit(0)
+
+
+try:
+    _signal.signal(_signal.SIGTERM, _sigterm_handler)
+except (OSError, ValueError):
+    # Can fail if not the main thread or on unsupported platforms — safe to ignore.
+    pass
+
+
 def _read_preempted_ambient_line() -> str | None:
     """If ambient was speaking, grab its line for an apology replay; clear the file."""
     if not AMBIENT_SPEAKING_FILE.exists():
@@ -753,9 +817,18 @@ def _pid_alive(pid: int) -> bool:
 async def speak():
     global TEXT
     TEXT = normalize_for_speech(_RAW_TEXT)
-    if not TEXT:
-        print("friday-speak: no text provided", file=sys.stderr)
-        sys.exit(1)
+    _raw_stripped = (_RAW_TEXT or "").strip()
+    if not TEXT or not TEXT.strip():
+        if not _raw_stripped:
+            print("friday-speak: no text provided", file=sys.stderr)
+            sys.exit(1)
+        print("[friday-speak] skipping - no speakable text after sanitise", flush=True)
+        sys.exit(0)
+    # Leftover noise only (e.g. every token was a placeholder)
+    _letters_digits = re.sub(r"[^a-zA-Z0-9\u0900-\u097F]", "", TEXT)
+    if len(_letters_digits) < 2:
+        print("[friday-speak] skipping - text too short after sanitise", flush=True)
+        sys.exit(0)
 
     # For playback (not --output/--stdout) signal to ambient that TTS is active.
     is_playback = not (OUTPUT or STDOUT)
@@ -857,10 +930,7 @@ async def speak():
         await _speak_inner()
     finally:
         if is_playback:
-            try:
-                TTS_ACTIVE_FILE.unlink(missing_ok=True)
-            except OSError:
-                pass
+            _release_own_tts_lock()
 
     if is_playback and _priority and preempted_replay:
         _play_priority_followup(preempted_replay)
