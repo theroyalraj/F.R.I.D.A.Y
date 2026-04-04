@@ -50,7 +50,9 @@
       "Bash(openclaw --dev agents add dev --provider anthropic --api-key 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)",
       "Bash(openclaw --dev agents --help)",
       "Bash(openclaw --dev configure --section model)",
-      "Bash(openclaw --dev agent --agent dev -m \"say hello\" --json)"
+      "Bash(openclaw --dev agent --agent dev -m \"say hello\" --json)",
+      "Bash(himalaya --version)",
+      "Bash(gog --version)"
     ]
   }
 }

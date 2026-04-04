@@ -225,15 +225,9 @@ async function main() {
 ${C.reset}\n`);
 
   await start('gateway', 'node', [
-    '--watch',
-    '--watch-path=skill-gateway/src',
-    '--watch-path=lib',
     'skill-gateway/src/server.js',
   ]);
   await start('agent', 'node', [
-    '--watch',
-    '--watch-path=pc-agent/src',
-    '--watch-path=lib',
     'pc-agent/src/server.js',
   ]);
 

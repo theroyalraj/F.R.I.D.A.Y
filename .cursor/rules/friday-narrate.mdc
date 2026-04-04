@@ -91,6 +91,10 @@ speak → "Both agents running. Reporting back when done, sir."
 speak → "All done. [verbose summary], sir."
 ```
 
+**Subagent voice (mandatory in subagent prompts):** each Task subagent must use the teen / young-adult pool only. Tell the subagent to run pick and speak with:
+
+`$env:FRIDAY_TTS_SESSION='subagent'` and `pick-session-voice.py --subagent` before any `friday-speak.py`, and the same env on every `friday-speak.py` call. That avoids the small-child session voice (main chat rolls that only one in twenty-five) and keeps subagent audio sounding like a teenager, not a toddler.
+
 ---
 
 ## Tone

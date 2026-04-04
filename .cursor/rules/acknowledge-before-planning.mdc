@@ -7,46 +7,68 @@ alwaysApply: true
 
 Before thinking about or presenting any plan, **always** narrate an acknowledgement out loud first using `friday-speak.py`.
 
-## Required Steps (in order)
+## ⚡ Zero-Delay Async Pattern — ALWAYS use this
 
-1. **Pick session voice** — run `pick-session-voice.py` first (assigns a random sticky voice for this Cursor chat)
-2. **Speak acknowledgement** — say you've understood the request
-3. **Ask any clarifying questions** — if anything is ambiguous, ask now before proceeding
-4. **Only then** — begin planning or executing
+**Fire pick-session-voice + speak acknowledgement IN THE SAME PARALLEL BATCH as your first real work tool calls.**
 
-## Acknowledgement command (run BOTH lines, in order, at the very start of every response)
+Do NOT make them a sequential prerequisite that blocks work from starting. Both voice calls use `block_until_ms: 0` (fire-and-forget) — they run simultaneously alongside `Read`, `Glob`, `Shell`, or any other work you start in the same message.
+
+```
+Message N (single response):
+  ├── Shell: pick-session-voice.py          ← block_until_ms: 0  (no wait)
+  ├── Shell: friday-speak.py "Got it..."    ← block_until_ms: 0  (no wait)
+  ├── Read: the relevant file               ← starts NOW, not after speak
+  └── Glob: find related files             ← starts NOW, not after speak
+```
+
+This is zero sequential overhead. The voice fires async and work starts at the same time.
+
+## Required calls (every response, block_until_ms: 0)
 
 ```powershell
-# Step 1 — assign sticky voice for this chat (no-op if already assigned)
+# Assign sticky voice for this chat session (no-op if already assigned)
 cd d:\code\openclaw; python skill-gateway/scripts/pick-session-voice.py
 
-# Step 2 — speak acknowledgement (will use the session voice automatically)
+# Speak acknowledgement (uses session voice automatically)
 cd d:\code\openclaw; python skill-gateway/scripts/friday-speak.py "Got it, sir. [one sentence restatement of the task]."
 ```
 
-Both commands use `block_until_ms: 0` (background / non-blocking).
+Both must have `block_until_ms: 0`. Both can be in the same message as real work tool calls — that's the point.
 
-## Examples
+## Example — correct async batch
 
-```powershell
-# New chat — pick-session-voice assigns e.g. en-AU-WilliamNeural for this whole session
-cd d:\code\openclaw; python skill-gateway/scripts/pick-session-voice.py
-cd d:\code\openclaw; python skill-gateway/scripts/friday-speak.py "Got it, sir. Adding a new T T S endpoint to the skill gateway."
+```
+Tool call 1: Shell pick-session-voice.py      block_until_ms: 0
+Tool call 2: Shell friday-speak.py "Got it…"  block_until_ms: 0
+Tool call 3: Read d:\code\openclaw\some-file  (reads immediately, no wait)
+Tool call 4: Glob **/*.py                     (searches immediately, no wait)
 ```
 
-The same voice (en-AU-WilliamNeural in this example) will be used for every `friday-speak.py` call for the rest of this chat — acknowledgements, status narrations, and the completion summary alike.
+All four tool calls fire in the same message. Voice narration and actual work happen in parallel.
 
-## If you have questions
+## Session voice persistence
 
-Speak the question out loud **and** show it in your text reply before doing any work:
+`pick-session-voice.py` assigns one random neural voice for the entire Cursor chat and saves it to `.session-voice.json`. Every subsequent `friday-speak.py` call in this chat uses that same voice automatically — acknowledgements, status narrations, and the completion summary all sound consistent.
+
+**Task subagents (explore / shell / generalPurpose):** use a separate teen / young-adult voice — never the rare child persona. In **every** Shell that runs pick or speak from a subagent, prefix the session kind (PowerShell):
+
+```powershell
+cd d:\code\openclaw; $env:FRIDAY_TTS_SESSION='subagent'; python skill-gateway/scripts/pick-session-voice.py --subagent
+cd d:\code\openclaw; $env:FRIDAY_TTS_SESSION='subagent'; python skill-gateway/scripts/friday-speak.py "Got it, sir. …"
+```
+
+The parent chat keeps using the main commands above **without** `FRIDAY_TTS_SESSION` or `--subagent`.
+
+## If you have clarifying questions
+
+Speak the question out loud AND show it in your text reply. Still batch the voice call with any read/explore calls you can do speculatively:
 
 ```powershell
 cd d:\code\openclaw; python skill-gateway/scripts/friday-speak.py "Before I proceed, sir — [question]?"
 ```
 
-Then wait for the answer before planning or coding.
-
 ## Do NOT
 
-- Silently start thinking or coding without narrating first
+- Make `pick-session-voice` and `friday-speak` sequential blocking steps before work
+- Silently start coding without narrating first
 - Ask questions after you've already started planning

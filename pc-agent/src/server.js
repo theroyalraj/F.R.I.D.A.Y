@@ -47,15 +47,50 @@ const PC_AGENT_GREETINGS = [
   'Systems up. Voice and command interface ready, sir.',
 ];
 
+function parseIntEnv(name, defaultVal) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return defaultVal;
+  const n = parseInt(String(raw).split('#')[0].trim(), 10);
+  return Number.isFinite(n) ? n : defaultVal;
+}
+
+/** Random or fixed rate/pitch for boot greeting — matches friday_greeting_delivery.py */
+function greetingTtsRatePitch() {
+  const off = ['false', '0', 'no', 'off'];
+  const raw = (process.env.FRIDAY_TTS_JARVIS_RANDOM || 'true').toLowerCase();
+  if (off.includes(raw)) {
+    return {
+      FRIDAY_TTS_RATE: process.env.FRIDAY_TTS_JARVIS_RATE || '-5%',
+      FRIDAY_TTS_PITCH: process.env.FRIDAY_TTS_JARVIS_PITCH || '-2Hz',
+    };
+  }
+  const rLo = parseIntEnv('FRIDAY_TTS_JARVIS_RATE_MIN_PCT', -10);
+  const rHi = parseIntEnv('FRIDAY_TTS_JARVIS_RATE_MAX_PCT', 12);
+  const pLo = parseIntEnv('FRIDAY_TTS_JARVIS_PITCH_MIN_HZ', -6);
+  const pHi = parseIntEnv('FRIDAY_TTS_JARVIS_PITCH_MAX_HZ', 4);
+  const rMin = Math.min(rLo, rHi);
+  const rMax = Math.max(rLo, rHi);
+  const pMin = Math.min(pLo, pHi);
+  const pMax = Math.max(pLo, pHi);
+  const rp = rMin + Math.floor(Math.random() * (rMax - rMin + 1));
+  const ph = pMin + Math.floor(Math.random() * (pMax - pMin + 1));
+  return {
+    FRIDAY_TTS_RATE: `${rp >= 0 ? '+' : ''}${rp}%`,
+    FRIDAY_TTS_PITCH: `${ph >= 0 ? '+' : ''}${ph}Hz`,
+  };
+}
+
 function speakStartup() {
   if (process.env.FRIDAY_SPEAK_PY === 'false' || process.env.FRIDAY_SPEAK_PY === '0') return;
   if (!existsSync(SPEAK_SCRIPT)) return;
   const phrase = PC_AGENT_GREETINGS[Math.floor(Math.random() * PC_AGENT_GREETINGS.length)];
+  const delivery = greetingTtsRatePitch();
   const child = spawn('python', [SPEAK_SCRIPT, phrase], {
     env: {
       ...process.env,
       FRIDAY_TTS_VOICE:  process.env.FRIDAY_TTS_VOICE  || 'en-GB-RyanNeural',
       FRIDAY_TTS_DEVICE: process.env.FRIDAY_TTS_DEVICE || 'default',
+      ...delivery,
     },
     detached: true,
     stdio: ['ignore', 'ignore', 'pipe'],

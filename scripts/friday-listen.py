@@ -16,6 +16,7 @@ Requirements (all already installed for friday-speak.py):
 Env vars (optional — reads .env automatically):
   FRIDAY_TTS_VOICE       edge-tts voice       (default: en-GB-RyanNeural)
   FRIDAY_TTS_DEVICE      audio output device  (default: Echo Dot)
+  FRIDAY_TTS_JARVIS_RANDOM — random greeting speed/pitch (default true; set false for fixed JARVIS_*)
   PC_AGENT_URL           pc-agent base URL    (default: http://127.0.0.1:3847)
   LISTEN_DEVICE_INDEX    mic device index     (default: system default)
   LISTEN_LANGUAGE        speech language      (default: en-US)
@@ -61,6 +62,10 @@ if env_path.exists():
 _scripts_dir = Path(__file__).resolve().parent
 if str(_scripts_dir) not in sys.path:
     sys.path.insert(0, str(_scripts_dir))
+_sg_scripts = root / "skill-gateway" / "scripts"
+if str(_sg_scripts) not in sys.path:
+    sys.path.insert(0, str(_sg_scripts))
+from friday_greeting_delivery import sample_greeting_rate_pitch  # noqa: E402
 from friday_win_focus import should_defer_voice_for_cursor  # noqa: E402
 
 # ── Config ─────────────────────────────────────────────────────────────────────
@@ -221,7 +226,7 @@ def _wait_for_tts_clear(timeout: float = 45.0) -> None:
         time.sleep(0.25)
 
 
-def speak(text: str):
+def speak(text: str, *, jarvis: bool = False):
     log.info("-> speak: %s", text[:80])
     def _run():
         _speaking.set()
@@ -230,9 +235,14 @@ def speak(text: str):
                 # Wait for any ambient or other TTS to finish before we start
                 _wait_for_tts_clear()
                 try:
+                    env = {**os.environ, "FRIDAY_TTS_VOICE": VOICE}
+                    if jarvis:
+                        gr, gp = sample_greeting_rate_pitch()
+                        env["FRIDAY_TTS_RATE"] = gr
+                        env["FRIDAY_TTS_PITCH"] = gp
                     result = subprocess.run(
                         [sys.executable, str(SPEAK_SCRIPT), text],
-                        env={**os.environ, "FRIDAY_TTS_VOICE": VOICE},
+                        env=env,
                         capture_output=True, timeout=90,   # edge-tts may retry up to ~60s
                     )
                     if result.returncode != 0:
@@ -582,7 +592,7 @@ def main():
 
     _mic_errors = 0
     post_event("daemon_start", f"Voice daemon online. {mode.capitalize()} mode.")
-    speak(f"Friday voice daemon online, sir. {mode.capitalize()} mode. Ready.")
+    speak(f"Friday voice daemon online, sir. {mode.capitalize()} mode. Ready.", jarvis=True)
     post_event("listening", "Ready for your command, sir.")
     global _daemon_start
     _daemon_start = time.monotonic()

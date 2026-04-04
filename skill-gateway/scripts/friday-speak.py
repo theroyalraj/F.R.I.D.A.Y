@@ -16,6 +16,8 @@ Env vars (all optional):
   FRIDAY_TTS_VOLUME  volume              (default: +0%)
   FRIDAY_TTS_CACHE   MP3 cache dir       (default: %TEMP%/friday-tts-cache)
                      set to "" to disable cache
+  FRIDAY_TTS_SESSION  when set to "subagent", session voice is read from
+                     subagent_voice in .session-voice.json (Task subagents)
 
 Good voices:
   en-GB-RyanNeural              British male    ← default (Jarvis feel)
@@ -67,13 +69,16 @@ TEXT   = " ".join(_args).strip()
 _RAW_TEXT = TEXT
 VOICE  = os.environ.get("FRIDAY_TTS_VOICE",  "en-GB-RyanNeural")
 
-# Session-sticky voice: if .session-voice.json exists in the repo root and has a
-# voice set for the current Cursor chat, it overrides FRIDAY_TTS_VOICE.
+# Session-sticky voice: .session-voice.json overrides the env default above.
+# FRIDAY_TTS_SESSION=subagent → use subagent_voice (teen pool; pick-session-voice --subagent).
+_SESSION_KIND = os.environ.get("FRIDAY_TTS_SESSION", "").strip().lower()
 _SESSION_VOICE_FILE = Path(__file__).resolve().parent.parent.parent / ".session-voice.json"
 try:
     import json as _json
     _sv = _json.loads(_SESSION_VOICE_FILE.read_text(encoding="utf-8"))
-    if _sv.get("voice"):
+    if _SESSION_KIND == "subagent" and _sv.get("subagent_voice"):
+        VOICE = _sv["subagent_voice"]
+    elif _sv.get("voice"):
         VOICE = _sv["voice"]
 except Exception:
     pass
