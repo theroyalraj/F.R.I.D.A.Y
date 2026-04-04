@@ -3,8 +3,12 @@
 friday-ambient.py -- Jarvis-style ambient intelligence for OpenClaw.
 
 Live data sources (no API keys required unless noted):
-  - Cricket: ESPN Cricinfo RSS (English), Amar Ujala cricket RSS (Hindi headlines)
-  - Optional live score one-liner: set CRICAPI_API_KEY (free tier at cricapi.com)
+  - Cricket / IPL ambient speech only when IPL is "on": FRIDAY_IPL_ACTIVE, or local calendar window
+    (FRIDAY_IPL_WINDOW_START / END), or (if CRICAPI_API_KEY set) CricAPI lists an IPL fixture.
+  - While on: ~50% IPL-focused Google News headlines vs general cricket RSS (FRIDAY_IPL_HEADLINE_RATIO).
+    Headlines, scores, CricAPI JSON, and IPL on/off are cached in Redis with tunable TTLs.
+  - ESPN Cricinfo RSS (English), Amar Ujala cricket RSS (Hindi), Google News IPL feeds
+  - Optional: CRICAPI_API_KEY for live scores + off-season IPL fixture detection
   - Weather: wttr.in (free, no key)
   - Random facts: uselessfacts.jsph.pl
   - Dad jokes: icanhazdadjoke.com
@@ -133,12 +137,226 @@ def _ambient_line_tts_voice(line: str, mode: str) -> str | None:
     o = edge_voice_override_for_text(line)
     if o:
         return o
-    if mode == "cricket" and _cricket_hindi_enabled():
+    if mode == "cricket" and _cricket_hindi_live_ambient():
         v = os.environ.get("FRIDAY_TTS_HINGLISH_VOICE", "").strip()
         if v and v.lower() not in ("0", "false", "no", "off", "default"):
             return v
         return "en-IN-NeerjaExpressiveNeural"
     return None
+
+
+def _parse_mmdd(s: str) -> tuple[int, int]:
+    try:
+        parts = s.strip().split("-", 1)
+        if len(parts) == 2:
+            return int(parts[0]), int(parts[1])
+    except ValueError:
+        pass
+    return 3, 22
+
+
+def _date_in_ipl_calendar_window() -> bool:
+    """Approximate IPL season in local date (configurable). Uses month-day only."""
+    sm, sd = _parse_mmdd(os.environ.get("FRIDAY_IPL_WINDOW_START", "03-22"))
+    em, ed = _parse_mmdd(os.environ.get("FRIDAY_IPL_WINDOW_END", "05-31"))
+    t = time.localtime()
+    mm, dd = t.tm_mon, t.tm_mday
+
+    def ordinal(m: int, d: int) -> int:
+        return m * 100 + d
+
+    return ordinal(sm, sd) <= ordinal(mm, dd) <= ordinal(em, ed)
+
+
+def _ipl_headline_ratio() -> float:
+    try:
+        v = float(os.environ.get("FRIDAY_IPL_HEADLINE_RATIO", "0.5"))
+        return min(1.0, max(0.0, v))
+    except ValueError:
+        return 0.5
+
+
+def _ipl_calendar_override() -> bool | None:
+    ex = os.environ.get("FRIDAY_IPL_ACTIVE", "").strip().lower()
+    if ex in ("1", "true", "yes", "on"):
+        return True
+    if ex in ("0", "false", "no", "off"):
+        return False
+    return None
+
+
+def _initial_ipl_speech_guess() -> bool:
+    o = _ipl_calendar_override()
+    if o is not None:
+        return o
+    return _date_in_ipl_calendar_window()
+
+
+_ipl_speech_on: bool = _initial_ipl_speech_guess()
+
+
+_ambient_r_singleton: Any = None
+
+
+def _ambient_redis_default() -> Any:
+    """In-process Redis stand-in when no real client is passed (tests / edge cases)."""
+    global _ambient_r_singleton
+    if _ambient_r_singleton is None:
+        _ambient_r_singleton = RedisLite()
+    return _ambient_r_singleton
+
+
+def _redis_cached_json(r: Any, key: str, ttl: int, loader: Any) -> Any:
+    """Cache JSON-serialisable or None; empty string in Redis means cached None."""
+    try:
+        hit = r.get(key)
+        if hit is not None:
+            if hit == "":
+                return None
+            return json.loads(hit)
+    except Exception:
+        pass
+    out = loader()
+    try:
+        r.setex(key, ttl, json.dumps(out) if out is not None else "")
+    except Exception:
+        pass
+    return out
+
+
+def _redis_cached_str(r: Any, key: str, ttl: int, loader: Any) -> str | None:
+    """Cache a string headline; '__nil__' marks a miss."""
+    try:
+        hit = r.get(key)
+        if hit is not None:
+            return None if hit == "__nil__" else str(hit)
+    except Exception:
+        pass
+    out = loader()
+    try:
+        r.setex(key, ttl, "__nil__" if not out else str(out)[:480])
+    except Exception:
+        pass
+    return out if out else None
+
+
+def _cricapi_fetch_matches_raw() -> dict[str, Any] | None:
+    if not CRICAPI_API_KEY:
+        return None
+    q = urllib.parse.quote(CRICAPI_API_KEY, safe="")
+    raw = _get(f"https://api.cricapi.com/v1/currentMatches?apikey={q}", timeout=10)
+    if not raw:
+        return None
+    try:
+        d = json.loads(raw)
+        return d if isinstance(d, dict) else None
+    except Exception:
+        return None
+
+
+def _cricapi_matches_payload(r: Any) -> dict[str, Any] | None:
+    ttl = int(os.environ.get("FRIDAY_IPL_CRICAPI_CACHE_SEC", "600"))
+    return _redis_cached_json(
+        r,
+        "friday:amb:v2:cricapi:current_matches",
+        max(120, ttl),
+        _cricapi_fetch_matches_raw,
+    )
+
+
+def _cricapi_json_has_ipl_matches(data: dict[str, Any]) -> bool:
+    if (data.get("status") or "").lower() != "success":
+        return False
+    for m in data.get("data") or []:
+        if not isinstance(m, dict):
+            continue
+        n = (m.get("name") or "").lower()
+        if "ipl" in n or "indian premier" in n:
+            return True
+    return False
+
+
+def _cricapi_is_ipl_match_name(name: str) -> bool:
+    n = (name or "").lower()
+    return "ipl" in n or "indian premier" in n
+
+
+def _cricapi_match_live_or_in_progress(m: dict[str, Any]) -> bool:
+    """True if the fixture is not finished — live, in progress, or not yet started (we only treat live/in-progress as special)."""
+    if not isinstance(m, dict):
+        return False
+    if m.get("matchEnded"):
+        return False
+    st = (m.get("status") or "").lower()
+    if "live" in st:
+        return True
+    # Started and not ended (in progress); not-started fixtures are excluded → normal ambient until ball-by-ball
+    return bool(m.get("matchStarted"))
+
+
+def _cricapi_payload_has_live_ipl(data: dict[str, Any] | None) -> bool:
+    if not data or (data.get("status") or "").lower() != "success":
+        return False
+    for m in data.get("data") or []:
+        if not isinstance(m, dict):
+            continue
+        if not _cricapi_is_ipl_match_name(m.get("name") or ""):
+            continue
+        if _cricapi_match_live_or_in_progress(m):
+            return True
+    return False
+
+
+def sync_ipl_live_ambient(r: Any) -> None:
+    """
+    Refresh global _ipl_speech_on: expanded cricket-witty pool + Hindi-IPL prompts/TTS only when True.
+
+    FRIDAY_IPL_ACTIVE=true/false overrides everything.
+
+    Without CRICAPI_API_KEY: same as IPL calendar window (cannot detect match-over).
+
+    With CRICAPI_API_KEY: during the calendar window, special mode only while an IPL match is
+    live or in progress; finished matches and rest days use normal settings. If the API fetch
+    fails (jd is None) during the window, fall back to True so a brief outage does not kill the vibe.
+    """
+    global _ipl_speech_on
+    o = _ipl_calendar_override()
+    if o is not None:
+        _ipl_speech_on = o
+        return
+    if not CRICAPI_API_KEY:
+        _ipl_speech_on = _date_in_ipl_calendar_window()
+        return
+    in_cal = _date_in_ipl_calendar_window()
+    jd = _cricapi_matches_payload(r)
+    if jd and _cricapi_payload_has_live_ipl(jd):
+        _ipl_speech_on = True
+        return
+    if in_cal and jd is None:
+        _ipl_speech_on = True
+        return
+    _ipl_speech_on = False
+
+
+def _cricket_hindi_live_ambient() -> bool:
+    """Hindi/Devanagari cricket prompts + Neerja TTS + queue bypass only when IPL live mode is on."""
+    return _cricket_hindi_enabled() and _ipl_speech_on
+
+
+def _line_is_cricket_witty(ln: str) -> bool:
+    s = ln.lower()
+    keys = (
+        "cricket", "ipl", "tendulkar", "dhoni", "kumble", "duckworth",
+        "test innings", "rohit sharma", "t20 cricket", "cricinfo",
+    )
+    return any(k in s for k in keys)
+
+
+def _witty_fallback_pool() -> list[str]:
+    if _ipl_speech_on:
+        return WITTY_FALLBACKS
+    pool = [ln for ln in WITTY_FALLBACKS if not _line_is_cricket_witty(ln)]
+    return pool if pool else WITTY_FALLBACKS
 
 
 _db_raw = os.environ.get("FRIDAY_AMBIENT_DB_PATH", "data/friday.db").strip()
@@ -153,7 +371,10 @@ POST_TTS_GAP  = float(os.environ.get("FRIDAY_AMBIENT_POST_TTS_GAP", "12"))   # w
 
 VERBOSE_RATIO = float(os.environ.get("FRIDAY_AMBIENT_VERBOSE_RATIO", "0.30"))  # 30% of turns are longer / richer
 SONG_CHANCE   = float(os.environ.get("FRIDAY_AMBIENT_SONG_CHANCE",   "0.12"))  # 12% of ambient turns play music
-SONG_SECONDS  = int(os.environ.get(  "FRIDAY_AMBIENT_SONG_SECONDS",  "90"))    # how many seconds of the key part
+# Featured ambient song: short iconic clip (default ~10s). Override min/max to taste.
+SONG_SECONDS  = int(os.environ.get("FRIDAY_AMBIENT_SONG_SECONDS",    "10"))
+SONG_SEC_MIN  = int(os.environ.get("FRIDAY_AMBIENT_SONG_SECONDS_MIN",  "8"))
+SONG_SEC_MAX  = int(os.environ.get("FRIDAY_AMBIENT_SONG_SECONDS_MAX",  "14"))
 PLAY_SCRIPT   = ROOT / "skill-gateway" / "scripts" / "friday-play.py"
 
 # Sub-agent child voice — slightly different rate/pitch so parallel worker
@@ -527,23 +748,19 @@ def _format_cricapi_match(m: dict[str, Any]) -> str | None:
     return out or None
 
 
-def fetch_cricket_scores_cricapi() -> str | None:
-    """Live / recent match one-liner via CricAPI (requires CRICAPI_API_KEY)."""
+def fetch_cricket_scores_cricapi(r: Any) -> str | None:
+    """Live / recent match one-liner via CricAPI (shared JSON cached in Redis)."""
     if not CRICAPI_API_KEY:
         return None
-    q = urllib.parse.quote(CRICAPI_API_KEY, safe="")
-    raw = _get(f"https://api.cricapi.com/v1/currentMatches?apikey={q}", timeout=10)
-    if not raw:
-        return None
     try:
-        data = json.loads(raw)
-        if (data.get("status") or "").lower() != "success":
-            log.debug("cricapi currentMatches: %s", data.get("reason") or data.get("error"))
+        data = _cricapi_matches_payload(r)
+        if not data or (data.get("status") or "").lower() != "success":
+            log.debug("cricapi currentMatches: %s", (data or {}).get("reason") or (data or {}).get("error"))
             return None
         matches = data.get("data") or []
         if not matches:
             return None
-        # Prefer an IPL / T20 league match if the name hints it
+
         def _rank(mm: dict[str, Any]) -> tuple[int, str]:
             n = (mm.get("name") or "").lower()
             st = (mm.get("status") or "").lower()
@@ -565,15 +782,104 @@ def fetch_cricket_scores_cricapi() -> str | None:
     return None
 
 
-def fetch_cricket_combined() -> str | None:
-    """Headline + optional live score for prompts and TTS (language follows _cricket_hindi_enabled)."""
-    score = fetch_cricket_scores_cricapi()
-    if _cricket_hindi_enabled():
-        head = fetch_cricket_news_hindi() or fetch_cricket_news()
-    else:
-        head = fetch_cricket_news() or fetch_cricket_news_hindi()
+def _rss_pick_title(url: str, prefer_ipl: bool = False) -> str | None:
+    raw = _get(url, timeout=8)
+    if not raw:
+        return None
+    try:
+        root = ET.fromstring(raw.decode("utf-8", errors="replace"))
+        items = root.findall(".//item")
+        if not items:
+            return None
+        titles: list[str] = []
+        for item in items[:14]:
+            title = item.findtext("title") or ""
+            title = re.sub(r"\s+-\s+\S+$", "", title).strip()
+            title = re.sub(r"<[^>]+>", "", title).strip()
+            if title:
+                titles.append(title[:220])
+        if not titles:
+            return None
+        if prefer_ipl:
+            ipl_hits = [
+                t for t in titles
+                if "ipl" in t.lower() or "आईपीएल" in t or "indian premier" in t.lower()
+            ]
+            if ipl_hits:
+                return random.choice(ipl_hits[:6])
+        return random.choice(titles[:8])
+    except Exception as e:
+        log.debug("RSS pick failed %s: %s", url[:48], e)
+        return None
+
+
+def fetch_ipl_news_hindi() -> str | None:
+    q = urllib.parse.quote("IPL आईपीएल")
+    return _rss_pick_title(
+        f"https://news.google.com/rss/search?q={q}&hl=hi&gl=IN&ceid=IN:hi",
+        prefer_ipl=True,
+    )
+
+
+def fetch_ipl_news_en() -> str | None:
+    q = urllib.parse.quote("IPL Indian Premier League")
+    return _rss_pick_title(
+        f"https://news.google.com/rss/search?q={q}&hl=en-IN&gl=IN&ceid=IN:en",
+        prefer_ipl=True,
+    )
+
+
+def _fetch_cricket_combined_uncached(r: Any) -> str | None:
+    """Assemble headline + score; headline path is ~FRIDAY_IPL_HEADLINE_RATIO IPL-focused."""
+    score_ttl = int(os.environ.get("FRIDAY_IPL_SCORE_CACHE_SEC", "180"))
+    score = _redis_cached_str(
+        r,
+        "friday:amb:v2:cricket_score_line",
+        max(60, score_ttl),
+        lambda: fetch_cricket_scores_cricapi(r),
+    )
+
+    rss_ttl = int(os.environ.get("FRIDAY_IPL_RSS_CACHE_SEC", "3600"))
+    ipl_ttl = int(os.environ.get("FRIDAY_IPL_IPL_RSS_CACHE_SEC", "2400"))
+
+    ipl_focus = random.random() < _ipl_headline_ratio()
+    head: str | None = None
+    if ipl_focus:
+        if _cricket_hindi_enabled():
+            head = _redis_cached_str(
+                r, "friday:amb:v2:head:ipl:hi", max(300, ipl_ttl), fetch_ipl_news_hindi,
+            ) or _redis_cached_str(
+                r, "friday:amb:v2:head:ipl:en", max(300, ipl_ttl), fetch_ipl_news_en,
+            )
+        else:
+            head = _redis_cached_str(
+                r, "friday:amb:v2:head:ipl:en", max(300, ipl_ttl), fetch_ipl_news_en,
+            ) or _redis_cached_str(
+                r, "friday:amb:v2:head:ipl:hi", max(300, ipl_ttl), fetch_ipl_news_hindi,
+            )
+    if not head:
+        if _cricket_hindi_enabled():
+            head = _redis_cached_str(
+                r, "friday:amb:v2:head:cricket:hi", max(300, rss_ttl), fetch_cricket_news_hindi,
+            ) or _redis_cached_str(
+                r, "friday:amb:v2:head:cricket:en", max(300, rss_ttl), fetch_cricket_news,
+            )
+        else:
+            head = _redis_cached_str(
+                r, "friday:amb:v2:head:cricket:en", max(300, rss_ttl), fetch_cricket_news,
+            ) or _redis_cached_str(
+                r, "friday:amb:v2:head:cricket:hi", max(300, rss_ttl), fetch_cricket_news_hindi,
+            )
+
     bits = [b for b in (score, head) if b]
     return " — ".join(bits) if bits else None
+
+
+def fetch_cricket_combined(r: Any) -> str | None:
+    """Headline + optional score; silent outside IPL window (_ipl_speech_on)."""
+    if not _ipl_speech_on:
+        return None
+    return _fetch_cricket_combined_uncached(r)
 
 
 def fetch_weather_brief() -> str | None:
@@ -838,7 +1144,7 @@ def generate_line_ai(
     verbose=True asks for a longer paragraph (60-90 words) instead of a one-liner."""
     global _anthropic_ok, _anthropic_fail_until
 
-    cin = _cricket_hindi_enabled() if cricket_hindi is None else cricket_hindi
+    cin = _cricket_hindi_live_ambient() if cricket_hindi is None else cricket_hindi
 
     recent = set(_redis_recent_topics(r))
     now = time.time()
@@ -1313,7 +1619,7 @@ def generate_line_ai(
                 f"This is blowing up right now — {picked}. Thought you'd want to know.",
             ])
         else:
-            line = random.choice(WITTY_FALLBACKS)
+            line = random.choice(_witty_fallback_pool())
     elif mode == "history" and live_data.get("history"):
         hist = live_data["history"]
         line = random.choice([
@@ -1327,7 +1633,7 @@ def generate_line_ai(
             f"Right, found one — {joke_line}",
         ])
     else:
-        line = random.choice(WITTY_FALLBACKS)
+        line = random.choice(_witty_fallback_pool())
     if "{user}" in line:
         line = line.format(user=USER_NAME)
 
@@ -1357,7 +1663,7 @@ def generate_song_moment() -> dict | None:
       spoken   — what Friday says before playing  (~15-20 words, natural opener)
       query    — YouTube search string  (e.g. "Bohemian Rhapsody Queen")
       section  — human-readable name for the iconic part (used in log)
-      seconds  — how long to play (60–120, tune-specific)
+      seconds  — clip length, clamped to FRIDAY_AMBIENT_SONG_SECONDS_MIN/MAX (default ~8–14s)
     Returns None on any failure or if AI is unavailable.
     """
     if not (ANTHROPIC_KEY and ANTHROPIC_MOD):
@@ -1387,13 +1693,15 @@ def generate_song_moment() -> dict | None:
         "Rules:\n"
         "- Pick a song with a universally recognisable section (famous intro, chorus, riff, or hook).\n"
         "- Vary across genres: Bollywood, classic rock, 90s pop, hip-hop, film score, EDM — don't repeat the same artist.\n"
-        "- Pick the duration so the most iconic part plays: chorus = 60s, long intro = 90s, full riff = 75s.\n\n"
+        "- Pick a SHORT clip length so the hook lands without dominating the room: "
+        f"about {SONG_SECONDS} seconds, always between {SONG_SEC_MIN} and {SONG_SEC_MAX} seconds "
+        "(chorus drop, riff, or intro sting — not a long jam).\n\n"
         "Return ONLY valid JSON (no markdown, no extra text):\n"
         '{"spoken":"<one casual sentence Friday says before playing, starting with a natural opener like '
         "'I've had this stuck in my head' or 'Oh wait, this one — '. Max 20 words. No quotes around it.>\","
         '"query":"<artist + song name optimised for YouTube, e.g. Bohemian Rhapsody Queen>",'
         '"section":"<iconic part name, 4 words max, e.g. guitar solo>",'
-        '"seconds":<integer 60-120>}'
+        f'"seconds":<integer {SONG_SEC_MIN}-{SONG_SEC_MAX}>}}'
     )
 
     try:
@@ -1415,7 +1723,8 @@ def generate_song_moment() -> dict | None:
         spoken  = (data.get("spoken") or "").strip()
         query   = (data.get("query")  or "").strip()
         section = (data.get("section") or "iconic part").strip()
-        seconds = max(45, min(120, int(data.get("seconds", SONG_SECONDS))))
+        lo, hi = min(SONG_SEC_MIN, SONG_SEC_MAX), max(SONG_SEC_MIN, SONG_SEC_MAX)
+        seconds = max(lo, min(hi, int(data.get("seconds", SONG_SECONDS))))
         if spoken and query:
             return {"spoken": spoken, "query": query, "section": section, "seconds": seconds}
     except Exception as e:
@@ -1450,6 +1759,8 @@ def pick_mode() -> str:
         "trending", "song_moment",
     )
     if TONE in _ALL_MODES:
+        if TONE == "cricket" and not (_ipl_speech_on and _interests_cricket_ipl()):
+            return "informational"
         return TONE
 
     # Song moment: inject based on SONG_CHANCE — but never if music already playing
@@ -1460,8 +1771,9 @@ def pick_mode() -> str:
 
     hour = time.localtime().tm_hour
     roll = random.random()
+    ck = "cricket" if (_ipl_speech_on and _interests_cricket_ipl()) else "trending"
     if 6 <= hour < 11:        # morning — curious, news, trending
-        if roll < 0.15: return "cricket"
+        if roll < 0.15: return ck
         if roll < 0.28: return "trending"
         if roll < 0.38: return "informational"
         if roll < 0.47: return "weather"
@@ -1472,7 +1784,7 @@ def pick_mode() -> str:
         if roll < 0.91: return "psychology"
         return "wisdom"
     if 11 <= hour < 17:       # day — widest mix
-        if roll < 0.14: return "cricket"
+        if roll < 0.14: return ck
         if roll < 0.24: return "trending"
         if roll < 0.35: return "funny"
         if roll < 0.45: return "science"
@@ -1484,7 +1796,7 @@ def pick_mode() -> str:
         if roll < 0.91: return "psychology"
         return "wisdom"
     # evening / night — reflective, broader, trending
-    if roll < 0.13: return "cricket"
+    if roll < 0.13: return ck
     if roll < 0.24: return "trending"
     if roll < 0.35: return "funny"
     if roll < 0.46: return "philosophy"
@@ -1858,15 +2170,22 @@ def run_media_loop(stop: threading.Event, conn, r, state: dict[str, Any]) -> Non
 # -- Live data cache (refreshed every 10 min) ---------------------------------
 _live_cache: dict[str, str | None] = {}
 _live_cache_ts = 0.0
-_LIVE_TTL = 600  # 10 minutes
+_LIVE_TTL = max(120, int(os.environ.get("FRIDAY_AMBIENT_LIVE_CACHE_SEC", "600")))
 
 
-def _refresh_live_data() -> None:
+def _refresh_live_data(r: Any | None = None) -> None:
     """Fetch all live data sources in parallel — no sequential waiting."""
-    global _live_cache, _live_cache_ts
+    global _live_cache, _live_cache_ts, _ipl_speech_on
+
+    rr = r if r is not None else _ambient_redis_default()
+    _ipl_speech_on = _ipl_speech_allowed(rr)
+    log.info("  ipl_speech_allowed=%s", _ipl_speech_on)
+
+    def _cricket_slot() -> str | None:
+        return fetch_cricket_combined(rr)
 
     _FETCHERS: dict[str, Any] = {
-        "cricket":  fetch_cricket_combined,
+        "cricket":  _cricket_slot,
         "weather":  fetch_weather_brief,
         "fact":     fetch_random_fact,
         "joke":     fetch_dad_joke,
@@ -1904,10 +2223,10 @@ def _refresh_live_data() -> None:
         log.debug("  live[%s]: (none)", ", ".join(misses))
 
 
-def get_live_data() -> dict[str, str | None]:
+def get_live_data(r: Any | None = None) -> dict[str, str | None]:
     if time.time() - _live_cache_ts > _LIVE_TTL or not _live_cache:
         try:
-            _refresh_live_data()
+            _refresh_live_data(r if r is not None else _ambient_redis_default())
         except Exception as e:
             log.warning("live data refresh failed: %s", e)
     return _live_cache
@@ -1929,7 +2248,7 @@ def refill_content_queue(conn, r) -> None:
     if need == 0:
         return
 
-    live = get_live_data()
+    live = get_live_data(r)
     first_done = threading.Event()   # only the first finisher speaks
 
     def _generate_one(_idx: int) -> tuple[str, str, str] | None:
@@ -1992,7 +2311,7 @@ def main() -> None:
     if PREWARM:
         threading.Thread(target=prewarm_tts, daemon=True).start()
 
-    threading.Thread(target=_refresh_live_data, daemon=True).start()
+    threading.Thread(target=lambda: _refresh_live_data(r), daemon=True).start()
 
     stop_media = threading.Event()
     media_state: dict[str, Any] = {"last_track_sig": "", "want_music_comment": False}
@@ -2025,6 +2344,10 @@ def main() -> None:
             time.sleep(1.5)
 
             if should_defer_voice_for_cursor():
+                continue
+
+            # Do not talk over friday-play background music (summaries fade/stop it via friday-speak)
+            if _is_music_playing():
                 continue
 
             # ── Priority check: drop immediately if TTS is currently playing ───
@@ -2118,7 +2441,7 @@ def main() -> None:
                     verbose = random.random() < VERBOSE_RATIO
 
                     if mode == "music_comment" or not line:
-                        live       = get_live_data()
+                        live       = get_live_data(r)
                         music_hint = media_state.get("last_track_pretty")
                         news       = live.get("news") if mode in ("informational", "mixed") else None
                         _, line    = generate_line_ai(r, mode, news, music_hint, live, verbose=verbose)
