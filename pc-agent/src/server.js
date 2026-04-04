@@ -10,7 +10,7 @@ import { rootLogger } from './log.js';
 import { runTask } from './taskRunner.js';
 import { prepareTextForTts } from './ttsPrep.js';
 import { piperConfigured, synthesizePiperWav } from './piperTts.js';
-import { edgeTtsConfigured, edgeTtsVoice, synthesizeEdgeTtsMp3 } from './edgeTts.js';
+import { edgeTtsConfigured, edgeTtsVoice, synthesizeEdgeTtsMp3, setSessionVoice, EDGE_TTS_VOICE_CATALOGUE } from './edgeTts.js';
 import { openAiTtsApiKey, openAiTtsConfigured, synthesizeOpenAiMp3 } from './openaiTts.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -297,6 +297,29 @@ voiceRouter.post('/event', (req, res) => {
   const { type, ...rest } = req.body || {};
   if (type) broadcastEvent(type, rest);
   res.json({ ok: true, clients: sseClients.size });
+});
+
+/** Return curated Edge TTS voice catalogue + current active voice. */
+voiceRouter.get('/voices', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({
+    ok: true,
+    provider: ttsProviderLabel(),
+    active: edgeTtsConfigured() ? edgeTtsVoice() : null,
+    voices: EDGE_TTS_VOICE_CATALOGUE,
+  });
+});
+
+/** Set the active Edge TTS voice for this server session (resets on restart). */
+voiceRouter.post('/set-voice', (req, res) => {
+  const { voice } = req.body || {};
+  if (!voice || typeof voice !== 'string') {
+    return res.status(400).json({ error: 'Missing voice name in body: { "voice": "en-GB-RyanNeural" }' });
+  }
+  setSessionVoice(voice.trim());
+  const active = edgeTtsVoice();
+  broadcastEvent('voice_changed', { voice: active });
+  res.json({ ok: true, active });
 });
 
 app.use('/voice', voiceRouter);

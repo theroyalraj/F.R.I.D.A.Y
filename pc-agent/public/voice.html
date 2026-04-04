@@ -10,18 +10,78 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Exo+2:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
   <style>
+    /* ── Light theme (default) ───────────────────────────── */
     :root {
-      --void: #030308;
-      --deep: #0a0e1a;
-      --glass: rgba(12, 18, 38, 0.65);
-      --stroke: rgba(100, 200, 255, 0.22);
-      --cyan: #3ee0ff;
-      --violet: #a78bfa;
-      --magenta: #f472b6;
-      --text: #e8f4ff;
-      --muted: rgba(200, 220, 255, 0.45);
-      --think: #fbbf24;
+      --void:   #f4f7ff;
+      --deep:   #e6edf8;
+      --glass:  rgba(255, 255, 255, 0.72);
+      --stroke: rgba(99, 139, 210, 0.28);
+      --cyan:   #0ea5e9;
+      --violet: #7c3aed;
+      --magenta:#db2777;
+      --text:   #0f1e3d;
+      --muted:  rgba(15, 30, 61, 0.5);
+      --think:  #b45309;
+
+      --bg-grad-1:   rgba(56, 189, 248, 0.18);
+      --bg-grad-2:   rgba(167, 139, 250, 0.10);
+      --bg-grad-3:   rgba(244, 114, 182, 0.07);
+      --bg-grid:     rgba(14, 165, 233, 0.055);
+
+      --ctrl-bg:           rgba(255, 255, 255, 0.82);
+      --input-bg:          rgba(248, 250, 255, 0.92);
+      --panel-bg:          rgba(238, 244, 255, 0.60);
+
+      --bubble-you-bg:     rgba(14, 165, 233, 0.10);
+      --bubble-you-border: rgba(14, 165, 233, 0.22);
+      --bubble-you-text:   #064e88;
+
+      --orb-c1:       rgba(14, 165, 233, 0.22);
+      --orb-c2:       rgba(124, 58, 237, 0.10);
+      --orb-core-accent: rgba(14, 165, 233, 0.30);
+      --orb-core-base:   rgba(220, 234, 255, 0.92);
+      --orb-inner-glow:  rgba(14, 165, 233, 0.08);
+      --listen-glow:  rgba(14, 165, 233, 0.40);
+      --speak-glow:   rgba(219, 39, 119, 0.30);
+      --think-glow:   rgba(180, 83, 9, 0.22);
     }
+
+    /* ── Dark theme override ─────────────────────────────── */
+    body.dark {
+      --void:   #030308;
+      --deep:   #0a0e1a;
+      --glass:  rgba(12, 18, 38, 0.65);
+      --stroke: rgba(100, 200, 255, 0.22);
+      --cyan:   #3ee0ff;
+      --violet: #a78bfa;
+      --magenta:#f472b6;
+      --text:   #e8f4ff;
+      --muted:  rgba(200, 220, 255, 0.45);
+      --think:  #fbbf24;
+
+      --bg-grad-1:   rgba(62, 224, 255, 0.12);
+      --bg-grad-2:   rgba(167, 139, 250, 0.08);
+      --bg-grad-3:   rgba(244, 114, 182, 0.06);
+      --bg-grid:     rgba(62, 224, 255, 0.03);
+
+      --ctrl-bg:           rgba(20, 28, 48, 0.80);
+      --input-bg:          rgba(0, 0, 0, 0.35);
+      --panel-bg:          rgba(8, 12, 24, 0.50);
+
+      --bubble-you-bg:     rgba(62, 224, 255, 0.10);
+      --bubble-you-border: rgba(62, 224, 255, 0.20);
+      --bubble-you-text:   #c5f3ff;
+
+      --orb-c1:       rgba(62, 224, 255, 0.25);
+      --orb-c2:       rgba(167, 139, 250, 0.12);
+      --orb-core-accent: rgba(62, 224, 255, 0.35);
+      --orb-core-base:   rgba(10, 14, 26, 0.95);
+      --orb-inner-glow:  rgba(62, 224, 255, 0.08);
+      --listen-glow:  rgba(62, 224, 255, 0.45);
+      --speak-glow:   rgba(244, 114, 182, 0.35);
+      --think-glow:   rgba(251, 191, 36, 0.25);
+    }
+
     * { box-sizing: border-box; }
     html, body { height: 100%; margin: 0; }
     body {
@@ -29,28 +89,60 @@
       background: var(--void);
       color: var(--text);
       overflow-x: hidden;
+      transition: background 0.3s, color 0.3s;
     }
+
     .bg {
       position: fixed;
       inset: 0;
       z-index: 0;
       background:
-        radial-gradient(ellipse 120% 80% at 50% -20%, rgba(62, 224, 255, 0.12), transparent 55%),
-        radial-gradient(ellipse 80% 60% at 100% 50%, rgba(167, 139, 250, 0.08), transparent 50%),
-        radial-gradient(ellipse 60% 50% at 0% 80%, rgba(244, 114, 182, 0.06), transparent 45%),
-        linear-gradient(180deg, #060912 0%, var(--void) 40%, #020205 100%);
+        radial-gradient(ellipse 120% 80% at 50% -20%, var(--bg-grad-1), transparent 55%),
+        radial-gradient(ellipse 80% 60% at 100% 50%, var(--bg-grad-2), transparent 50%),
+        radial-gradient(ellipse 60% 50% at 0% 80%, var(--bg-grad-3), transparent 45%),
+        linear-gradient(180deg, var(--deep) 0%, var(--void) 40%, var(--void) 100%);
+      transition: background 0.3s;
     }
+
     .grid {
       position: fixed;
       inset: 0;
       z-index: 0;
       background-image:
-        linear-gradient(rgba(62, 224, 255, 0.03) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(62, 224, 255, 0.03) 1px, transparent 1px);
+        linear-gradient(var(--bg-grid) 1px, transparent 1px),
+        linear-gradient(90deg, var(--bg-grid) 1px, transparent 1px);
       background-size: 48px 48px;
       mask-image: radial-gradient(ellipse 70% 70% at 50% 45%, black 20%, transparent 70%);
       pointer-events: none;
     }
+
+    /* ── Theme toggle ─────────────────────────────────────── */
+    .theme-toggle {
+      position: fixed;
+      top: 0.9rem;
+      right: 0.9rem;
+      z-index: 200;
+      height: 2rem;
+      padding: 0 0.75rem;
+      border-radius: 999px;
+      border: 1px solid var(--stroke);
+      background: var(--ctrl-bg);
+      color: var(--muted);
+      font-family: inherit;
+      font-size: 0.68rem;
+      font-weight: 600;
+      letter-spacing: 0.10em;
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: background 0.2s, border-color 0.2s, color 0.2s;
+      backdrop-filter: blur(8px);
+    }
+    .theme-toggle:hover {
+      border-color: var(--cyan);
+      color: var(--cyan);
+    }
+
+    /* ── Layout ───────────────────────────────────────────── */
     .wrap {
       position: relative;
       z-index: 1;
@@ -61,6 +153,7 @@
       padding: clamp(1rem, 4vw, 2rem);
       padding-bottom: max(1.5rem, env(safe-area-inset-bottom));
     }
+
     header {
       text-align: center;
       margin-bottom: 0.5rem;
@@ -83,6 +176,8 @@
       max-width: 22rem;
       line-height: 1.45;
     }
+
+    /* ── Stage ────────────────────────────────────────────── */
     .stage {
       flex: 1;
       display: flex;
@@ -93,6 +188,8 @@
       max-width: 28rem;
       gap: 1.25rem;
     }
+
+    /* ── Orb ──────────────────────────────────────────────── */
     .orb-wrap {
       position: relative;
       width: min(52vw, 220px);
@@ -112,13 +209,14 @@
       position: absolute;
       inset: 0;
       border-radius: 50%;
-      background: radial-gradient(circle at 35% 30%, rgba(255,255,255,0.25), transparent 45%),
+      background:
+        radial-gradient(circle at 35% 30%, rgba(255,255,255,0.25), transparent 45%),
         radial-gradient(circle at 50% 100%, var(--violet), transparent 55%),
-        radial-gradient(circle at 50% 50%, rgba(62, 224, 255, 0.35), rgba(10, 14, 26, 0.95));
+        radial-gradient(circle at 50% 50%, var(--orb-core-accent), var(--orb-core-base));
       box-shadow:
-        0 0 60px rgba(62, 224, 255, 0.25),
-        0 0 120px rgba(167, 139, 250, 0.12),
-        inset 0 0 40px rgba(62, 224, 255, 0.08);
+        0 0 60px var(--orb-c1),
+        0 0 120px var(--orb-c2),
+        inset 0 0 40px var(--orb-inner-glow);
       transition: transform 0.35s ease, box-shadow 0.5s ease;
     }
     .orb-wrap[data-state="idle"] .orb-core {
@@ -130,9 +228,9 @@
     }
     .orb-wrap[data-state="listening"] .orb-core {
       box-shadow:
-        0 0 80px rgba(62, 224, 255, 0.45),
-        0 0 140px rgba(62, 224, 255, 0.15),
-        inset 0 0 50px rgba(62, 224, 255, 0.12);
+        0 0 80px var(--listen-glow),
+        0 0 140px var(--orb-c1),
+        inset 0 0 50px var(--orb-core-accent);
       animation: breathe 2.2s ease-in-out infinite;
     }
     .orb-wrap[data-state="thinking"] .orb-halo {
@@ -141,8 +239,8 @@
     }
     .orb-wrap[data-state="thinking"] .orb-core {
       box-shadow:
-        0 0 70px rgba(251, 191, 36, 0.25),
-        inset 0 0 40px rgba(251, 191, 36, 0.08);
+        0 0 70px var(--think-glow),
+        inset 0 0 40px var(--think-glow);
     }
     .orb-wrap[data-state="speaking"] .orb-halo {
       border-color: rgba(244, 114, 182, 0.45);
@@ -150,31 +248,20 @@
     }
     .orb-wrap[data-state="speaking"] .orb-core {
       box-shadow:
-        0 0 90px rgba(244, 114, 182, 0.35),
-        0 0 160px rgba(167, 139, 250, 0.12),
-        inset 0 0 45px rgba(244, 114, 182, 0.1);
+        0 0 90px var(--speak-glow),
+        0 0 160px var(--orb-c2),
+        inset 0 0 45px var(--speak-glow);
       animation: speak-pulse 0.5s ease-in-out infinite alternate;
     }
-    @keyframes float {
-      0%, 100% { transform: translateY(0); }
-      50% { transform: translateY(-6px); }
-    }
-    @keyframes breathe {
-      0%, 100% { transform: scale(1); }
-      50% { transform: scale(1.03); }
-    }
-    @keyframes halo-pulse {
-      0%, 100% { transform: scale(1); opacity: 0.5; }
-      50% { transform: scale(1.08); opacity: 0.85; }
-    }
-    @keyframes halo-spin {
-      from { transform: rotate(0deg); }
-      to { transform: rotate(360deg); }
-    }
-    @keyframes speak-pulse {
-      from { transform: scale(1); }
-      to { transform: scale(1.02); }
-    }
+
+    @keyframes float      { 0%, 100% { transform: translateY(0); }    50% { transform: translateY(-6px); } }
+    @keyframes breathe    { 0%, 100% { transform: scale(1); }          50% { transform: scale(1.03); } }
+    @keyframes halo-pulse { 0%, 100% { transform: scale(1); opacity: 0.5; } 50% { transform: scale(1.08); opacity: 0.85; } }
+    @keyframes halo-spin  { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+    @keyframes speak-pulse{ from { transform: scale(1); } to { transform: scale(1.02); } }
+    @keyframes fade-in    { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+
+    /* ── Labels & hints ───────────────────────────────────── */
     .state-label {
       font-size: 0.7rem;
       letter-spacing: 0.28em;
@@ -184,8 +271,9 @@
       transition: color 0.3s;
     }
     .orb-wrap[data-state="listening"] + .state-label { color: var(--cyan); }
-    .orb-wrap[data-state="thinking"] + .state-label { color: var(--think); }
-    .orb-wrap[data-state="speaking"] + .state-label { color: var(--magenta); }
+    .orb-wrap[data-state="thinking"]  + .state-label { color: var(--think); }
+    .orb-wrap[data-state="speaking"]  + .state-label { color: var(--magenta); }
+
     .hint {
       font-size: 0.72rem;
       color: var(--muted);
@@ -193,6 +281,8 @@
       max-width: 18rem;
       line-height: 1.4;
     }
+
+    /* ── Transcript ───────────────────────────────────────── */
     .transcript {
       width: 100%;
       max-width: 26rem;
@@ -212,16 +302,12 @@
       line-height: 1.45;
       animation: fade-in 0.35s ease;
     }
-    @keyframes fade-in {
-      from { opacity: 0; transform: translateY(6px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
     .bubble.you {
       align-self: flex-end;
       max-width: 92%;
-      background: rgba(62, 224, 255, 0.1);
-      border: 1px solid rgba(62, 224, 255, 0.2);
-      color: #c5f3ff;
+      background: var(--bubble-you-bg);
+      border: 1px solid var(--bubble-you-border);
+      color: var(--bubble-you-text);
     }
     .bubble.agent {
       align-self: flex-start;
@@ -241,6 +327,8 @@
       color: var(--muted);
       margin-bottom: 0.35rem;
     }
+
+    /* ── Controls ─────────────────────────────────────────── */
     .controls {
       width: 100%;
       max-width: 26rem;
@@ -259,7 +347,7 @@
       padding: 0.65rem 1.1rem;
       border-radius: 999px;
       border: 1px solid var(--stroke);
-      background: rgba(20, 28, 48, 0.8);
+      background: var(--ctrl-bg);
       color: var(--text);
       cursor: pointer;
       transition: background 0.2s, border-color 0.2s, box-shadow 0.2s;
@@ -274,20 +362,21 @@
     }
     button.ctrl.danger {
       border-color: rgba(248, 113, 113, 0.35);
-      color: #fca5a5;
+      color: #dc2626;
     }
-    button.ctrl:disabled {
-      opacity: 0.4;
-      cursor: not-allowed;
-    }
+    body.dark button.ctrl.danger { color: #fca5a5; }
+    button.ctrl:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* ── Settings panel ───────────────────────────────────── */
     details.panel {
       width: 100%;
       max-width: 26rem;
       margin-top: 0.75rem;
       border-radius: 12px;
       border: 1px solid var(--stroke);
-      background: rgba(8, 12, 24, 0.5);
+      background: var(--panel-bg);
       overflow: hidden;
+      transition: background 0.3s, border-color 0.3s;
     }
     details.panel summary {
       padding: 0.65rem 1rem;
@@ -311,11 +400,12 @@
       resize: vertical;
       border-radius: 8px;
       border: 1px solid var(--stroke);
-      background: rgba(0, 0, 0, 0.35);
+      background: var(--input-bg);
       color: var(--text);
       padding: 0.6rem 0.75rem;
       font-family: inherit;
       font-size: 0.85rem;
+      transition: background 0.3s, color 0.3s;
     }
     .panel-inner label {
       font-size: 0.65rem;
@@ -329,6 +419,8 @@
       flex-wrap: wrap;
     }
     input[type="range"] { width: 100px; accent-color: var(--cyan); }
+
+    /* ── Model bar + voice picker ─────────────────────────── */
     .model-bar {
       display: flex;
       align-items: center;
@@ -344,26 +436,55 @@
       text-transform: uppercase;
       color: var(--muted);
     }
-    .model-bar select {
+    .model-bar select,
+    select.voice-select {
       min-width: 11rem;
       border-radius: 999px;
       border: 1px solid var(--stroke);
-      background: rgba(0, 0, 0, 0.35);
+      background: var(--input-bg);
       color: var(--text);
       padding: 0.45rem 0.85rem;
       font-family: inherit;
       font-size: 0.78rem;
       cursor: pointer;
+      transition: background 0.3s, color 0.3s, border-color 0.2s;
+    }
+    .model-bar select:hover,
+    select.voice-select:hover { border-color: var(--cyan); }
+
+    /* voice picker row inside panel */
+    .row-voice-pick {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      margin-top: 0.25rem;
+    }
+    .row-voice-pick label { white-space: nowrap; }
+    select.voice-select {
+      flex: 1;
+      min-width: 10rem;
+      border-radius: 8px;
+    }
+
+    /* voice description badge */
+    .voice-desc {
+      font-size: 0.64rem;
+      color: var(--muted);
+      font-style: italic;
+      padding-left: 0.1rem;
+      min-height: 1em;
     }
   </style>
 </head>
 <body>
+  <button class="theme-toggle" id="themeToggle" aria-label="Toggle dark mode">Dark mode</button>
   <div class="bg" aria-hidden="true"></div>
   <div class="grid" aria-hidden="true"></div>
   <div class="wrap">
     <header>
       <h1>Friday</h1>
-      <p>Two-way voice: you speak → Friday runs your PC (apps + Claude) → she speaks back. <strong>While she talks, speak again to interrupt</strong> (or tap the orb).</p>
+      <p>Two-way voice: you speak &rarr; Friday runs your PC (apps + Claude) &rarr; she speaks back. <strong>While she talks, speak again to interrupt</strong> (or tap the orb).</p>
       <p class="hint" id="ttsHint" style="margin-top: 0.35rem; max-width: 24rem"></p>
       <div class="model-bar">
         <label for="claudeModel">Claude model</label>
@@ -375,6 +496,14 @@
           <option value="inherit">CLI default (no —model)</option>
         </select>
       </div>
+      <!-- Server TTS voice (Edge) — hidden until server confirms Edge is active -->
+      <div class="model-bar" id="serverVoiceBar" style="display:none">
+        <label for="serverVoiceSel">Server voice</label>
+        <select id="serverVoiceSel" aria-label="Server-side Edge TTS voice">
+          <option value="">Loading…</option>
+        </select>
+      </div>
+      <div class="hint" id="serverVoiceDesc" style="margin-top:0.2rem; display:none"></div>
     </header>
     <div class="stage">
       <div class="orb-wrap" id="orb" data-state="idle" title="Tap to interrupt while speaking">
@@ -389,17 +518,26 @@
         <button type="button" class="ctrl danger" id="btnEnd" disabled>End session</button>
       </div>
       <details class="panel">
-        <summary>Type instead · voice tuning</summary>
+        <summary>Type instead &middot; voice tuning</summary>
         <div class="panel-inner">
           <label for="typed">Typed command (Enter or Send)</label>
           <textarea id="typed" placeholder="Open Notepad, or explain this repo…"></textarea>
           <button type="button" class="ctrl primary" id="btnSend">Send typed</button>
+
           <div class="row-voice">
             <label for="rate">Speech rate</label>
             <input type="range" id="rate" min="0.7" max="1.35" step="0.05" value="0.95" />
             <label for="pitch">Pitch</label>
             <input type="range" id="pitch" min="0.85" max="1.15" step="0.05" value="1" />
           </div>
+
+          <div class="row-voice-pick">
+            <label for="voicePicker">Browser voice</label>
+            <select id="voicePicker" class="voice-select" aria-label="Browser TTS voice">
+              <option value="">Auto-pick best voice</option>
+            </select>
+          </div>
+          <div class="voice-desc" id="voiceDesc"></div>
         </div>
       </details>
     </div>
@@ -407,40 +545,64 @@
   <script>
     (function () {
       const api = (path) => new URL(path, window.location.origin).href;
-      /** ngrok free tier: any value skips the browser warning page on requests. */
       const tunnelHeaders = {
         'ngrok-skip-browser-warning': '69420',
         Accept: 'application/json',
       };
       const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-      const orb = document.getElementById('orb');
-      const stateLabel = document.getElementById('stateLabel');
-      const hint = document.getElementById('hint');
-      const transcript = document.getElementById('transcript');
-      const btnSession = document.getElementById('btnSession');
-      const btnEnd = document.getElementById('btnEnd');
-      const typed = document.getElementById('typed');
-      const btnSend = document.getElementById('btnSend');
-      const rateEl = document.getElementById('rate');
-      const pitchEl = document.getElementById('pitch');
-      const ttsHint = document.getElementById('ttsHint');
+      const orb           = document.getElementById('orb');
+      const stateLabel    = document.getElementById('stateLabel');
+      const hint          = document.getElementById('hint');
+      const transcript    = document.getElementById('transcript');
+      const btnSession    = document.getElementById('btnSession');
+      const btnEnd        = document.getElementById('btnEnd');
+      const typed         = document.getElementById('typed');
+      const btnSend       = document.getElementById('btnSend');
+      const rateEl        = document.getElementById('rate');
+      const pitchEl       = document.getElementById('pitch');
+      const ttsHint       = document.getElementById('ttsHint');
       const claudeModelEl = document.getElementById('claudeModel');
-      const LS_CLAUDE_MODEL = 'friday.claudeModel';
+      const themeToggle      = document.getElementById('themeToggle');
+      const voicePicker      = document.getElementById('voicePicker');
+      const voiceDesc        = document.getElementById('voiceDesc');
+      const serverVoiceBar   = document.getElementById('serverVoiceBar');
+      const serverVoiceSel   = document.getElementById('serverVoiceSel');
+      const serverVoiceDesc  = document.getElementById('serverVoiceDesc');
 
+      /* ── Theme ──────────────────────────────────────────── */
+      const LS_THEME = 'friday.theme';
+
+      function applyTheme(theme) {
+        if (theme === 'dark') {
+          document.body.classList.add('dark');
+          themeToggle.textContent = 'Light mode';
+          themeToggle.setAttribute('aria-label', 'Switch to light mode');
+        } else {
+          document.body.classList.remove('dark');
+          themeToggle.textContent = 'Dark mode';
+          themeToggle.setAttribute('aria-label', 'Switch to dark mode');
+        }
+      }
+
+      const savedTheme = (() => { try { return localStorage.getItem(LS_THEME); } catch (_) { return null; } })();
+      applyTheme(savedTheme || 'light');
+
+      themeToggle.addEventListener('click', () => {
+        const next = document.body.classList.contains('dark') ? 'light' : 'dark';
+        applyTheme(next);
+        try { localStorage.setItem(LS_THEME, next); } catch (_) {}
+      });
+
+      /* ── Claude model persistence ───────────────────────── */
+      const LS_CLAUDE_MODEL = 'friday.claudeModel';
       try {
         const saved = localStorage.getItem(LS_CLAUDE_MODEL);
         if (saved != null && [...claudeModelEl.options].some((o) => o.value === saved)) {
           claudeModelEl.value = saved;
         }
-      } catch (_) {
-        /* private mode */
-      }
+      } catch (_) {}
       claudeModelEl.addEventListener('change', () => {
-        try {
-          localStorage.setItem(LS_CLAUDE_MODEL, claudeModelEl.value);
-        } catch (_) {
-          /* ignore */
-        }
+        try { localStorage.setItem(LS_CLAUDE_MODEL, claudeModelEl.value); } catch (_) {}
       });
 
       function claudeModelBody() {
@@ -448,35 +610,191 @@
         return m ? { claudeModel: m } : {};
       }
 
-      let agentActive = false;
-      let busy = false;
-      let rec = null;
-      let bargeRec = null;
-      let utterGen = 0;
-      let currentAudio = null;
+      /* ── Voice picker ───────────────────────────────────── */
+      const LS_VOICE = 'friday.browserVoice';
 
-      const labels = {
-        idle: 'Ready',
-        listening: 'Listening',
-        thinking: 'Thinking',
-        speaking: 'Speaking',
+      function voiceQuality(v) {
+        if (/Natural|Neural|Online/i.test(v.name)) return 'Neural';
+        if (!v.localService)                        return 'Online';
+        return 'Local / offline';
+      }
+
+      function voiceShortName(v) {
+        return v.name
+          .replace(/\s+Online\s*\(Natural\)/gi, '')
+          .replace(/\s+\(Natural\)/gi, '')
+          .replace(/\s+Neural\b/gi, '')
+          .replace(/Microsoft\s+/i, 'MS ')
+          .trim();
+      }
+
+      function voiceOptionLabel(v) {
+        const short = voiceShortName(v);
+        const qual  = voiceQuality(v);
+        return `${short}  [${v.lang} · ${qual}]${v.default ? ' ★' : ''}`;
+      }
+
+      function voiceDescriptionText(v) {
+        if (!v) return '';
+        const parts = [];
+        parts.push(v.name);
+        parts.push(v.lang);
+        parts.push(v.localService ? 'Offline / local — works without internet' : 'Online — requires internet');
+        if (/Natural|Neural/i.test(v.name)) parts.push('neural quality');
+        if (v.default) parts.push('browser default');
+        return parts.join(' · ');
+      }
+
+      function populateVoicePicker() {
+        const voices = speechSynthesis.getVoices();
+        if (!voices.length) return;
+
+        const savedName = (() => { try { return localStorage.getItem(LS_VOICE); } catch (_) { return null; } })();
+
+        voicePicker.innerHTML = '<option value="">Auto-pick best voice</option>';
+
+        const en    = voices.filter((v) => /^en/i.test(v.lang));
+        const other = voices.filter((v) => !/^en/i.test(v.lang));
+
+        if (en.length) {
+          const grp = document.createElement('optgroup');
+          grp.label = 'English voices';
+          en.forEach((v) => {
+            const opt = document.createElement('option');
+            opt.value       = v.name;
+            opt.textContent = voiceOptionLabel(v);
+            grp.appendChild(opt);
+          });
+          voicePicker.appendChild(grp);
+        }
+
+        if (other.length) {
+          const grp = document.createElement('optgroup');
+          grp.label = 'Other languages';
+          other.forEach((v) => {
+            const opt = document.createElement('option');
+            opt.value       = v.name;
+            opt.textContent = voiceOptionLabel(v);
+            grp.appendChild(opt);
+          });
+          voicePicker.appendChild(grp);
+        }
+
+        if (savedName && [...voicePicker.options].some((o) => o.value === savedName)) {
+          voicePicker.value = savedName;
+        }
+        updateVoiceDesc();
+      }
+
+      function updateVoiceDesc() {
+        const sel = voicePicker.value;
+        if (!sel) {
+          voiceDesc.textContent = 'Friday will automatically choose the best available English voice.';
+          return;
+        }
+        const v = speechSynthesis.getVoices().find((x) => x.name === sel);
+        voiceDesc.textContent = v ? voiceDescriptionText(v) : '';
+      }
+
+      voicePicker.addEventListener('change', () => {
+        updateVoiceDesc();
+        try { localStorage.setItem(LS_VOICE, voicePicker.value); } catch (_) {}
+      });
+
+      /* ── Server TTS voice (Edge) ────────────────────────────── */
+      async function loadServerVoices() {
+        try {
+          const r = await fetch(api('/voice/voices'), { headers: { ...tunnelHeaders } });
+          const d = await r.json();
+          if (!d.ok || d.provider !== 'edge' || !d.voices?.length) return;
+
+          serverVoiceSel.innerHTML = '';
+          const groups = {};
+          for (const v of d.voices) {
+            const g = v.lang.startsWith('en-GB') ? 'British' :
+                      v.lang.startsWith('en-US') ? 'American' :
+                      v.lang.startsWith('en-IN') ? 'Indian'   :
+                      v.lang.startsWith('en-AU') ? 'Australian':
+                      v.lang.startsWith('en-CA') ? 'Canadian'  : 'Other';
+            (groups[g] = groups[g] || []).push(v);
+          }
+          for (const [grp, voices] of Object.entries(groups)) {
+            const og = document.createElement('optgroup');
+            og.label = grp;
+            for (const v of voices) {
+              const opt = document.createElement('option');
+              opt.value       = v.voice;
+              opt.textContent = `${v.voice.replace('Neural','').replace(/^en-\w\w-/,'')}  — ${v.desc}`;
+              if (v.voice === d.active) opt.selected = true;
+              og.appendChild(opt);
+            }
+            serverVoiceSel.appendChild(og);
+          }
+          serverVoiceBar.style.display  = '';
+          serverVoiceDesc.style.display = '';
+          updateServerVoiceDesc(d.active, d.voices);
+        } catch (_) {}
+      }
+
+      function updateServerVoiceDesc(active, voices) {
+        if (!active || !voices) { serverVoiceDesc.textContent = ''; return; }
+        const v = voices.find(x => x.voice === active);
+        serverVoiceDesc.textContent = v
+          ? `${v.voice} · ${v.lang} · ${v.gender} · ${v.desc}`
+          : active;
+      }
+
+      serverVoiceSel.addEventListener('change', async () => {
+        const voice = serverVoiceSel.value;
+        if (!voice) return;
+        serverVoiceSel.disabled = true;
+        try {
+          const r = await fetch(api('/voice/set-voice'), {
+            method : 'POST',
+            headers: { 'Content-Type': 'application/json', ...tunnelHeaders },
+            body   : JSON.stringify({ voice }),
+          });
+          const d = await r.json();
+          if (d.ok) {
+            serverVoiceDesc.textContent = `Active: ${d.active}`;
+            if (ttsHint) ttsHint.textContent = `Voice: Microsoft Edge TTS — ${d.active} (free neural, requires internet).`;
+          }
+        } catch (_) {
+          serverVoiceDesc.textContent = 'Could not change voice — server unreachable';
+        } finally {
+          serverVoiceSel.disabled = false;
+        }
+      });
+
+      speechSynthesis.onvoiceschanged = () => {
+        speechSynthesis.getVoices();
+        populateVoicePicker();
       };
+      populateVoicePicker();
+      loadServerVoices();
+
+      /* ── Core state ─────────────────────────────────────── */
+      let agentActive = false;
+      let busy        = false;
+      let rec         = null;
+      let bargeRec    = null;
+      let utterGen    = 0;
+      let currentAudio= null;
+
+      const labels = { idle: 'Ready', listening: 'Listening', thinking: 'Thinking', speaking: 'Speaking' };
 
       function setOrb(state) {
-        orb.dataset.state = state;
+        orb.dataset.state   = state;
         stateLabel.textContent = labels[state] || state;
       }
 
+      /* Heuristic auto-pick — used when no voice is selected in the picker */
       function pickVoice() {
         const v = speechSynthesis.getVoices();
         if (!v || !v.length) return null;
         const pick = (pred) => v.find(pred);
         return (
-          pick(
-            (x) =>
-              /Microsoft.*(Aria|Jenny|Guy|Davis|Zira|Andrew|Sonia|Libby|Emma|Brian|Christopher)/i.test(x.name) &&
-              /^en/i.test(x.lang),
-          ) ||
+          pick((x) => /Microsoft.*(Aria|Jenny|Guy|Davis|Zira|Andrew|Sonia|Libby|Emma|Brian|Christopher)/i.test(x.name) && /^en/i.test(x.lang)) ||
           pick((x) => /Google[™]?\s+.*(US English|UK English|en-US)/i.test(x.name)) ||
           pick((x) => /Samantha|Daniel|Karen|Moira|Fiona|Tessa|Arthur/i.test(x.name) && /^en/i.test(x.lang)) ||
           pick((x) => /(Neural|Natural|Premium)/i.test(x.name) && /^en/i.test(x.lang)) ||
@@ -486,9 +804,14 @@
         );
       }
 
-      speechSynthesis.onvoiceschanged = () => {
-        speechSynthesis.getVoices();
-      };
+      function resolveVoice() {
+        const sel = voicePicker.value;
+        if (sel) {
+          const found = speechSynthesis.getVoices().find((v) => v.name === sel);
+          if (found) return found;
+        }
+        return pickVoice();
+      }
 
       function forSpeech(raw) {
         if (!raw || typeof raw !== 'string') return 'Done.';
@@ -500,9 +823,7 @@
 
       function stopRec() {
         if (!rec) return;
-        try {
-          rec.stop();
-        } catch (_) {}
+        try { rec.stop(); } catch (_) {}
         rec = null;
       }
 
@@ -510,14 +831,9 @@
         if (!bargeRec) return;
         const r = bargeRec;
         bargeRec = null;
-        try {
-          r.onend = null;
-          r.onresult = null;
-          r.stop();
-        } catch (_) {}
+        try { r.onend = null; r.onresult = null; r.stop(); } catch (_) {}
       }
 
-      /** Listen while Friday speaks; final speech → stop TTS and run the new command (headset works best). */
       function startBargeInWhileSpeaking(speakUtterId) {
         stopBargeRec();
         if (!SR || !agentActive) return;
@@ -553,28 +869,18 @@
             setTimeout(() => {
               if (handled || speakUtterId !== utterGen || orb.dataset.state !== 'speaking') return;
               bargeRec = r;
-              try {
-                r.start();
-              } catch (_2) {}
+              try { r.start(); } catch (_2) {}
             }, 250);
           }
         };
         bargeRec = r;
-        try {
-          r.start();
-        } catch (_) {
-          bargeRec = null;
-        }
+        try { r.start(); } catch (_) { bargeRec = null; }
       }
 
       function cancelSpeech() {
         speechSynthesis.cancel();
         if (currentAudio) {
-          try {
-            currentAudio.pause();
-            currentAudio.removeAttribute('src');
-            currentAudio.load();
-          } catch (_) {}
+          try { currentAudio.pause(); currentAudio.removeAttribute('src'); currentAudio.load(); } catch (_) {}
           currentAudio = null;
         }
       }
@@ -588,23 +894,22 @@
 
       async function speakBrowserNatural(text, id, onEnd) {
         const chunks = splitSentences(text);
-        const gapMs = 90;
-        const rate = Math.min(1.05, Math.max(0.72, parseFloat(rateEl.value) * 0.93));
-        const pitch = parseFloat(pitchEl.value) || 1;
+        const gapMs  = 90;
+        const rate   = Math.min(1.05, Math.max(0.72, parseFloat(rateEl.value) * 0.93));
+        const pitch  = parseFloat(pitchEl.value) || 1;
         for (const chunk of chunks) {
           if (id !== utterGen) return;
           const c = chunk.trim();
           if (!c) continue;
           await new Promise((resolve) => {
-            const u = new SpeechSynthesisUtterance(c);
-            u.rate = rate;
-            u.pitch = pitch;
-            const voice = pickVoice();
+            const u    = new SpeechSynthesisUtterance(c);
+            u.rate     = rate;
+            u.pitch    = pitch;
+            const voice = resolveVoice();
             if (voice) u.voice = voice;
-            // Some browsers silently drop utterances in background tabs — timeout per chunk.
             const chunkTimer = setTimeout(resolve, Math.max(10_000, c.length * 120));
-            u.onend = () => { clearTimeout(chunkTimer); setTimeout(resolve, gapMs); };
-            u.onerror = () => { clearTimeout(chunkTimer); resolve(); };
+            u.onend  = () => { clearTimeout(chunkTimer); setTimeout(resolve, gapMs); };
+            u.onerror= () => { clearTimeout(chunkTimer); resolve(); };
             speechSynthesis.speak(u);
           });
         }
@@ -613,7 +918,7 @@
 
       async function speak(text, onEnd) {
         cancelSpeech();
-        const id = ++utterGen;
+        const id      = ++utterGen;
         startBargeInWhileSpeaking(id);
         const cleaned = forSpeech(text);
 
@@ -626,56 +931,43 @@
           stopBargeRec();
           if (id === utterGen) onEnd && onEnd();
         };
-        // Safety net: if the audio element or browser TTS never fires end/error, unblock after 90s.
         watchdog = setTimeout(done, 90_000);
 
         try {
           const r = await fetch(api('/voice/tts'), {
-            method: 'POST',
+            method : 'POST',
             headers: {
               'Content-Type': 'application/json',
               'ngrok-skip-browser-warning': tunnelHeaders['ngrok-skip-browser-warning'],
               Accept: 'audio/wav, audio/mpeg, application/json',
             },
-            body: JSON.stringify({ text: cleaned }),
+            body : JSON.stringify({ text: cleaned }),
             cache: 'no-store',
           });
           const ct = (r.headers.get('content-type') || '').toLowerCase();
           if (r.ok && (ct.includes('audio/mpeg') || ct.includes('audio/wav'))) {
-            const blob = await r.blob();
-            const url = URL.createObjectURL(blob);
+            const blob  = await r.blob();
+            const url   = URL.createObjectURL(blob);
             const audio = new Audio();
             currentAudio = audio;
-            audio.src = url;
-            const cleanup = () => {
-              URL.revokeObjectURL(url);
-              if (currentAudio === audio) currentAudio = null;
-            };
-            audio.onended = () => {
-              cleanup();
-              done();
-            };
-            audio.onerror = () => {
-              cleanup();
-              done();
-            };
+            audio.src    = url;
+            const cleanup = () => { URL.revokeObjectURL(url); if (currentAudio === audio) currentAudio = null; };
+            audio.onended = () => { cleanup(); done(); };
+            audio.onerror = () => { cleanup(); done(); };
             await audio.play();
             return;
           }
-        } catch (_) {
-          /* use browser */
-        }
+        } catch (_) {}
 
-        // Pre-empted by a new utterance while fetching TTS — clear watchdog and exit cleanly.
         if (id !== utterGen) { done(); return; }
         await speakBrowserNatural(cleaned, id, done);
       }
 
       function addBubble(role, text) {
-        const div = document.createElement('div');
+        const div  = document.createElement('div');
         div.className = 'bubble ' + (role === 'you' ? 'you' : 'agent');
-        const tag = document.createElement('div');
-        tag.className = 'tag';
+        const tag  = document.createElement('div');
+        tag.className   = 'tag';
         tag.textContent = role === 'you' ? 'You' : 'Friday';
         div.appendChild(tag);
         const body = document.createElement('div');
@@ -700,32 +992,20 @@
 
         try {
           const r = await fetch(api('/voice/command'), {
-            method: 'POST',
+            method : 'POST',
             headers: { 'Content-Type': 'application/json', ...tunnelHeaders },
-            body: JSON.stringify({
-              text: t,
-              userId: 'friday-web',
-              correlationId: crypto.randomUUID(),
-              ...claudeModelBody(),
-            }),
-            cache: 'no-store',
+            body   : JSON.stringify({ text: t, userId: 'friday-web', correlationId: crypto.randomUUID(), ...claudeModelBody() }),
+            cache  : 'no-store',
           });
-          const raw = await r.text();
+          const raw     = await r.text();
           const trimmed = raw.trim();
           if (trimmed.startsWith('<') || trimmed.startsWith('<!')) {
-            addBubble(
-              'agent',
-              'Tunnel returned HTML (wrong target port, or not pc-agent). Point ngrok at the same port as Friday (3847) and restart pc-agent.',
-            );
+            addBubble('agent', 'Tunnel returned HTML (wrong target port, or not pc-agent). Point ngrok at the same port as Friday (3847) and restart pc-agent.');
             speak('That did not reach Friday.', () => cycleAfterSpeech());
             return;
           }
           let j = {};
-          try {
-            j = JSON.parse(raw);
-          } catch {
-            j = { error: raw.slice(0, 400) || 'Bad response' };
-          }
+          try { j = JSON.parse(raw); } catch { j = { error: raw.slice(0, 400) || 'Bad response' }; }
           if (!r.ok) {
             const err = [j.error, j.hint].filter(Boolean).join(' — ') || r.statusText || 'Request failed';
             addBubble('agent', err);
@@ -746,22 +1026,14 @@
 
       function cycleAfterSpeech() {
         busy = false;
-        if (!agentActive) {
-          setOrb('idle');
-          hint.textContent = 'Session ended.';
-          return;
-        }
+        if (!agentActive) { setOrb('idle'); hint.textContent = 'Session ended.'; return; }
         hint.textContent = 'Speak when ready.';
         startListenTurn();
       }
 
       function startListenTurn() {
         if (!agentActive || busy) return;
-        if (!SR) {
-          hint.textContent = 'Speech recognition not available in this browser.';
-          setOrb('idle');
-          return;
-        }
+        if (!SR) { hint.textContent = 'Speech recognition not available in this browser.'; setOrb('idle'); return; }
         setOrb('listening');
         stopRec();
         let buffer = '';
@@ -777,7 +1049,6 @@
             if (ev.results[i].isFinal) buffer += t;
             else interim += t;
           }
-          // Show live transcript so the user can see the mic is actually capturing.
           const live = (buffer + interim).trim();
           if (live) hint.textContent = live;
         };
@@ -803,10 +1074,7 @@
           const said = buffer.trim();
           buffer = '';
           if (said) runCommand(said, { fromVoice: true });
-          else {
-            hint.textContent = 'Speak when ready.';
-            startListenTurn();
-          }
+          else { hint.textContent = 'Speak when ready.'; startListenTurn(); }
         };
         rec = r;
         try {
@@ -824,25 +1092,20 @@
           cancelSpeech();
           stopBargeRec();
           busy = false;
-          if (agentActive) {
-            hint.textContent = 'Interrupted. Listening…';
-            startListenTurn();
-          } else {
-            setOrb('idle');
-          }
+          if (agentActive) { hint.textContent = 'Interrupted. Listening…'; startListenTurn(); }
+          else              { setOrb('idle'); }
         }
       });
 
       btnSession.addEventListener('click', () => {
-        if (!SR) {
-          hint.textContent = 'Use Chrome or Edge for speech recognition.';
-          return;
-        }
+        if (!SR) { hint.textContent = 'Use Chrome or Edge for speech recognition.'; return; }
         speechSynthesis.getVoices();
+        populateVoicePicker();
+        loadServerVoices();
         agentActive = true;
-        busy = false;
+        busy        = false;
         btnSession.disabled = true;
-        btnEnd.disabled = false;
+        btnEnd.disabled     = false;
         transcript.innerHTML = '';
         cancelSpeech();
         stopRec();
@@ -853,12 +1116,12 @@
 
       btnEnd.addEventListener('click', () => {
         agentActive = false;
-        busy = false;
+        busy        = false;
         stopRec();
         stopBargeRec();
         cancelSpeech();
         btnSession.disabled = false;
-        btnEnd.disabled = true;
+        btnEnd.disabled     = true;
         setOrb('idle');
         hint.textContent = 'Session ended. Tap Begin when you want to continue.';
       });
@@ -878,10 +1141,7 @@
       });
 
       typed.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && !e.shiftKey) {
-          e.preventDefault();
-          btnSend.click();
-        }
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); btnSend.click(); }
       });
 
       if (!SR) {
@@ -889,6 +1149,7 @@
         hint.textContent = 'Speech recognition unavailable. You can still use typed commands below.';
       }
 
+      /* ── TTS hint from server ping ──────────────────────── */
       fetch(api('/voice/ping'), { headers: { ...tunnelHeaders } })
         .then((r) => r.json())
         .then((j) => {
@@ -902,8 +1163,7 @@
           } else if (p === 'openai') {
             ttsHint.textContent = 'Voice: OpenAI TTS (paid cloud neural).';
           } else {
-            ttsHint.textContent =
-              'Voice: browser fallback — set FRIDAY_EDGE_TTS_VOICE in .env to pick a different Edge voice.';
+            ttsHint.textContent = 'Voice: browser fallback — set FRIDAY_EDGE_TTS_VOICE in .env to pick a different Edge voice.';
           }
         })
         .catch(() => {});
