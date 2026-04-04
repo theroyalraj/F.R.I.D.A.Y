@@ -461,11 +461,20 @@ async def speak():
         await _stream_and_play(switch_done)
         print(f"[friday-speak] streamed via {VOICE}", flush=True)
     except Exception as exc:
-        print(f"friday-speak: edge-tts stream failed — {exc}", file=sys.stderr, flush=True)
-        switch_done.wait(timeout=2)
-        _restore_device(device_result)
-        _sapi_speak()
-        sys.exit(1)
+        print(f"[friday-speak] stream failed ({exc.__class__.__name__}) — retrying full download…", file=sys.stderr, flush=True)
+        # Retry: full download with 3 retries (2 s, 4 s backoff) before SAPI
+        try:
+            mp3_data = await _fetch_mp3_network(retries=3)
+            _save_cache(mp3_data)
+            switch_done.wait(timeout=10)
+            _play_with_device(mp3_data, device_result, use_device)
+            print(f"[friday-speak] retry ok via {VOICE}", flush=True)
+        except Exception as retry_exc:
+            print(f"friday-speak: edge-tts retry failed — {retry_exc}", file=sys.stderr, flush=True)
+            switch_done.wait(timeout=2)
+            _restore_device(device_result)
+            _sapi_speak()
+            sys.exit(1)
 
     _restore_device(device_result)
 
