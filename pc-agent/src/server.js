@@ -207,6 +207,11 @@ voiceRouter.post('/tts', async (req, res) => {
     return res.status(400).json({ error: 'Missing text' });
   }
 
+  // Optional per-session voice from client — validated against catalogue; falls back to server default.
+  const reqVoice   = (typeof req.body?.voice === 'string' && req.body.voice.trim()) ? req.body.voice.trim() : null;
+  const isKnown    = reqVoice && EDGE_TTS_VOICE_CATALOGUE.some((v) => v.voice === reqVoice);
+  const resolvedVoice = isKnown ? reqVoice : edgeTtsVoice();
+
   if (piperConfigured()) {
     try {
       const wav = synthesizePiperWav(text, {
@@ -229,11 +234,11 @@ voiceRouter.post('/tts', async (req, res) => {
 
   if (edgeTtsConfigured()) {
     try {
-      const mp3 = await synthesizeEdgeTtsMp3(text, { voice: edgeTtsVoice() });
+      const mp3 = await synthesizeEdgeTtsMp3(text, { voice: resolvedVoice });
       res.setHeader('Content-Type', 'audio/mpeg');
       res.setHeader('Cache-Control', 'no-store');
       res.setHeader('X-Friday-Tts', 'edge');
-      res.setHeader('X-Friday-Tts-Voice', edgeTtsVoice());
+      res.setHeader('X-Friday-Tts-Voice', resolvedVoice);
       return res.send(mp3);
     } catch (e) {
       req.log?.warn({ err: String(e.message || e) }, 'edge tts failed — falling through');

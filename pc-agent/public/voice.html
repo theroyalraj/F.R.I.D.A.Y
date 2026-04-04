@@ -430,6 +430,47 @@
       margin-top: 0.65rem;
       max-width: 26rem;
     }
+
+    /* ── Session voice badge ──────────────────────────────── */
+    .session-voice-bar {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      margin-top: 0.45rem;
+      flex-wrap: wrap;
+    }
+    .session-voice-bar .sv-label {
+      font-size: 0.6rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .sv-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.3rem 0.75rem;
+      border-radius: 999px;
+      border: 1px solid var(--stroke);
+      background: var(--input-bg);
+      font-size: 0.72rem;
+      color: var(--text);
+      transition: background 0.3s, color 0.3s;
+    }
+    .sv-badge[data-gender="male"]   { border-color: #4fa8d8; }
+    .sv-badge[data-gender="female"] { border-color: #d48fc8; }
+    .sv-reroll {
+      background: none;
+      border: none;
+      cursor: pointer;
+      font-size: 0.88rem;
+      opacity: 0.7;
+      padding: 0 0.15rem;
+      line-height: 1;
+      transition: opacity 0.2s, transform 0.25s;
+    }
+    .sv-reroll:hover { opacity: 1; transform: rotate(180deg); }
     .model-bar label {
       font-size: 0.65rem;
       letter-spacing: 0.14em;
@@ -504,6 +545,12 @@
         </select>
       </div>
       <div class="hint" id="serverVoiceDesc" style="margin-top:0.2rem; display:none"></div>
+      <!-- Session voice badge — randomly assigned per browser tab -->
+      <div class="session-voice-bar" id="sessionVoiceBar">
+        <span class="sv-label">Session voice</span>
+        <span class="sv-badge" id="chatVoiceBadge" data-gender="male">Ryan · British · Male</span>
+        <button type="button" class="sv-reroll" id="btnRerollVoice" title="Pick a different random voice for this session">&#x21BA;</button>
+      </div>
     </header>
     <div class="stage">
       <div class="orb-wrap" id="orb" data-state="idle" title="Tap to interrupt while speaking">
@@ -568,6 +615,56 @@
       const serverVoiceBar   = document.getElementById('serverVoiceBar');
       const serverVoiceSel   = document.getElementById('serverVoiceSel');
       const serverVoiceDesc  = document.getElementById('serverVoiceDesc');
+      const chatVoiceBadge   = document.getElementById('chatVoiceBadge');
+      const btnRerollVoice   = document.getElementById('btnRerollVoice');
+
+      /* ── Session voice — one random voice per browser tab ───────────────── */
+      const CHAT_VOICES = [
+        { voice: 'en-GB-RyanNeural',                   gender: 'Male',   label: 'Ryan · British · Male' },
+        { voice: 'en-GB-ThomasNeural',                 gender: 'Male',   label: 'Thomas · British · Male' },
+        { voice: 'en-GB-LibbyNeural',                  gender: 'Female', label: 'Libby · British · Female' },
+        { voice: 'en-GB-SoniaNeural',                  gender: 'Female', label: 'Sonia · British · Female' },
+        { voice: 'en-US-GuyNeural',                    gender: 'Male',   label: 'Guy · US · Male' },
+        { voice: 'en-US-ChristopherNeural',            gender: 'Male',   label: 'Christopher · US · Male' },
+        { voice: 'en-US-DavisNeural',                  gender: 'Male',   label: 'Davis · US · Male' },
+        { voice: 'en-US-AriaNeural',                   gender: 'Female', label: 'Aria · US · Female' },
+        { voice: 'en-US-JennyNeural',                  gender: 'Female', label: 'Jenny · US · Female' },
+        { voice: 'en-US-NancyNeural',                  gender: 'Female', label: 'Nancy · US · Female' },
+        { voice: 'en-IN-NeerjaExpressiveNeural',        gender: 'Female', label: 'Neerja · Indian · Female' },
+        { voice: 'en-IN-PrabhatNeural',                gender: 'Male',   label: 'Prabhat · Indian · Male' },
+        { voice: 'en-AU-WilliamNeural',                gender: 'Male',   label: 'William · Australian · Male' },
+        { voice: 'en-AU-NatashaNeural',                gender: 'Female', label: 'Natasha · Australian · Female' },
+        { voice: 'en-CA-LiamNeural',                   gender: 'Male',   label: 'Liam · Canadian · Male' },
+        { voice: 'en-CA-ClaraNeural',                  gender: 'Female', label: 'Clara · Canadian · Female' },
+      ];
+      const SS_CHAT_VOICE = 'friday.chat.voice';
+
+      function pickRandomChatVoice() {
+        return CHAT_VOICES[Math.floor(Math.random() * CHAT_VOICES.length)];
+      }
+
+      function initChatVoice() {
+        const stored = sessionStorage.getItem(SS_CHAT_VOICE);
+        const found  = stored && CHAT_VOICES.find((v) => v.voice === stored);
+        if (found) return found;
+        const picked = pickRandomChatVoice();
+        sessionStorage.setItem(SS_CHAT_VOICE, picked.voice);
+        return picked;
+      }
+
+      let chatVoiceInfo = initChatVoice();
+
+      function updateChatVoiceBadge() {
+        chatVoiceBadge.textContent = chatVoiceInfo.label;
+        chatVoiceBadge.dataset.gender = chatVoiceInfo.gender.toLowerCase();
+      }
+      updateChatVoiceBadge();
+
+      btnRerollVoice.addEventListener('click', () => {
+        chatVoiceInfo = pickRandomChatVoice();
+        sessionStorage.setItem(SS_CHAT_VOICE, chatVoiceInfo.voice);
+        updateChatVoiceBadge();
+      });
 
       /* ── Theme ──────────────────────────────────────────── */
       const LS_THEME = 'friday.theme';
@@ -941,7 +1038,7 @@
               'ngrok-skip-browser-warning': tunnelHeaders['ngrok-skip-browser-warning'],
               Accept: 'audio/wav, audio/mpeg, application/json',
             },
-            body : JSON.stringify({ text: cleaned }),
+            body : JSON.stringify({ text: cleaned, voice: chatVoiceInfo.voice }),
             cache: 'no-store',
           });
           const ct = (r.headers.get('content-type') || '').toLowerCase();

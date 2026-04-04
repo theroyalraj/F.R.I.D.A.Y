@@ -102,6 +102,11 @@ SPEAK_SCRIPT    = ROOT / "skill-gateway" / "scripts" / "friday-speak.py"
 
 POST_TTS_GAP  = float(os.environ.get("FRIDAY_AMBIENT_POST_TTS_GAP", "12"))   # wait this long after TTS ends
 
+VERBOSE_RATIO = float(os.environ.get("FRIDAY_AMBIENT_VERBOSE_RATIO", "0.30"))  # 30% of turns are longer / richer
+SONG_CHANCE   = float(os.environ.get("FRIDAY_AMBIENT_SONG_CHANCE",   "0.12"))  # 12% of ambient turns play music
+SONG_SECONDS  = int(os.environ.get(  "FRIDAY_AMBIENT_SONG_SECONDS",  "90"))    # how many seconds of the key part
+PLAY_SCRIPT   = ROOT / "skill-gateway" / "scripts" / "friday-play.py"
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-7s  %(message)s",
@@ -538,6 +543,97 @@ def fetch_this_day_history() -> str | None:
         return None
 
 
+def fetch_google_trends_india() -> str | None:
+    """What India is searching right now — Google Trends RSS (free, no key)."""
+    raw = _get("https://trends.google.com/trending/rss?geo=IN", timeout=7)
+    if not raw:
+        return None
+    try:
+        root  = ET.fromstring(raw.decode("utf-8", errors="replace"))
+        items = root.findall(".//item")
+        if not items:
+            return None
+        # Pick from top 8 so we get variety across calls
+        item  = random.choice(items[:8])
+        title = item.findtext("title") or ""
+        title = re.sub(r"<[^>]+>", "", title).strip()
+        # Include approx search volume if present in description
+        desc  = item.findtext("description") or ""
+        vol   = re.search(r"[\d,]+ searches", desc)
+        if title:
+            return f"{title} ({vol.group(0)})" if vol else title
+    except Exception as e:
+        log.debug("Google Trends RSS parse: %s", e)
+    return None
+
+
+def fetch_reddit_movies() -> str | None:
+    """Latest hot post title from r/movies (Reddit RSS, free, no key)."""
+    raw = _get(
+        "https://www.reddit.com/r/movies/hot.json?limit=10",
+        timeout=7,
+    )
+    if not raw:
+        return None
+    try:
+        data  = json.loads(raw)
+        posts = data.get("data", {}).get("children", [])
+        posts = [p["data"] for p in posts
+                 if not p["data"].get("stickied") and p["data"].get("title")]
+        if not posts:
+            return None
+        post  = random.choice(posts[:8])
+        title = post["title"].strip()
+        score = post.get("score", 0)
+        return f"{title[:180]} ({score:,} upvotes)" if score > 500 else title[:180]
+    except Exception as e:
+        log.debug("Reddit /r/movies fetch: %s", e)
+    return None
+
+
+def fetch_reddit_popular() -> str | None:
+    """Top viral post from r/popular right now (Reddit JSON, free, no key)."""
+    raw = _get(
+        "https://www.reddit.com/r/popular/hot.json?limit=15",
+        timeout=7,
+    )
+    if not raw:
+        return None
+    try:
+        data  = json.loads(raw)
+        posts = data.get("data", {}).get("children", [])
+        posts = [p["data"] for p in posts
+                 if not p["data"].get("stickied")
+                 and p["data"].get("title")
+                 and p["data"].get("score", 0) > 5000]
+        if not posts:
+            return None
+        post = random.choice(posts[:6])
+        return f"r/{post['subreddit']}: {post['title'][:160].strip()}"
+    except Exception as e:
+        log.debug("Reddit /r/popular fetch: %s", e)
+    return None
+
+
+def fetch_producthunt_top() -> str | None:
+    """Today's top Product Hunt launch (RSS, free, no key)."""
+    raw = _get("https://www.producthunt.com/feed", timeout=7)
+    if not raw:
+        return None
+    try:
+        root  = ET.fromstring(raw.decode("utf-8", errors="replace"))
+        items = root.findall(".//item")
+        if not items:
+            return None
+        item  = random.choice(items[:6])
+        title = item.findtext("title") or ""
+        title = re.sub(r"<[^>]+>", "", title).strip()
+        return title[:200] if title else None
+    except Exception as e:
+        log.debug("ProductHunt RSS parse: %s", e)
+    return None
+
+
 def fetch_word_of_day() -> str | None:
     """A random interesting word + definition (Wordnik free tier)."""
     raw = _get("https://api.wordnik.com/v4/words.json/wordOfTheDay", timeout=5)
@@ -562,8 +658,10 @@ def generate_line_ai(
     news_hint: str | None,
     music_hint: str | None,
     live_data: dict[str, str | None],
+    verbose: bool = False,
 ) -> tuple[str, str]:
-    """Returns (topic_key, spoken_text). Falls back to live data, then witty fallbacks."""
+    """Returns (topic_key, spoken_text). Falls back to live data, then witty fallbacks.
+    verbose=True asks for a longer paragraph (60-90 words) instead of a one-liner."""
     global _anthropic_ok, _anthropic_fail_until
 
     recent = set(_redis_recent_topics(r))
@@ -661,7 +759,13 @@ def generate_line_ai(
             "  'Thought that was worth it.' | 'Anyway.' | 'There you go.' | 'Bit of a rabbit hole, that.'\n"
             "Never ask a question. Never say 'What do you think?'\n\n"
 
-            "LENGTH: 25–50 words. Spoken out loud, it should take 8–15 seconds.\n\n"
+            + (
+                # Verbose mode: longer, storytelling style
+                "LENGTH: 60–90 words. Tell a little story about this — give context, a reaction, maybe a follow-up thought. "
+                "Three or four sentences. Should feel like a proper conversation starter, not a one-liner.\n\n"
+                if verbose else
+                "LENGTH: 25–50 words. Spoken out loud, it should take 8–15 seconds.\n\n"
+            ) +
 
             "NEVER: start with the user's name. Start with 'I'. Say 'Sure,' 'Certainly,' 'As an AI,' "
             "'Here is your,' 'I wanted to share,' or any formal preamble whatsoever."
@@ -821,6 +925,29 @@ def generate_line_ai(
                 f"Natural opener. 25–35 words."
             )
 
+        elif mode == "trending":
+            # Pull the richest available trending signal
+            trend    = live_data.get("trending")
+            movies   = live_data.get("movies")
+            viral    = live_data.get("viral")
+            product  = live_data.get("product")
+            signals  = [s for s in [trend, movies, viral, product] if s]
+            picked   = random.choice(signals) if signals else None
+            if picked:
+                prompt = (
+                    f"Trending right now: \"{picked}\"\n\n"
+                    f"Riff on this like you just spotted it while scrolling — "
+                    f"why it's blowing up, what it means, or why {USER_NAME} should care. "
+                    f"Be specific and opinionated. Natural opener. "
+                    + ("50–70 words — give it proper context." if verbose else "25–40 words.")
+                )
+            else:
+                prompt = (
+                    f"Share something that's trending or going viral right now in tech, entertainment, "
+                    f"Bollywood, cricket, or Indian internet culture. "
+                    f"Something fans are going crazy about. Natural opener. 25–40 words."
+                )
+
         else:  # mixed / default
             live_options = []
             if fact_line:
@@ -838,12 +965,13 @@ def generate_line_ai(
                 f"Natural opener, British tone, 25–40 words."
             )
 
-        word_limit = "30 to 50 words" if mode == "cricket" else "20 to 40 words"
+        word_limit = "50 to 80 words" if verbose else ("30 to 50 words" if mode == "cricket" else "20 to 40 words")
+        max_tok = 300 if verbose else (200 if mode == "cricket" else 130)
         try:
             client = ANTHROPIC_MOD.Anthropic(api_key=ANTHROPIC_KEY)
             msg = client.messages.create(
                 model=AI_MODEL,
-                max_tokens=200 if mode == "cricket" else 120,
+                max_tokens=max_tok,
                 system=system,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -952,47 +1080,165 @@ def generate_line_ai(
     return topic, line
 
 
+def _is_music_playing() -> bool:
+    """Return True if friday-play.py is currently running (PID file present + process alive)."""
+    pid_file = Path(tempfile.gettempdir()) / "friday-play.pid"
+    if not pid_file.exists():
+        return False
+    try:
+        pid = int(pid_file.read_text().strip())
+        # Try to signal PID 0 — raises if process is dead
+        os.kill(pid, 0)
+        return True
+    except (OSError, ValueError):
+        pid_file.unlink(missing_ok=True)
+        return False
+
+
+def generate_song_moment() -> dict | None:
+    """
+    Ask Claude to pick a famous song that fits the current mood/time.
+    Returns a dict:
+      spoken   — what Friday says before playing  (~15-20 words, natural opener)
+      query    — YouTube search string  (e.g. "Bohemian Rhapsody Queen")
+      section  — human-readable name for the iconic part (used in log)
+      seconds  — how long to play (60–120, tune-specific)
+    Returns None on any failure or if AI is unavailable.
+    """
+    if not (ANTHROPIC_KEY and ANTHROPIC_MOD):
+        return None
+    if not (_anthropic_ok or time.time() > _anthropic_fail_until):
+        return None
+
+    hour = time.localtime().tm_hour
+    if 5 <= hour < 9:
+        mood = "early morning, calm and fresh"
+    elif 9 <= hour < 12:
+        mood = "morning, productive and bright"
+    elif 12 <= hour < 15:
+        mood = "post-lunch, relaxed focus"
+    elif 15 <= hour < 18:
+        mood = "late afternoon, winding down"
+    elif 18 <= hour < 21:
+        mood = "evening, chill and reflective"
+    elif 21 <= hour < 24:
+        mood = "night, introspective"
+    else:
+        mood = "late night, quiet"
+
+    prompt = (
+        f"Pick a famous, iconic song that fits this mood: {mood}.\n"
+        f"User's interests: {USER_INTERESTS}. City: {USER_CITY or 'Hyderabad'}.\n\n"
+        "Rules:\n"
+        "- Pick a song with a universally recognisable section (famous intro, chorus, riff, or hook).\n"
+        "- Vary across genres: Bollywood, classic rock, 90s pop, hip-hop, film score, EDM — don't repeat the same artist.\n"
+        "- Pick the duration so the most iconic part plays: chorus = 60s, long intro = 90s, full riff = 75s.\n\n"
+        "Return ONLY valid JSON (no markdown, no extra text):\n"
+        '{"spoken":"<one casual sentence Friday says before playing, starting with a natural opener like '
+        "'I've had this stuck in my head' or 'Oh wait, this one — '. Max 20 words. No quotes around it.>\","
+        '"query":"<artist + song name optimised for YouTube, e.g. Bohemian Rhapsody Queen>",'
+        '"section":"<iconic part name, 4 words max, e.g. guitar solo>",'
+        '"seconds":<integer 60-120>}'
+    )
+
+    try:
+        client = ANTHROPIC_MOD.Anthropic(api_key=ANTHROPIC_KEY)
+        msg = client.messages.create(
+            model=AI_MODEL,
+            max_tokens=200,
+            system=(
+                f"You are Friday, a British AI assistant for {USER_NAME}. "
+                "Return ONLY valid JSON with no markdown fences or extra text."
+            ),
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = (msg.content[0].text or "").strip()
+        # Strip accidental markdown fences
+        raw = re.sub(r"^```[a-z]*\n?", "", raw, flags=re.IGNORECASE)
+        raw = re.sub(r"\n?```$", "", raw)
+        data = json.loads(raw)
+        spoken  = (data.get("spoken") or "").strip()
+        query   = (data.get("query")  or "").strip()
+        section = (data.get("section") or "iconic part").strip()
+        seconds = max(45, min(120, int(data.get("seconds", SONG_SECONDS))))
+        if spoken and query:
+            return {"spoken": spoken, "query": query, "section": section, "seconds": seconds}
+    except Exception as e:
+        log.debug("generate_song_moment failed: %s", e)
+    return None
+
+
+def play_song_ambient(query: str, seconds: int) -> None:
+    """
+    Launch friday-play.py in the background (non-blocking).
+    The play script has its own fade / PID management.
+    """
+    if not PLAY_SCRIPT.exists():
+        log.warning("PLAY_SCRIPT not found: %s", PLAY_SCRIPT)
+        return
+    try:
+        subprocess.Popen(
+            [sys.executable, str(PLAY_SCRIPT), query, f"--seconds={seconds}"],
+            env={**os.environ},
+            **_no_window(),
+        )
+        log.info("[song] playing %r for %ds", query, seconds)
+    except Exception as e:
+        log.warning("play_song_ambient failed: %s", e)
+
+
 def pick_mode() -> str:
     _ALL_MODES = (
         "funny", "informational", "wisdom", "music_comment",
         "cricket", "weather", "science", "space", "history",
         "philosophy", "startup", "bollywood", "language", "psychology",
+        "trending", "song_moment",
     )
     if TONE in _ALL_MODES:
         return TONE
+
+    # Song moment: inject based on SONG_CHANCE — but never if music already playing
+    if random.random() < SONG_CHANCE and not _is_music_playing():
+        hour = time.localtime().tm_hour
+        if 7 <= hour <= 23:  # don't play music late night / very early
+            return "song_moment"
+
     hour = time.localtime().tm_hour
     roll = random.random()
-    if 6 <= hour < 11:        # morning — grounded, curious, a bit of news
-        if roll < 0.18: return "cricket"
-        if roll < 0.32: return "informational"
-        if roll < 0.42: return "weather"
-        if roll < 0.52: return "science"
-        if roll < 0.60: return "history"
-        if roll < 0.72: return "funny"
-        if roll < 0.82: return "startup"
-        if roll < 0.90: return "psychology"
+    if 6 <= hour < 11:        # morning — curious, news, trending
+        if roll < 0.15: return "cricket"
+        if roll < 0.28: return "trending"
+        if roll < 0.38: return "informational"
+        if roll < 0.47: return "weather"
+        if roll < 0.56: return "science"
+        if roll < 0.63: return "history"
+        if roll < 0.74: return "funny"
+        if roll < 0.83: return "startup"
+        if roll < 0.91: return "psychology"
         return "wisdom"
-    if 11 <= hour < 17:       # day — wider mix, energetic
-        if roll < 0.18: return "cricket"
-        if roll < 0.32: return "funny"
-        if roll < 0.44: return "science"
-        if roll < 0.54: return "space"
-        if roll < 0.63: return "startup"
-        if roll < 0.71: return "bollywood"
-        if roll < 0.79: return "informational"
-        if roll < 0.87: return "language"
-        if roll < 0.93: return "psychology"
+    if 11 <= hour < 17:       # day — widest mix
+        if roll < 0.14: return "cricket"
+        if roll < 0.24: return "trending"
+        if roll < 0.35: return "funny"
+        if roll < 0.45: return "science"
+        if roll < 0.53: return "space"
+        if roll < 0.61: return "startup"
+        if roll < 0.69: return "bollywood"
+        if roll < 0.77: return "informational"
+        if roll < 0.84: return "language"
+        if roll < 0.91: return "psychology"
         return "wisdom"
-    # evening / night — reflective, curious, broader
-    if roll < 0.15: return "cricket"
-    if roll < 0.28: return "funny"
-    if roll < 0.40: return "philosophy"
-    if roll < 0.52: return "history"
-    if roll < 0.62: return "science"
-    if roll < 0.70: return "space"
+    # evening / night — reflective, broader, trending
+    if roll < 0.13: return "cricket"
+    if roll < 0.24: return "trending"
+    if roll < 0.35: return "funny"
+    if roll < 0.46: return "philosophy"
+    if roll < 0.56: return "history"
+    if roll < 0.64: return "science"
+    if roll < 0.71: return "space"
     if roll < 0.78: return "bollywood"
-    if roll < 0.86: return "language"
-    if roll < 0.93: return "wisdom"
+    if roll < 0.85: return "language"
+    if roll < 0.92: return "wisdom"
     return "psychology"
 
 
@@ -1313,14 +1559,18 @@ def _refresh_live_data() -> None:
     global _live_cache, _live_cache_ts
     log.info("Refreshing live data (cricket, weather, facts, jokes, arxiv, space, history)...")
     _live_cache = {
-        "cricket": fetch_cricket_news(),
-        "weather": fetch_weather_brief(),
-        "fact":    fetch_random_fact(),
-        "joke":    fetch_dad_joke(),
-        "news":    fetch_news_headline(),
-        "arxiv":   fetch_arxiv_headline(),
-        "space":   fetch_space_news(),
-        "history": fetch_this_day_history(),
+        "cricket":  fetch_cricket_news(),
+        "weather":  fetch_weather_brief(),
+        "fact":     fetch_random_fact(),
+        "joke":     fetch_dad_joke(),
+        "news":     fetch_news_headline(),
+        "arxiv":    fetch_arxiv_headline(),
+        "space":    fetch_space_news(),
+        "history":  fetch_this_day_history(),
+        "trending": fetch_google_trends_india(),
+        "movies":   fetch_reddit_movies(),
+        "viral":    fetch_reddit_popular(),
+        "product":  fetch_producthunt_top(),
     }
     _live_cache_ts = time.time()
     for k, v in _live_cache.items():
