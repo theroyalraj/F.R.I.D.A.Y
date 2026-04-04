@@ -2,8 +2,9 @@
 """
 friday-ambient.py -- Jarvis-style ambient intelligence for OpenClaw.
 
-Live data sources (no API keys required):
-  - Cricket news: ESPN Cricinfo RSS
+Live data sources (no API keys required unless noted):
+  - Cricket: ESPN Cricinfo RSS (English), Amar Ujala cricket RSS (Hindi headlines)
+  - Optional live score one-liner: set CRICAPI_API_KEY (free tier at cricapi.com)
   - Weather: wttr.in (free, no key)
   - Random facts: uselessfacts.jsph.pl
   - Dad jokes: icanhazdadjoke.com
@@ -97,6 +98,35 @@ USER_NAME      = os.environ.get("FRIDAY_USER_NAME",      "sir").strip()
 USER_AGE       = os.environ.get("FRIDAY_USER_AGE",       "").strip()
 USER_CITY      = os.environ.get("FRIDAY_USER_CITY",      "").strip()
 USER_INTERESTS = os.environ.get("FRIDAY_USER_INTERESTS", "technology, cricket, AI, startups").strip()
+
+# Cricket / IPL: Hindi delivery + optional CricAPI live scores (see .env.example)
+CRICAPI_API_KEY = os.environ.get("CRICAPI_API_KEY", "").strip()
+
+
+def _interests_cricket_ipl() -> bool:
+    u = USER_INTERESTS.lower()
+    return "cricket" in u or "ipl" in u
+
+
+def _cricket_hindi_enabled() -> bool:
+    """Hindi/Hinglish cricket ambient when true. Env overrides; default follows interests."""
+    v = os.environ.get("FRIDAY_AMBIENT_CRICKET_HINDI", "").strip().lower()
+    if v in ("0", "false", "no", "off"):
+        return False
+    if v in ("1", "true", "yes", "on"):
+        return True
+    return _interests_cricket_ipl()
+
+
+def _cricket_tts_voice() -> str | None:
+    """Edge TTS voice for cricket turns when Hindi cricket is on (empty = default session voice)."""
+    if not _cricket_hindi_enabled():
+        return None
+    v = os.environ.get("FRIDAY_AMBIENT_CRICKET_VOICE", "").strip()
+    if v.lower() in ("0", "false", "no", "off", "default"):
+        return None
+    return v or "hi-IN-SwaraNeural"
+
 
 _db_raw = os.environ.get("FRIDAY_AMBIENT_DB_PATH", "data/friday.db").strip()
 DB_PATH = Path(_db_raw) if Path(_db_raw).is_absolute() else ROOT / _db_raw
@@ -414,6 +444,125 @@ def fetch_cricket_news() -> str | None:
         return None
 
 
+def fetch_cricket_news_hindi() -> str | None:
+    """Hindi cricket headline (Amar Ujala RSS) or Google News hi search fallback."""
+    raw = _get("https://www.amarujala.com/rss/cricket.xml", timeout=8)
+    if raw:
+        try:
+            root = ET.fromstring(raw.decode("utf-8", errors="replace"))
+            items = root.findall(".//item")
+            if items:
+                item = random.choice(items[:6])
+                title = item.findtext("title") or ""
+                title = re.sub(r"<[^>]+>", "", title).strip()
+                if title:
+                    return title[:220]
+        except Exception as e:
+            log.debug("Amar Ujala cricket RSS parse failed: %s", e)
+
+    q = urllib.parse.quote("IPL क्रिकेट लाइव स्कोर")
+    raw = _get(
+        f"https://news.google.com/rss/search?q={q}&hl=hi&gl=IN&ceid=IN:hi",
+        timeout=8,
+    )
+    if not raw:
+        return None
+    try:
+        root = ET.fromstring(raw.decode("utf-8", errors="replace"))
+        items = root.findall(".//item")
+        if not items:
+            return None
+        item = random.choice(items[:8])
+        title = item.findtext("title") or ""
+        title = re.sub(r"\s+-\s+\S+$", "", title).strip()
+        title = re.sub(r"<[^>]+>", "", title).strip()
+        return title[:220] if title else None
+    except Exception as e:
+        log.debug("Google News hi cricket RSS failed: %s", e)
+        return None
+
+
+def _format_cricapi_match(m: dict[str, Any]) -> str | None:
+    """Turn one CricAPI currentMatches entry into a short spoken score line."""
+    name = (m.get("name") or "").strip()
+    # Skip teaser / author-slug rows mistaken for fixtures
+    if name and " " not in name and "-" in name and len(name) < 40:
+        return None
+    parts: list[str] = []
+    if name:
+        parts.append(name)
+    score_blocks = m.get("score")
+    if isinstance(score_blocks, list):
+        for blk in score_blocks[:2]:
+            if not isinstance(blk, dict):
+                continue
+            inn = (blk.get("inning") or blk.get("name") or "").strip()
+            r = blk.get("r")
+            w = blk.get("w")
+            o = blk.get("o")
+            if r is not None and w is not None and o is not None:
+                line = f"{inn}: {r} for {w} in {o} overs".strip() if inn else f"{r} for {w} in {o} overs"
+                parts.append(line)
+            elif r is not None:
+                parts.append(str(r))
+    status = (m.get("status") or m.get("matchType") or "").strip()
+    if status and status.lower() not in (name or "").lower():
+        parts.append(status)
+    out = " — ".join(p for p in parts if p)[:240]
+    if out and not re.search(r"\d", out):
+        return None
+    return out or None
+
+
+def fetch_cricket_scores_cricapi() -> str | None:
+    """Live / recent match one-liner via CricAPI (requires CRICAPI_API_KEY)."""
+    if not CRICAPI_API_KEY:
+        return None
+    q = urllib.parse.quote(CRICAPI_API_KEY, safe="")
+    raw = _get(f"https://api.cricapi.com/v1/currentMatches?apikey={q}", timeout=10)
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+        if (data.get("status") or "").lower() != "success":
+            log.debug("cricapi currentMatches: %s", data.get("reason") or data.get("error"))
+            return None
+        matches = data.get("data") or []
+        if not matches:
+            return None
+        # Prefer an IPL / T20 league match if the name hints it
+        def _rank(mm: dict[str, Any]) -> tuple[int, str]:
+            n = (mm.get("name") or "").lower()
+            st = (mm.get("status") or "").lower()
+            pri = 0
+            if "ipl" in n or "indian premier" in n:
+                pri -= 3
+            if "live" in st or mm.get("matchStarted") and not mm.get("matchEnded"):
+                pri -= 2
+            return pri, n
+
+        matches = sorted(matches, key=_rank)
+        for m in matches:
+            if isinstance(m, dict):
+                line = _format_cricapi_match(m)
+                if line:
+                    return line
+    except Exception as e:
+        log.debug("cricapi parse failed: %s", e)
+    return None
+
+
+def fetch_cricket_combined() -> str | None:
+    """Headline + optional live score for prompts and TTS (language follows _cricket_hindi_enabled)."""
+    score = fetch_cricket_scores_cricapi()
+    if _cricket_hindi_enabled():
+        head = fetch_cricket_news_hindi() or fetch_cricket_news()
+    else:
+        head = fetch_cricket_news() or fetch_cricket_news_hindi()
+    bits = [b for b in (score, head) if b]
+    return " — ".join(bits) if bits else None
+
+
 def fetch_weather_brief() -> str | None:
     """One-line weather from wttr.in (completely free, no key)."""
     city = USER_CITY or "Hyderabad"
@@ -670,10 +819,13 @@ def generate_line_ai(
     music_hint: str | None,
     live_data: dict[str, str | None],
     verbose: bool = False,
+    cricket_hindi: bool | None = None,
 ) -> tuple[str, str]:
     """Returns (topic_key, spoken_text). Falls back to live data, then witty fallbacks.
     verbose=True asks for a longer paragraph (60-90 words) instead of a one-liner."""
     global _anthropic_ok, _anthropic_fail_until
+
+    cin = _cricket_hindi_enabled() if cricket_hindi is None else cricket_hindi
 
     recent = set(_redis_recent_topics(r))
     now = time.time()
@@ -699,8 +851,9 @@ def generate_line_ai(
         topic = f"{topic}:alt{random.randint(1, 999)}"
 
     # -- Try cached line first
+    _hi_flag = int(cin) if mode == "cricket" else 0
     cache_key = "friday:ambient:content_cache:" + hashlib.sha256(
-        f"{topic}|{mode}|{USER_INTERESTS}".encode()
+        f"{topic}|{mode}|{USER_INTERESTS}|{_hi_flag}".encode()
     ).hexdigest()
     try:
         hit = r.get(cache_key)
@@ -762,6 +915,8 @@ def generate_line_ai(
         # ── System prompt: persona + reaction rules ─────────────────────────
         system = (
             f"You are Friday — {USER_NAME}'s personal AI. Think Jarvis but warmer, sharper, occasionally irreverent.\n\n"
+            "The human can talk however they like — casual, terse, no need to match your tone or say 'sir'. "
+            "You are optional background colour, not an etiquette coach.\n\n"
 
             f"Right now you are NOT an assistant — you're someone sitting nearby who just spotted something "
             f"interesting and absolutely cannot help mentioning it.\n\n"
@@ -812,23 +967,33 @@ def generate_line_ai(
             "ABSOLUTE BANS: never start with the user's name. Never start with 'I'. "
             "Never say 'Sure,' 'Certainly,' 'As an AI,' 'Here is,' 'I wanted to share,' "
             "or any formal preamble. The very first word must feel mid-thought."
+            + (
+                "\n\nCRICKET — HINDI ONLY FOR THIS TURN:\n"
+                "Write the full line in Hindi using Devanagari script. Sound like live IPL / cricket commentary — "
+                "energy, opinion, one sharp beat. Team and player names may stay in Roman (e.g. CSK, Kohli).\n"
+                "Start mid-thought with a natural Hindi opener (अरे, देखो, अभी, सुनो, वैसे, यार). "
+                "No English sentences.\n"
+                if mode == "cricket" and cin else ""
+            )
         )
 
         # ── Mode-specific user prompts ─────────────────────────────────────
         if mode == "cricket":
             if cricket_line:
                 prompt = (
-                    f"Cricket/IPL headline to riff on: \"{cricket_line}\"\n\n"
+                    f"Cricket/IPL context (headline and/or live score — react to this):\n\"{cricket_line}\"\n\n"
                     f"Turn this into a casual spoken comment — like you just glanced at your phone and saw it. "
-                    f"Mention teams or players if they're in the headline. "
-                    f"Sound like a genuine fan, not a commentator. "
-                    f"Start with a natural opener (see system rules). 30–50 words."
+                    f"Mention teams or players if they're named. "
+                    f"Sound like a genuine fan, not a formal broadcaster. "
+                    f"Start with a natural opener (see system rules). "
+                    + ("30–50 words — Hindi only (Devanagari)." if cin else "30–50 words.")
                 )
             else:
                 prompt = (
                     f"Share a cricket thought — IPL, Indian team, a classic match moment, or a current season observation. "
                     f"Sound like an enthusiastic fan chatting casually. "
-                    f"Start with a natural opener. 25–40 words."
+                    f"Start with a natural opener. "
+                    + ("25–40 words — Hindi only (Devanagari)." if cin else "25–40 words.")
                 )
 
         elif mode == "music_comment":
@@ -1041,15 +1206,25 @@ def generate_line_ai(
 
     # -- Live-data fallbacks (no AI needed — natural openers baked in) ---------
     if mode == "cricket" and cricket_line:
-        line = random.choice([
-            f"Oh so I just saw this — {cricket_line}. Honestly the IPL just keeps delivering.",
-            f"So I was checking cricket and — {cricket_line}. Should be a good one.",
-            f"Quick cricket one — {cricket_line}. Keep an eye on this.",
-            f"Right, so cricket-wise — {cricket_line}. Thought you'd want that.",
-            f"This just dropped on Cricinfo — {cricket_line}. The IPL this season has been something else.",
-            f"I learnt something just now — {cricket_line}. Interesting development.",
-            f"Oh and cricket — {cricket_line}. Make of that what you will.",
-        ])
+        if cin:
+            line = random.choice([
+                f"अभी देखा — {cricket_line}. आईपीएल तो रोज़ कोई नया ट्विस्ट ले आती है।",
+                f"देखो ना — {cricket_line}. मैच का मिज़ाज पूरा बदल सकता है।",
+                f"क्रिकेट अपडेट — {cricket_line}. आंखें खुली रखना।",
+                f"अरे यार — {cricket_line}. ये सीज़न सच में ज़ोरदार चल रहा है।",
+                f"स्कोर कार्ड की बात — {cricket_line}. दिल थोड़ा तेज़ धड़कता है ना।",
+                f"सुनो — {cricket_line}. ऐसे मोड़ पर कॉमेंट्री और भी मज़ेदार लगती है।",
+            ])
+        else:
+            line = random.choice([
+                f"Oh so I just saw this — {cricket_line}. Honestly the IPL just keeps delivering.",
+                f"So I was checking cricket and — {cricket_line}. Should be a good one.",
+                f"Quick cricket one — {cricket_line}. Keep an eye on this.",
+                f"Right, so cricket-wise — {cricket_line}. Thought you'd want that.",
+                f"This just dropped on Cricinfo — {cricket_line}. The IPL this season has been something else.",
+                f"I learnt something just now — {cricket_line}. Interesting development.",
+                f"Oh and cricket — {cricket_line}. Make of that what you will.",
+            ])
     elif mode == "weather" and weather_line:
         line = random.choice([
             f"Oh also — {weather_line}. Dress accordingly.",
@@ -1077,11 +1252,18 @@ def generate_line_ai(
             f"Okay this is actually interesting — {fact_line}.",
         ])
     elif cricket_line and random.random() < 0.35:
-        line = random.choice([
-            f"Oh and cricket — {cricket_line}. Thought you'd want that.",
-            f"Random one — {cricket_line}. Just keeping you in the loop.",
-            f"Slightly off topic but — {cricket_line}.",
-        ])
+        if cin:
+            line = random.choice([
+                f"और हाँ क्रिकेट — {cricket_line}. तुम्हें पता होना चाहिए।",
+                f"एक और अपडेट — {cricket_line}।",
+                f"थोड़ा हट के — {cricket_line}।",
+            ])
+        else:
+            line = random.choice([
+                f"Oh and cricket — {cricket_line}. Thought you'd want that.",
+                f"Random one — {cricket_line}. Just keeping you in the loop.",
+                f"Slightly off topic but — {cricket_line}.",
+            ])
     elif weather_line and random.random() < 0.2:
         line = f"Glanced at the weather — {weather_line}. Nothing dramatic."
     elif fact_line and random.random() < 0.4:
@@ -1512,16 +1694,23 @@ def _no_window() -> dict:
     return {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
 
 
-def speak_blocking(text: str) -> float:
+def speak_blocking(text: str, voice: str | None = None) -> float:
     t0 = time.perf_counter()
     if not text.strip():
         return 0.0
     if should_defer_voice_for_cursor():
         return 0.0
+    env = {**os.environ, "FRIDAY_TTS_USE_SESSION_STICKY_VOICE": "false"}
+    if voice:
+        env["FRIDAY_TTS_VOICE"] = voice
+    else:
+        av = os.environ.get("FRIDAY_AMBIENT_TTS_VOICE", "").strip()
+        if av:
+            env["FRIDAY_TTS_VOICE"] = av
     try:
         subprocess.run(
             [sys.executable, str(SPEAK_SCRIPT), text.strip()],
-            env={**os.environ},
+            env=env,
             capture_output=True,
             timeout=120,
             **_no_window(),
@@ -1556,9 +1745,13 @@ def speak_child(text: str | None = None) -> None:
         return
     env = {
         **os.environ,
+        "FRIDAY_TTS_USE_SESSION_STICKY_VOICE": "false",
         "FRIDAY_TTS_RATE":  SUB_VOICE_RATE,
         "FRIDAY_TTS_PITCH": SUB_VOICE_PITCH,
     }
+    subv = os.environ.get("FRIDAY_AMBIENT_SUB_TTS_VOICE", "").strip()
+    if subv:
+        env["FRIDAY_TTS_VOICE"] = subv
     try:
         subprocess.Popen(
             [sys.executable, str(SPEAK_SCRIPT), phrase.strip()],
@@ -1658,7 +1851,7 @@ def _refresh_live_data() -> None:
     global _live_cache, _live_cache_ts
 
     _FETCHERS: dict[str, Any] = {
-        "cricket":  fetch_cricket_news,
+        "cricket":  fetch_cricket_combined,
         "weather":  fetch_weather_brief,
         "fact":     fetch_random_fact,
         "joke":     fetch_dad_joke,
@@ -1899,11 +2092,12 @@ def main() -> None:
                     # Pop pre-generated content from queue first (queue is
                     # filled by non-song modes only)
                     line = None
-                    try:
-                        raw = r.rpop("friday:ambient:content_queue")
-                        line = raw if isinstance(raw, str) else None
-                    except Exception:
-                        pass
+                    if not (mode == "cricket" and _cricket_hindi_enabled()):
+                        try:
+                            raw = r.rpop("friday:ambient:content_queue")
+                            line = raw if isinstance(raw, str) else None
+                        except Exception:
+                            pass
 
                     # Verbose mode: 30% of turns get longer storytelling output
                     verbose = random.random() < VERBOSE_RATIO
@@ -1941,7 +2135,8 @@ def main() -> None:
                     last_ambient = time.time()
                     _mark_spoken(r, line)
 
-                    d1 = int(speak_blocking(line) * 1000)
+                    cv = _cricket_tts_voice() if mode == "cricket" else None
+                    d1 = int(speak_blocking(line, voice=cv) * 1000)
 
                     # Reset clocks from end of speech (gap timer starts here)
                     last_ambient = time.time()
