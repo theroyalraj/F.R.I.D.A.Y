@@ -1,0 +1,41 @@
+---
+description: Narrate acknowledgement and ask questions before planning or executing any task
+alwaysApply: true
+---
+
+# Acknowledge Before Planning
+
+Before thinking about or presenting any plan, **always** narrate an acknowledgement out loud first using `friday-speak.py`.
+
+## Required Steps (in order)
+
+1. **Speak acknowledgement** — say you've understood the request
+2. **Ask any clarifying questions** — if anything is ambiguous, ask now before proceeding
+3. **Only then** — begin planning or executing
+
+## Acknowledgement command
+
+```powershell
+cd d:\code\openclaw; python skill-gateway/scripts/friday-speak.py "Got it, sir. [one sentence restatement of the task]."
+```
+
+## Examples
+
+- User: "Add a new TTS endpoint" → speak `"Got it, sir. Adding a new T T S endpoint to the skill gateway."` → then plan
+- User: "Fix the mic backoff bug" → speak `"Got it, sir. Investigating and fixing the mic backoff bug."` → then fix
+- User: "Refactor the memory module" → speak `"Got it, sir. Refactoring the memory module."` → then proceed
+
+## If you have questions
+
+Speak the question out loud **and** show it in your text reply before doing any work:
+
+```powershell
+cd d:\code\openclaw; python skill-gateway/scripts/friday-speak.py "Before I proceed, sir — [question]?"
+```
+
+Then wait for the answer before planning or coding.
+
+## Do NOT
+
+- Silently start thinking or coding without narrating first
+- Ask questions after you've already started planning

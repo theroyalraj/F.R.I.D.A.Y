@@ -33,6 +33,24 @@ cd d:\code\openclaw; python skill-gateway/scripts/friday-speak.py "Done. [verbos
 - Always end with **"sir."**
 - Stay in Jarvis / FRIDAY character — confident, clear, British-assistant tone.
 
+### ⚠️ ALWAYS write for the human ear — never the eye
+
+The text goes directly to a voice synthesiser. Every word must sound natural when spoken aloud.
+
+**DO:**
+- Spell out numbers: "twelve" not "12", "one hundred" not "100"
+- Spell out units: "twelve seconds" not "12s", "five hundred milliseconds" not "500ms"
+- Name files conversationally: "the ambient script" not "friday-ambient.py", "the speak script" not "friday-speak.py"
+- Name env vars conversationally: "the post-TTS gap setting" not "FRIDAY_AMBIENT_POST_TTS_GAP"
+- Say "slash" for paths if you must mention them: "voice slash set-voice"
+
+**NEVER:**
+- Use markdown: no `**bold**`, no `# headings`, no `- bullet points`, no backticks
+- Use variable names or env var syntax: no `FRIDAY_TTS_DEVICE=`, no `_normalize_for_speech()`
+- Use symbols that sound wrong spoken: no `→`, `|`, `%`, `—` mid-sentence
+- Use code-like syntax: no `POST_TTS_GAP=12s`, no `(exit_code: 0)`, no `[friday-speak]`
+- Truncate to save characters — the synthesiser can handle length; robotic compression sounds bad
+
 ### Examples of good verbose summaries
 
 ```

@@ -62,8 +62,9 @@ DEVICE_HINT  = os.environ.get("FRIDAY_TTS_DEVICE",   "Echo Dot")
 AGENT_URL    = os.environ.get("PC_AGENT_URL",         "http://127.0.0.1:3847").rstrip("/")
 MIC_INDEX    = os.environ.get("LISTEN_DEVICE_INDEX")
 LANGUAGE     = os.environ.get("LISTEN_LANGUAGE",     "en-US")
-PHRASE_LIMIT = float(os.environ.get("LISTEN_PHRASE_LIMIT", "8"))
-SILENCE_SEC  = float(os.environ.get("LISTEN_SILENCE_SEC",  "1.2"))
+PHRASE_LIMIT     = float(os.environ.get("LISTEN_PHRASE_LIMIT",      "8"))
+SILENCE_SEC      = float(os.environ.get("LISTEN_SILENCE_SEC",       "1.2"))
+ENERGY_THRESHOLD = float(os.environ.get("LISTEN_ENERGY_THRESHOLD",  "300"))
 WAKE_WORD    = os.environ.get("FRIDAY_LISTEN_WAKE",  "").strip().lower()
 SPEAK_SCRIPT = root / "skill-gateway" / "scripts" / "friday-speak.py"
 GATEWAY_URL  = os.environ.get("GATEWAY_URL", "http://127.0.0.1:3848").rstrip("/")
@@ -89,9 +90,10 @@ def _env_bool(name: str, default: bool = False) -> bool:
 # Monitor UI still shows PROCESSING. Set FRIDAY_LISTEN_SPEAK_ACK=true to hear the ack.
 SPEAK_ACK = _env_bool("FRIDAY_LISTEN_SPEAK_ACK", False)
 
-MIC_INDEX  = int(MIC_INDEX) if MIC_INDEX else None
-PLAY_PID   = Path(tempfile.gettempdir()) / "friday-play.pid"
-TTS_TS_FILE = Path(tempfile.gettempdir()) / "friday-tts-ts"
+MIC_INDEX       = int(MIC_INDEX) if MIC_INDEX else None
+PLAY_PID        = Path(tempfile.gettempdir()) / "friday-play.pid"
+TTS_TS_FILE     = Path(tempfile.gettempdir()) / "friday-tts-ts"
+TTS_ACTIVE_FILE = Path(tempfile.gettempdir()) / "friday-tts-active"
 
 
 def _write_last_spoken_ts() -> None:
@@ -196,12 +198,30 @@ def _speak_fallback(text: str):
     except Exception as e:
         log.warning("speak SAPI fallback failed: %s", e)
 
+def _wait_for_tts_clear(timeout: float = 45.0) -> None:
+    """Block until no other friday-speak.py instance is playing audio."""
+    deadline = time.time() + timeout
+    while TTS_ACTIVE_FILE.exists():
+        try:
+            age = time.time() - TTS_ACTIVE_FILE.stat().st_mtime
+            if age > 120:          # stale file from crashed process
+                TTS_ACTIVE_FILE.unlink(missing_ok=True)
+                break
+        except OSError:
+            break
+        if time.time() > deadline:
+            break
+        time.sleep(0.25)
+
+
 def speak(text: str):
     log.info("-> speak: %s", text[:80])
     def _run():
         _speaking.set()
         try:
             with _speak_lock:
+                # Wait for any ambient or other TTS to finish before we start
+                _wait_for_tts_clear()
                 try:
                     result = subprocess.run(
                         [sys.executable, str(SPEAK_SCRIPT), text],
@@ -473,7 +493,7 @@ def record_phrase(mic_idx: int | None) -> np.ndarray | None:
     Returns int16 mono numpy array, or None if silence throughout.
     """
     BLOCK      = int(SAMPLE_RATE * 0.1)   # 100 ms chunks
-    THRESHOLD  = 300                        # RMS energy threshold for speech
+    THRESHOLD  = ENERGY_THRESHOLD
     MAX_CHUNKS = int(PHRASE_LIMIT / 0.1)
     SILENCE_CHUNKS = max(1, int(SILENCE_SEC / 0.1))
 

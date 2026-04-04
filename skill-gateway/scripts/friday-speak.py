@@ -62,6 +62,9 @@ elif "--stdout" in _args:
     _args  = [a for a in _args if a != "--stdout"]
 
 TEXT   = " ".join(_args).strip()
+# Normalise immediately — every downstream path (cache key, edge-tts, SAPI) gets clean text.
+# The function is defined later in this file; we call it after full module load below.
+_RAW_TEXT = TEXT
 VOICE  = os.environ.get("FRIDAY_TTS_VOICE",  "en-GB-RyanNeural")
 RATE   = os.environ.get("FRIDAY_TTS_RATE",   "+0%")
 PITCH  = os.environ.get("FRIDAY_TTS_PITCH",  "+0Hz")
@@ -82,7 +85,8 @@ if CACHE_DIR is not None:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 # Timestamp file for ambient silence monitor (playback paths only; not --output/--stdout).
-TTS_TS_FILE = Path(tempfile.gettempdir()) / "friday-tts-ts"
+TTS_TS_FILE     = Path(tempfile.gettempdir()) / "friday-tts-ts"
+TTS_ACTIVE_FILE = Path(tempfile.gettempdir()) / "friday-tts-active"  # exists while speech is playing
 
 
 def _write_last_spoken_ts() -> None:
@@ -91,6 +95,137 @@ def _write_last_spoken_ts() -> None:
         TTS_TS_FILE.write_text(str(time.time()), encoding="utf-8")
     except OSError:
         pass
+
+
+# ── Human-speech normaliser ────────────────────────────────────────────────────
+_SMALL = [
+    "zero","one","two","three","four","five","six","seven","eight","nine","ten",
+    "eleven","twelve","thirteen","fourteen","fifteen","sixteen","seventeen",
+    "eighteen","nineteen","twenty",
+]
+
+def _n2w(n: str) -> str:
+    try:
+        i = int(float(n))
+        if 0 <= i <= 20:
+            return _SMALL[i]
+    except (ValueError, IndexError):
+        pass
+    return n
+
+
+def normalize_for_speech(text: str) -> str:
+    """
+    Convert any text to clean, speakable English before handing it to edge-tts.
+
+    Strips markdown, code, URLs, symbols, and converts technical patterns
+    (env var names, units, percentages, paths) to natural words.
+    """
+    if not text:
+        return text
+    t = text
+
+    # Code blocks and inline code
+    t = re.sub(r"```[\s\S]*?```", " ", t)
+    t = re.sub(r"`[^`]+`", " ", t)
+
+    # Markdown headings
+    t = re.sub(r"^#{1,6}\s+", "", t, flags=re.MULTILINE)
+
+    # Bold / italic
+    t = re.sub(r"\*{1,3}([^*]+)\*{1,3}", r"\1", t)
+    t = re.sub(r"_{1,2}([^_]+)_{1,2}", r"\1", t)
+
+    # Markdown links [label](url) → label
+    t = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", t)
+
+    # Bare URLs
+    t = re.sub(r"https?://\S+", "", t)
+
+    # Bullet / list leaders
+    t = re.sub(r"^[ \t]*[-*•◦▸▶]+[ \t]+", "", t, flags=re.MULTILINE)
+    t = re.sub(r"^\s*\d+[.)]\s+", "", t, flags=re.MULTILINE)
+
+    # Markdown horizontal rules
+    t = re.sub(r"^[-*_]{3,}\s*$", "", t, flags=re.MULTILINE)
+
+    # HTML entities
+    t = (t.replace("&amp;", " and ").replace("&lt;", " less than ")
+          .replace("&gt;", " greater than ").replace("&rarr;", " to ")
+          .replace("&larr;", " from ").replace("&nbsp;", " "))
+    t = re.sub(r"&#\d+;", " ", t)
+
+    # Emoji (basic Unicode ranges)
+    t = re.sub(r"[\U0001F000-\U0001FFFF]", " ", t)
+    t = re.sub(r"[\u2600-\u27BF]", " ", t)
+
+    # KEY=VALUE env vars  →  "key set to value"
+    t = re.sub(
+        r"\b([A-Z][A-Z0-9_]{2,})=([^\s,]+)",
+        lambda m: f"{m.group(1).lower().replace('_', ' ')} set to {m.group(2)}",
+        t,
+    )
+    # lowercase key=value  e.g.  silence=12s  →  silence: twelve seconds
+    t = re.sub(
+        r"\b([a-z][a-z_]{2,})=(\S+)",
+        lambda m: f"{m.group(1).replace('_', ' ')}: {m.group(2)}",
+        t,
+    )
+    # (key_word: value) parentheticals  e.g. (exit_code: 0)  →  exit code: zero
+    t = re.sub(
+        r"\(([a-z][a-z_]+):\s*([^)]+)\)",
+        lambda m: m.group(1).replace("_", " ") + ": " + m.group(2).strip(),
+        t,
+    )
+
+    # ALL_CAPS identifiers  →  lowercase words
+    t = re.sub(
+        r"\b([A-Z]{2,}[_][A-Z0-9_]+)\b",
+        lambda m: m.group(0).lower().replace("_", " "),
+        t,
+    )
+
+    # snake_case / kebab-case / file.ext identifiers
+    t = re.sub(
+        r"\b([a-z][a-zA-Z0-9]*[-_.][a-zA-Z0-9._-]+)\b",
+        lambda m: m.group(0).replace("-", " ").replace("_", " ").replace(".", " dot "),
+        t,
+    )
+
+    # Slash paths  /voice/set-voice  →  voice set voice
+    t = re.sub(
+        r"/([a-z][-a-z0-9/]+)",
+        lambda m: " " + m.group(1).replace("/", " ").replace("-", " "),
+        t,
+    )
+
+    # Units & symbols → words
+    t = re.sub(r"(\d+(?:\.\d+)?)\s*%",        lambda m: f"{m.group(1)} percent",         t)
+    t = re.sub(r"(\d+(?:\.\d+)?)\s*ms\b",     lambda m: f"{m.group(1)} milliseconds",    t, flags=re.IGNORECASE)
+    t = re.sub(r"(\d+(?:\.\d+)?)\s*s\b",      lambda m: f"{_n2w(m.group(1))} seconds",   t)
+    t = re.sub(r"(\d+(?:\.\d+)?)\s*kb\b",     lambda m: f"{m.group(1)} kilobytes",       t, flags=re.IGNORECASE)
+    t = re.sub(r"(\d+(?:\.\d+)?)\s*mb\b",     lambda m: f"{m.group(1)} megabytes",       t, flags=re.IGNORECASE)
+    t = re.sub(r"(\d+(?:\.\d+)?)\s*°\s*([CF])",
+               lambda m: f"{m.group(1)} degrees {'celsius' if m.group(2)=='C' else 'fahrenheit'}", t)
+    t = re.sub(r"\$(\d[\d,]*)",               lambda m: f"{m.group(1).replace(',','')} dollars", t)
+
+    # Punctuation / symbols
+    t = re.sub(r"\s*[—–]\s*", ", ", t)          # em/en dash → comma pause
+    t = re.sub(r" \| ", ", ", t)                 # pipe → comma
+    t = re.sub(r"\s*[-=]>\s*", " to ", t)        # arrows
+    t = re.sub(r"(\w)/(\w)", r"\1 or \2", t)     # a/b → a or b
+    t = re.sub(r"\.{3}|…", ", ", t)              # ellipsis → pause
+    t = re.sub(r"\n{2,}", ". ", t)               # blank lines → sentence break
+    t = re.sub(r"\n", " ", t)                    # single newlines → space
+
+    # Collapse whitespace
+    t = re.sub(r"\s{2,}", " ", t).strip()
+
+    # Cap length
+    if len(t) > 3800:
+        t = t[:3800] + "."
+
+    return t or "Done."
 
 
 # ── Semantic / normalised cache key ───────────────────────────────────────────
@@ -203,11 +338,11 @@ def _get_default_output_id() -> str | None:
 # ── Windows mixer volume guard ─────────────────────────────────────────────────
 def _fix_ffplay_volume(pid: int, target: float = 1.0, timeout: float = 2.0) -> None:
     """
-    Poll the Windows audio session for ffplay PID and force volume to 100%.
+    Poll the Windows audio session for friday-player PID and force volume to 100%.
 
-    Windows remembers per-app mixer volume. If ffplay.exe was ever dragged
-    to 0% in the Volume Mixer, every new instance silently plays at 0%.
-    This background thread catches that within ~50 ms of the session appearing.
+    Windows remembers per-app mixer volume by executable name. We use
+    friday-player.exe (a copy of ffplay) so its name has no stored preference.
+    This guard catches any edge case where the session still starts below target.
     """
     try:
         from pycaw.utils import AudioUtilities
@@ -220,7 +355,7 @@ def _fix_ffplay_volume(pid: int, target: float = 1.0, timeout: float = 2.0) -> N
                         current = s.SimpleAudioVolume.GetMasterVolume()
                         if current < target - 0.01:
                             s.SimpleAudioVolume.SetMasterVolume(target, None)
-                            print(f"[friday-speak] fixed ffplay mixer volume {current:.0%} → {target:.0%}", flush=True)
+                            print(f"[friday-speak] fixed player mixer volume {current:.0%} → {target:.0%}", flush=True)
                         return
                 except Exception:
                     pass
@@ -245,7 +380,7 @@ def _play_ffplay(mp3_data: bytes) -> None:
 
     try:
         proc = subprocess.Popen(
-            ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", tmp],
+            ["friday-player", "-nodisp", "-autoexit", "-loglevel", "quiet", tmp],
             **kwargs,
         )
         threading.Thread(target=_fix_ffplay_volume, args=(proc.pid,), daemon=True).start()
@@ -306,7 +441,7 @@ async def _stream_and_play(switch_done: threading.Event) -> None:
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
 
     proc = subprocess.Popen(
-        ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", "-"],
+        ["friday-player", "-nodisp", "-autoexit", "-loglevel", "quiet", "-"],
         **kwargs,
     )
     threading.Thread(target=_fix_ffplay_volume, args=(proc.pid,), daemon=True).start()
@@ -414,10 +549,50 @@ def _sapi_speak() -> None:
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 async def speak():
+    global TEXT
+    TEXT = normalize_for_speech(_RAW_TEXT)
     if not TEXT:
         print("friday-speak: no text provided", file=sys.stderr)
         sys.exit(1)
 
+    # For playback (not --output/--stdout) signal to ambient that TTS is active.
+    is_playback = not (OUTPUT or STDOUT)
+    if is_playback:
+        # ── Global serialisation: wait for any other speak instance to finish ──
+        # This prevents ambient + voice-daemon speaking simultaneously regardless
+        # of which caller triggered us.  Max wait = 60 s; stale files (> 120 s)
+        # from crashed processes are cleaned up automatically.
+        _wait_deadline = time.time() + 60.0
+        while TTS_ACTIVE_FILE.exists():
+            try:
+                existing_pid = int(TTS_ACTIVE_FILE.read_text(encoding="utf-8").strip())
+                if existing_pid == os.getpid():
+                    break  # somehow our own stale file
+                age = time.time() - TTS_ACTIVE_FILE.stat().st_mtime
+                if age > 120:
+                    TTS_ACTIVE_FILE.unlink(missing_ok=True)
+                    break
+            except (ValueError, OSError):
+                break
+            if time.time() > _wait_deadline:
+                break
+            await asyncio.sleep(0.25)
+        try:
+            TTS_ACTIVE_FILE.write_text(str(os.getpid()), encoding="utf-8")
+        except OSError:
+            pass
+
+    try:
+        await _speak_inner()
+    finally:
+        if is_playback:
+            try:
+                TTS_ACTIVE_FILE.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+async def _speak_inner():
     # Kick off device-switch lookup in a background thread while we start the
     # TTS request — BT switch and stream overlap instead of running sequentially.
     use_device = DEVICE and DEVICE.lower() not in ("", "default", "none")
