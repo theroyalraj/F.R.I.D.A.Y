@@ -69,6 +69,11 @@ if not _env_bool("FRIDAY_AMBIENT", False):
     print("friday-ambient: FRIDAY_AMBIENT not enabled -- exiting.", flush=True)
     sys.exit(0)
 
+_SCRIPTS = Path(__file__).resolve().parent
+if str(_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS))
+from friday_win_focus import should_defer_voice_for_cursor  # noqa: E402
+
 # -- Config -------------------------------------------------------------------
 # Accept both names — FRIDAY_AMBIENT_POST_TTS_GAP is the .env canonical name
 SILENCE_SEC         = float(
@@ -1511,6 +1516,8 @@ def speak_blocking(text: str) -> float:
     t0 = time.perf_counter()
     if not text.strip():
         return 0.0
+    if should_defer_voice_for_cursor():
+        return 0.0
     try:
         subprocess.run(
             [sys.executable, str(SPEAK_SCRIPT), text.strip()],
@@ -1544,6 +1551,8 @@ def speak_child(text: str | None = None) -> None:
     """
     phrase = text or random.choice(_SUB_VOICE_PHRASES)
     if not phrase.strip():
+        return
+    if should_defer_voice_for_cursor():
         return
     env = {
         **os.environ,
@@ -1806,6 +1815,9 @@ def main() -> None:
     try:
         while True:
             time.sleep(1.5)
+
+            if should_defer_voice_for_cursor():
+                continue
 
             # ── Priority check: drop immediately if TTS is currently playing ───
             if _is_tts_active():

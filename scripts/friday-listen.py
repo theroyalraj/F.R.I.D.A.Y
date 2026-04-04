@@ -22,6 +22,8 @@ Env vars (optional — reads .env automatically):
   LISTEN_PHRASE_LIMIT    max seconds/phrase   (default: 8)
   LISTEN_SILENCE_SEC     silence = phrase end (default: 1.2s)
   FRIDAY_LISTEN_WAKE     wake word filter     (default: disabled = always-on)
+  FRIDAY_DEFER_WHEN_CURSOR  Windows: no mic capture while Cursor is focused (default: true)
+  FRIDAY_DEFER_FOCUS_EXES   comma-separated exe name substrings (default: cursor)
 """
 
 import io
@@ -55,6 +57,11 @@ if env_path.exists():
         elif v.startswith("'") and v.endswith("'"): v = v[1:-1]
         if k not in os.environ:
             os.environ[k] = v
+
+_scripts_dir = Path(__file__).resolve().parent
+if str(_scripts_dir) not in sys.path:
+    sys.path.insert(0, str(_scripts_dir))
+from friday_win_focus import should_defer_voice_for_cursor  # noqa: E402
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 VOICE        = os.environ.get("FRIDAY_TTS_VOICE",    "en-GB-RyanNeural")
@@ -506,6 +513,8 @@ def record_phrase(mic_idx: int | None) -> np.ndarray | None:
     with sd.InputStream(samplerate=SAMPLE_RATE, channels=CHANNELS,
                         dtype="int16", blocksize=BLOCK, **kwargs) as stream:
         for _ in range(MAX_CHUNKS):
+            if should_defer_voice_for_cursor():
+                return None
             block, _ = stream.read(BLOCK)
             block = block.flatten()
 
@@ -585,6 +594,9 @@ def main():
         )
 
     while True:
+        if should_defer_voice_for_cursor():
+            time.sleep(0.25)
+            continue
         try:
             audio = record_phrase(mic_idx)
             _mic_errors = 0   # reset backoff on success
