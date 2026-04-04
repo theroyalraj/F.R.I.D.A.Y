@@ -1,14 +1,19 @@
 import { matchOpenIntent, openApp } from './open.js';
 import { runClaude } from './claude.js';
+import { callClaudeApi, isApiKeyAvailable } from './claudeApi.js';
 import { inferClaudeModelForTask, isAutoModelEnabled } from './claudeRouter.js';
 import { sanitizeClaudeModel } from './claudeModel.js';
+
+// Sources that need fast conversational responses — use direct API, not CLI
+const FAST_SOURCES = new Set(['mic-daemon', 'voice', 'friday-mic-daemon']);
 
 /**
  * Shared command path for Alexa→N8N→/task and Jarvis voice UI→/voice/command.
  */
 export async function runTask(body, reqLog, options = {}) {
   const { text, userId, correlationId, action, app, claudeModel: rawModel, source } = body || {};
-  const replyChannel = String(source || '').toLowerCase() === 'alexa' ? 'alexa' : undefined;
+  const src = String(source || '').toLowerCase();
+  const replyChannel = (src === 'alexa' || src === 'voice') ? src : undefined;
   const t = typeof text === 'string' ? text.trim() : '';
   const TIMEOUT = options.claudeTimeoutMs ?? Number(process.env.CLAUDE_TIMEOUT_MS || 180000);
   let claudeModel = sanitizeClaudeModel(rawModel);
@@ -76,15 +81,40 @@ export async function runTask(body, reqLog, options = {}) {
     }
   }
 
+  // ── Fast path: direct API for voice/mic commands ────────────────────────────
+  // Bypasses Claude CLI spawn overhead (~2-5s) → direct HTTP ~500ms-1.5s.
+  // Haiku = quick chat, Sonnet = complex/coding. Falls back to CLI on API error.
+  const useFastApi = FAST_SOURCES.has(src) && isApiKeyAvailable();
+
+  if (useFastApi) {
+    const apiModel = (claudeModel === 'sonnet') ? 'sonnet' : 'haiku';
+    reqLog.info({ mode: 'api', apiModel }, 'invoking claude api (fast path)');
+    try {
+      const result = await callClaudeApi(t, {
+        model:     apiModel,
+        timeoutMs: Math.min(TIMEOUT, 20_000),
+        log:       reqLog,
+      });
+      reqLog.info({ mode: 'api', ok: result.ok, ms: result.ms, model: result.model }, 'task done');
+      return {
+        status: 200,
+        json: { ok: result.ok, mode: 'api', userId, correlationId, summary: result.text },
+      };
+    } catch (e) {
+      reqLog.warn({ err: String(e.message) }, 'claude api failed — falling back to CLI');
+    }
+  }
+
+  // ── Standard path: Claude CLI ─────────────────────────────────────────────
   reqLog.info(
-    { mode: 'claude', timeoutMs: TIMEOUT, claudeModel: claudeModel || undefined, replyChannel },
+    { mode: 'cli', timeoutMs: TIMEOUT, claudeModel: claudeModel || undefined, replyChannel },
     'invoking claude cli',
   );
   const claude = await runClaude(t, TIMEOUT, { claudeModel, replyChannel });
   const summary = claude.out || claude.err || 'No output';
   reqLog.info(
     {
-      mode: 'claude',
+      mode: 'cli',
       exitCode: claude.code,
       ok: claude.ok,
       ms: Date.now() - t0,
@@ -97,7 +127,7 @@ export async function runTask(body, reqLog, options = {}) {
     status: 200,
     json: {
       ok: claude.ok,
-      mode: 'claude',
+      mode: 'cli',
       userId,
       correlationId,
       summary,

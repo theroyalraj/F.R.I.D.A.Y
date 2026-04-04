@@ -1,0 +1,61 @@
+---
+description: Auto-commit and push to wip branch before any breaking change or new feature to keep main safe
+alwaysApply: true
+---
+
+# WIP Safety Commit — Protect Main
+
+Before making any change that could break existing behaviour **or** introduces a new feature, commit all current work to the `wip` branch and push it first.
+
+## When to trigger
+
+Commit to `wip` before:
+- Adding a new endpoint, module, script, or file
+- Refactoring or rewriting an existing module
+- Changing startup sequences, audio pipeline, or TTS logic
+- Modifying `.env` defaults or adding new env vars
+- Any change the user describes as "new feature", "add", "integrate", or "rework"
+- When the next edit touches a file that is already modified (dirty) in git
+
+## How to do it
+
+```powershell
+cd d:\code\openclaw
+
+# 1 — stage everything
+git add -A
+
+# 2 — commit with a wip message describing what is stable so far
+git commit -m "wip: stable checkpoint before <next change>"
+
+# 3 — push to wip branch (creates it on remote if needed)
+git push origin HEAD:wip
+```
+
+Then make your change on the working tree (still on `main` locally — only the remote `wip` branch is updated as a safety snapshot).
+
+## Commit message format
+
+```
+wip: stable checkpoint before <what you are about to do>
+```
+
+Examples:
+- `wip: stable checkpoint before adding SSE event stream`
+- `wip: stable checkpoint before refactoring friday-play duration logic`
+- `wip: stable checkpoint before new lambdaLaunchProbe init sequence`
+
+## Do NOT do this for
+
+- Typo / comment fixes
+- Pure `.env` value changes (no code change)
+- Updating this rules file itself
+
+## Announce it
+
+Speak via friday-speak.py before committing:
+
+```powershell
+cd d:\code\openclaw
+python skill-gateway/scripts/friday-speak.py "Saving a checkpoint to wip before I make this change, sir."
+```
