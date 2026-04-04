@@ -1076,6 +1076,20 @@ def _try_acquire_thinking_singleton() -> bool:
             if r.set(_REDIS_THINKING_KEY, token, nx=True, ex=_THINKING_SINGLETON_TTL):
                 _own_thinking_token = token
                 return True
+            holder = r.get(_REDIS_THINKING_KEY)
+            if holder:
+                try:
+                    holder_pid = int(str(holder).split(":")[0])
+                    if not _pid_alive(holder_pid):
+                        r.delete(_REDIS_THINKING_KEY)
+                        if r.set(_REDIS_THINKING_KEY, token, nx=True, ex=_THINKING_SINGLETON_TTL):
+                            _own_thinking_token = token
+                            return True
+                except (ValueError, IndexError):
+                    r.delete(_REDIS_THINKING_KEY)
+                    if r.set(_REDIS_THINKING_KEY, token, nx=True, ex=_THINKING_SINGLETON_TTL):
+                        _own_thinking_token = token
+                        return True
             return False
         except Exception:
             pass
