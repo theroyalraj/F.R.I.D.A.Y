@@ -17,7 +17,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const item = $input.first().json;\nconst headers = item.headers || {};\nconst want = $env.WHATSAPP_WEBHOOK_SECRET;\nif (want) {\n  const got =\n    headers['x-openclaw-whatsapp-secret'] ||\n    headers['X-Openclaw-Whatsapp-Secret'] ||\n    headers['X-Openclaw-WhatsApp-Secret'];\n  if (got !== want) throw new Error('Invalid or missing X-Openclaw-WhatsApp-Secret');\n}\nconst body = item.body ?? item;\nconst data = body.data ?? body;\nconst key = data.key ?? data.message?.key;\nif (key && key.fromMe === true) return [];\nconst inner = data.message ?? data;\nconst m = inner.message ?? inner;\nfunction textOf(x) {\n  if (!x) return '';\n  if (typeof x.conversation === 'string') return x.conversation;\n  if (x.extendedTextMessage?.text) return String(x.extendedTextMessage.text);\n  if (x.imageMessage?.caption) return String(x.imageMessage.caption);\n  return '';\n}\nconst commandText = textOf(m).trim();\nif (!commandText) return [];\nconst jid = (key && key.remoteJid) || inner.key?.remoteJid || '';\nif (String(jid).includes('@g.us')) return [];\nconst digits = String(jid).split('@')[0].replace(/\\D/g, '');\nif (!digits) return [];\nconst inst = body.instance || $env.EVOLUTION_INSTANCE || 'default';\nreturn [\n  {\n    json: {\n      commandText,\n      userId: 'wa:' + jid,\n      correlationId: (key && key.id) || String(Date.now()),\n      replyNumber: digits,\n      evolutionInstance: inst,\n    },\n  },\n];\n"
+        "jsCode": "const item = $input.first().json;\nconst headers = item.headers || {};\nconst want = $env.WHATSAPP_WEBHOOK_SECRET;\nif (want) {\n  const got =\n    headers['x-openclaw-whatsapp-secret'] ||\n    headers['X-Openclaw-Whatsapp-Secret'] ||\n    headers['X-Openclaw-WhatsApp-Secret'];\n  if (got !== want) throw new Error('Invalid or missing X-Openclaw-WhatsApp-Secret');\n}\nconst body = item.body ?? item;\nconst data = body.data ?? body;\nconst key = data.key ?? data.message?.key;\nif (key && key.fromMe === true) return [];\nconst inner = data.message ?? data;\nconst m = inner.message ?? inner;\nfunction textOf(x) {\n  if (!x) return '';\n  if (typeof x.conversation === 'string') return x.conversation;\n  if (x.extendedTextMessage?.text) return String(x.extendedTextMessage.text);\n  if (x.imageMessage?.caption) return String(x.imageMessage.caption);\n  return '';\n}\nconst commandText = textOf(m).trim();\nif (!commandText) return [];\nconst jid = (key && key.remoteJid) || inner.key?.remoteJid || '';\nif (String(jid).includes('@g.us')) return [];\nconst digits = String(jid).split('@')[0].replace(/\\D/g, '');\nif (!digits) return [];\n\n// Allowlist check — only permitted numbers can run commands\nconst allowedRaw = ($env.WHATSAPP_ALLOWED_NUMBERS || '').trim();\nif (allowedRaw) {\n  const allowed = allowedRaw.split(',').map(n => n.trim()).filter(Boolean);\n  if (!allowed.includes(digits)) {\n    return []; // silently drop — not in allowlist\n  }\n}\n\nconst inst = body.instance || $env.EVOLUTION_INSTANCE || 'default';\nconst notifyNumber = ($env.WHATSAPP_NOTIFY_NUMBER || '').trim();\nreturn [\n  {\n    json: {\n      commandText,\n      userId: 'wa:' + jid,\n      correlationId: (key && key.id) || String(Date.now()),\n      replyNumber: digits,\n      notifyNumber,\n      evolutionInstance: inst,\n    },\n  },\n];\n"
       },
       "id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
       "name": "ParseEvolution",
@@ -66,7 +66,29 @@
       "name": "SendWhatsApp",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [720, -80]
+      "position": [720, -120]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://evolution-api:8080/message/sendText/{{ $node['ParseEvolution'].json.evolutionInstance }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "apikey", "value": "={{ $env.EVOLUTION_API_KEY }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { number: $node['ParseEvolution'].json.notifyNumber, text: ($json.summary || 'Done.').slice(0, 4000) } }}",
+        "options": { "ignore404": true }
+      },
+      "id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+      "name": "NotifyNumber",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [720, 20]
     },
     {
       "parameters": {
@@ -87,7 +109,7 @@
       "name": "PushSummary",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [720, 100]
+      "position": [720, 160]
     }
   ],
   "connections": {
@@ -97,6 +119,7 @@
       "main": [
         [
           { "node": "SendWhatsApp", "type": "main", "index": 0 },
+          { "node": "NotifyNumber", "type": "main", "index": 0 },
           { "node": "PushSummary", "type": "main", "index": 0 }
         ]
       ]

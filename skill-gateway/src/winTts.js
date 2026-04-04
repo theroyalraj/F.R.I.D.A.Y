@@ -6,8 +6,8 @@
  *   FRIDAY_WIN_TTS=true                           — enable (default: false)
  *   FRIDAY_WIN_TTS_VOICE=en-IN-NeerjaExpressiveNeural  — edge-tts voice name
  *   FRIDAY_WIN_TTS_DEVICE=Echo Dot                — audio device substring (default: Echo Dot)
- *   FRIDAY_WIN_TTS_RATE=+0%                       — speed, e.g. "+10%" faster, "-10%" slower
- *   FRIDAY_WIN_TTS_PITCH=+0Hz                     — pitch adjustment
+ *   FRIDAY_WIN_TTS_RATE=+7.5%                     — speed (default matches main TTS ~1.075×)
+ *   FRIDAY_WIN_TTS_PITCH=+2Hz                     — pitch (slightly bright)
  *   FRIDAY_WIN_TTS_VOLUME=+0%                     — volume adjustment
  *
  * Voices (good for Hinglish / Indian English):
@@ -44,8 +44,8 @@ export function speakWinTts(text, log) {
     ...process.env,
     FRIDAY_TTS_VOICE:  process.env.FRIDAY_WIN_TTS_VOICE  || 'en-IN-NeerjaExpressiveNeural',
     FRIDAY_TTS_DEVICE: process.env.FRIDAY_WIN_TTS_DEVICE || 'Echo Dot',
-    FRIDAY_TTS_RATE:   process.env.FRIDAY_WIN_TTS_RATE   || '+0%',
-    FRIDAY_TTS_PITCH:  process.env.FRIDAY_WIN_TTS_PITCH  || '+0Hz',
+    FRIDAY_TTS_RATE:   process.env.FRIDAY_WIN_TTS_RATE   || '+7.5%',
+    FRIDAY_TTS_PITCH:  process.env.FRIDAY_WIN_TTS_PITCH  || '+2Hz',
     FRIDAY_TTS_VOLUME: process.env.FRIDAY_WIN_TTS_VOLUME || '+0%',
   };
 

@@ -40,13 +40,18 @@ export function playLocalSong(searchPhrase, log) {
       FRIDAY_TTS_DEVICE:    process.env.FRIDAY_TTS_DEVICE    || 'Echo Dot',
       FRIDAY_PLAY_SECONDS:  process.env.FRIDAY_PLAY_SECONDS  || '45',
     },
-    stdio:       'ignore',
+    stdio:       ['ignore', 'ignore', 'pipe'],
     windowsHide: true,
     detached:    true,
   });
   child.unref();
 
   log?.info({ searchPhrase }, 'fridayPlay: spawned friday-play.py');
+
+  child.stderr?.on('data', (buf) => {
+    const line = buf.toString().trim();
+    if (line) log?.warn({ line: line.slice(0, 800) }, 'friday-play stderr');
+  });
 
   child.on('error', (e) => {
     log?.warn({ err: String(e.message) }, 'fridayPlay: spawn failed');

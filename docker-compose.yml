@@ -8,6 +8,18 @@ services:
       - openclaw_redis:/data
     command: redis-server --appendonly yes
 
+  # Redis Insight — GUI for keys, memory, CLI (http://127.0.0.1:5540)
+  # Add Redis: host "redis", port 6379 (Docker network), or from the host use 127.0.0.1:6379
+  redis-insight:
+    image: redis/redisinsight:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5540:5540"
+    volumes:
+      - openclaw_redis_insight:/data
+    depends_on:
+      - redis
+
   n8n:
     image: n8nio/n8n:latest
     restart: unless-stopped
@@ -28,6 +40,8 @@ services:
       - EVOLUTION_INSTANCE=${EVOLUTION_INSTANCE:-}
       - EVOLUTION_BASE_URL=http://evolution-api:8080
       - WHATSAPP_WEBHOOK_SECRET=${WHATSAPP_WEBHOOK_SECRET:-}
+      - WHATSAPP_ALLOWED_NUMBERS=${WHATSAPP_ALLOWED_NUMBERS:-}
+      - WHATSAPP_NOTIFY_NUMBER=${WHATSAPP_NOTIFY_NUMBER:-}
     volumes:
       - openclaw_n8n:/home/node/.n8n
     depends_on:
@@ -36,21 +50,41 @@ services:
       - "host.docker.internal:host-gateway"
 
   # Optional: docker compose --profile whatsapp up -d
+  evolution-postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    profiles:
+      - whatsapp
+    environment:
+      - POSTGRES_DB=evolution
+      - POSTGRES_USER=evolution
+      - POSTGRES_PASSWORD=evolution
+    volumes:
+      - openclaw_evolution_pg:/var/lib/postgresql/data
+
   evolution-api:
     image: atendai/evolution-api:latest
     restart: unless-stopped
     profiles:
       - whatsapp
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8181:8080"
     environment:
       - AUTHENTICATION_API_KEY=${EVOLUTION_API_KEY:-change-me}
+      - DATABASE_PROVIDER=postgresql
+      - DATABASE_CONNECTION_URI=postgresql://evolution:evolution@evolution-postgres:5432/evolution
+      - CACHE_REDIS_ENABLED=true
+      - CACHE_REDIS_URI=redis://redis:6379
+      - CACHE_REDIS_PREFIX_KEY=evolution
     volumes:
       - openclaw_evolution:/evolution/store
     depends_on:
       - redis
+      - evolution-postgres
 
 volumes:
   openclaw_redis:
+  openclaw_redis_insight:
   openclaw_n8n:
   openclaw_evolution:
+  openclaw_evolution_pg:

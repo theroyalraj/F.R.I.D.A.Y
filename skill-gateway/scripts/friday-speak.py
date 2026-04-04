@@ -8,26 +8,52 @@ Usage:
   python friday-speak.py --stdout "Text"                    # pipe MP3 bytes to stdout
 
 Env vars (all optional):
-  FRIDAY_TTS_VOICE   edge-tts voice name  (default: en-GB-RyanNeural)
-  FRIDAY_TTS_DEVICE  audio device substring (default: Echo Dot)
-                     set to "" or "default" to use system default device
-  FRIDAY_TTS_RATE    speed               (default: +0%)
-  FRIDAY_TTS_PITCH   pitch               (default: +0Hz)
+  FRIDAY_TTS_VOICE   edge-tts voice name  (default: en-US-EmmaMultilingualNeural)
+  FRIDAY_TTS_DEVICE  audio device substring (default: "" = Windows default device)
+                     set to "Echo Dot", "WH-1000XM3", etc. to lock a specific output
+  FRIDAY_TTS_RATE    speed               (default: +7.5% ≈ 1.075× vs baseline)
+  FRIDAY_TTS_PITCH   pitch               (default: +2Hz — slightly bright / engaged)
   FRIDAY_TTS_VOLUME  volume              (default: +0%)
   FRIDAY_TTS_CACHE   MP3 cache dir       (default: %TEMP%/friday-tts-cache)
                      set to "" to disable cache
+  FRIDAY_TTS_SESSION  when set to "subagent", session voice is read from
+                     subagent_voice in .session-voice.json (Task subagents)
+  FRIDAY_TTS_VOICE_BLOCK  comma-separated Edge voice ids never spoken — overrides
+                     sticky session / env if they point at a blocked voice
+  FRIDAY_TTS_USE_SESSION_STICKY_VOICE  set false so FRIDAY_TTS_VOICE from this
+                     process env wins over .session-voice.json (e.g. ambient alt voice)
+  FRIDAY_TTS_PRIORITY  when true (1/true/on): voice-daemon / urgent playback —
+                     stops competing friday-player + ambient TTS, clears the TTS
+                     lock, then speaks immediately; if ambient was mid-line, replays
+                     it afterward with a short apology (friday-listen sets this).
+  FRIDAY_TTS_INTERRUPT_MUSIC  set to ui (or true/yes/on) to allow fading/stopping
+                     friday-play background music. Default: other TTS does not cut music
+                     (Redis friday:music:active + local PID/session guard).
+  FRIDAY_DEFER_SPEAK_WHEN_CURSOR  Windows: skip playback when Cursor (or
+                     FRIDAY_DEFER_FOCUS_EXES) is foreground — default true so voice
+                     mode in the IDE is not doubled with Jarvis TTS.
+  FRIDAY_TTS_BYPASS_CURSOR_DEFER  When true, play anyway (startup greetings, Cursor
+                     agent narration, etc.). Set by fridaySpeak.js for gateway boot.
 
-Good voices:
-  en-GB-RyanNeural              British male    ← default (Jarvis feel)
-  en-GB-ThomasNeural            British male, deeper
+Good voices (respect FRIDAY_TTS_VOICE_BLOCK in .env — blocked ids are never used):
+  en-US-EmmaMultilingualNeural  US female multilingual — repo default when env unset
   en-US-GuyNeural               US male neural
   en-IN-NeerjaExpressiveNeural  Indian English / Hinglish
   hi-IN-SwaraNeural             Hindi female
+
+Latency notes:
+  • Cache HIT  → audio starts in ~50 ms  (disk read + ffplay init)
+  • Cache MISS → audio starts in ~150 ms (edge-tts first chunk arrives fast;
+                 streaming pipes chunks to ffplay as they arrive and saves to
+                 cache simultaneously — no wait for full download)
+  • Semantic cache: text is normalised before hashing so near-identical phrases
+    ("Done. sir." / "done, sir") share the same cached MP3.
 """
 import asyncio
 import hashlib
 import io
 import os
+import re
 import signal as _signal
 import subprocess
 import sys
@@ -38,6 +64,24 @@ import platform
 from pathlib import Path
 
 import edge_tts
+
+from friday_win_audio import find_output_device_id as _find_device_id
+from friday_win_audio import get_default_output_id as _get_default_output_id
+from friday_win_audio import set_default_endpoint as _set_default_endpoint
+from friday_music_lock import friday_play_music_hold_active, may_interrupt_music_from_tts
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+_ENV_FILE = _REPO_ROOT / ".env"
+if _ENV_FILE.exists():
+    for line in _ENV_FILE.read_text(encoding="utf-8").splitlines():
+        t = line.strip()
+        if not t or t.startswith("#") or "=" not in t:
+            continue
+        k, _, rest = t.partition("=")
+        k = k.strip()
+        v = rest.split("#", 1)[0].strip().strip('"').strip("'")
+        if k and k not in os.environ:
+            os.environ[k] = v
 
 # ── Arg parsing ───────────────────────────────────────────────────────────────
 _args  = sys.argv[1:]
@@ -53,11 +97,33 @@ elif "--stdout" in _args:
     _args  = [a for a in _args if a != "--stdout"]
 
 TEXT   = " ".join(_args).strip()
-VOICE  = os.environ.get("FRIDAY_TTS_VOICE",  "en-GB-RyanNeural")
-RATE   = os.environ.get("FRIDAY_TTS_RATE",   "+0%")
-PITCH  = os.environ.get("FRIDAY_TTS_PITCH",  "+0Hz")
+# Normalise immediately — every downstream path (cache key, edge-tts, SAPI) gets clean text.
+# The function is defined later in this file; we call it after full module load below.
+_RAW_TEXT = TEXT
+VOICE  = os.environ.get("FRIDAY_TTS_VOICE",  "en-US-EmmaMultilingualNeural")
+
+# Session-sticky voice: .session-voice.json overrides the env default above
+# unless FRIDAY_TTS_USE_SESSION_STICKY_VOICE is false (ambient alternate voice).
+# FRIDAY_TTS_SESSION=subagent → use subagent_voice (teen pool; pick-session-voice --subagent).
+_SESSION_KIND = os.environ.get("FRIDAY_TTS_SESSION", "").strip().lower()
+_SESSION_STICKY = os.environ.get("FRIDAY_TTS_USE_SESSION_STICKY_VOICE", "true").strip().lower() not in (
+    "0", "false", "no", "off",
+)
+_SESSION_VOICE_FILE = Path(__file__).resolve().parent.parent.parent / ".session-voice.json"
+try:
+    import json as _json
+    _sv = _json.loads(_SESSION_VOICE_FILE.read_text(encoding="utf-8"))
+    if _SESSION_KIND == "subagent" and _sv.get("subagent_voice"):
+        VOICE = _sv["subagent_voice"]
+    elif _sv.get("voice") and _SESSION_STICKY:
+        VOICE = _sv["voice"]
+except Exception:
+    pass
+
+RATE   = os.environ.get("FRIDAY_TTS_RATE",   "+7.5%")
+PITCH  = os.environ.get("FRIDAY_TTS_PITCH",  "+2Hz")
 VOLUME = os.environ.get("FRIDAY_TTS_VOLUME", "+0%")
-DEVICE = os.environ.get("FRIDAY_TTS_DEVICE", "Echo Dot").strip()
+DEVICE = os.environ.get("FRIDAY_TTS_DEVICE", "").strip()
 
 _cache_env = os.environ.get("FRIDAY_TTS_CACHE", "").strip()
 CACHE_DIR: Path | None = None
@@ -72,10 +138,192 @@ else:
 if CACHE_DIR is not None:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
+# Timestamp file for ambient silence monitor (playback paths only; not --output/--stdout).
+TTS_TS_FILE     = Path(tempfile.gettempdir()) / "friday-tts-ts"
+TTS_ACTIVE_FILE = Path(tempfile.gettempdir()) / "friday-tts-active"  # exists while speech is playing
+# Written by friday-ambient speak_blocking while a line is playing (for priority replay).
+AMBIENT_SPEAKING_FILE = Path(tempfile.gettempdir()) / "friday-ambient-speaking.txt"
 
-# ── MP3 cache ─────────────────────────────────────────────────────────────────
+
+def _write_last_spoken_ts() -> None:
+    """Record wall-clock time when TTS playback finished (friday-ambient.py polls this)."""
+    try:
+        TTS_TS_FILE.write_text(str(time.time()), encoding="utf-8")
+    except OSError:
+        pass
+
+
+# ── Human-speech normaliser ────────────────────────────────────────────────────
+_SMALL = [
+    "zero","one","two","three","four","five","six","seven","eight","nine","ten",
+    "eleven","twelve","thirteen","fourteen","fifteen","sixteen","seventeen",
+    "eighteen","nineteen","twenty",
+]
+
+def _n2w(n: str) -> str:
+    try:
+        i = int(float(n))
+        if 0 <= i <= 20:
+            return _SMALL[i]
+    except (ValueError, IndexError):
+        pass
+    return n
+
+
+def normalize_for_speech(text: str) -> str:
+    """
+    Convert any text to clean, speakable English before handing it to edge-tts.
+
+    Strips markdown, code, URLs, symbols, and converts technical patterns
+    (env var names, units, percentages, paths) to natural words.
+    """
+    if not text:
+        return text
+    t = text
+
+    # Devanagari (Hindi, etc.): skip English-centric rewrites — they garble TTS.
+    if re.search(r"[\u0900-\u097F]", t):
+        t = re.sub(r"```[\s\S]*?```", " ", t)
+        t = re.sub(r"`[^`]+`", " ", t)
+        t = re.sub(r"https?://\S+", "", t)
+        t = re.sub(r"[\U0001F000-\U0001FFFF]", " ", t)
+        t = re.sub(r"[\u2600-\u27BF]", " ", t)
+        t = re.sub(r"\s{2,}", " ", t).strip()
+        if len(t) > 3800:
+            t = t[:3800] + "."
+        return t or "Done."
+
+    # Code blocks and inline code
+    t = re.sub(r"```[\s\S]*?```", " ", t)
+    t = re.sub(r"`[^`]+`", " ", t)
+
+    # Markdown headings
+    t = re.sub(r"^#{1,6}\s+", "", t, flags=re.MULTILINE)
+
+    # Bold / italic
+    t = re.sub(r"\*{1,3}([^*]+)\*{1,3}", r"\1", t)
+    t = re.sub(r"_{1,2}([^_]+)_{1,2}", r"\1", t)
+
+    # Markdown links [label](url) → label
+    t = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", t)
+
+    # Bare URLs
+    t = re.sub(r"https?://\S+", "", t)
+
+    # Bullet / list leaders
+    t = re.sub(r"^[ \t]*[-*•◦▸▶]+[ \t]+", "", t, flags=re.MULTILINE)
+    t = re.sub(r"^\s*\d+[.)]\s+", "", t, flags=re.MULTILINE)
+
+    # Markdown horizontal rules
+    t = re.sub(r"^[-*_]{3,}\s*$", "", t, flags=re.MULTILINE)
+
+    # HTML entities
+    t = (t.replace("&amp;", " and ").replace("&lt;", " less than ")
+          .replace("&gt;", " greater than ").replace("&rarr;", " to ")
+          .replace("&larr;", " from ").replace("&nbsp;", " "))
+    t = re.sub(r"&#\d+;", " ", t)
+
+    # Emoji (basic Unicode ranges)
+    t = re.sub(r"[\U0001F000-\U0001FFFF]", " ", t)
+    t = re.sub(r"[\u2600-\u27BF]", " ", t)
+
+    # KEY=VALUE env vars  →  "key set to value"
+    t = re.sub(
+        r"\b([A-Z][A-Z0-9_]{2,})=([^\s,]+)",
+        lambda m: f"{m.group(1).lower().replace('_', ' ')} set to {m.group(2)}",
+        t,
+    )
+    # lowercase key=value  e.g.  silence=12s  →  silence: twelve seconds
+    t = re.sub(
+        r"\b([a-z][a-z_]{2,})=(\S+)",
+        lambda m: f"{m.group(1).replace('_', ' ')}: {m.group(2)}",
+        t,
+    )
+    # (key_word: value) parentheticals  e.g. (exit_code: 0)  →  exit code: zero
+    t = re.sub(
+        r"\(([a-z][a-z_]+):\s*([^)]+)\)",
+        lambda m: m.group(1).replace("_", " ") + ": " + m.group(2).strip(),
+        t,
+    )
+
+    # ALL_CAPS identifiers  →  lowercase words
+    t = re.sub(
+        r"\b([A-Z]{2,}[_][A-Z0-9_]+)\b",
+        lambda m: m.group(0).lower().replace("_", " "),
+        t,
+    )
+
+    # snake_case / kebab-case / file.ext identifiers
+    t = re.sub(
+        r"\b([a-z][a-zA-Z0-9]*[-_.][a-zA-Z0-9._-]+)\b",
+        lambda m: m.group(0).replace("-", " ").replace("_", " ").replace(".", " dot "),
+        t,
+    )
+
+    # Slash paths  /voice/set-voice  →  voice set voice
+    t = re.sub(
+        r"/([a-z][-a-z0-9/]+)",
+        lambda m: " " + m.group(1).replace("/", " ").replace("-", " "),
+        t,
+    )
+
+    # Units & symbols → words
+    t = re.sub(r"(\d+(?:\.\d+)?)\s*%",        lambda m: f"{m.group(1)} percent",         t)
+    t = re.sub(r"(\d+(?:\.\d+)?)\s*ms\b",     lambda m: f"{m.group(1)} milliseconds",    t, flags=re.IGNORECASE)
+    t = re.sub(r"(\d+(?:\.\d+)?)\s*s\b",      lambda m: f"{_n2w(m.group(1))} seconds",   t)
+    t = re.sub(r"(\d+(?:\.\d+)?)\s*kb\b",     lambda m: f"{m.group(1)} kilobytes",       t, flags=re.IGNORECASE)
+    t = re.sub(r"(\d+(?:\.\d+)?)\s*mb\b",     lambda m: f"{m.group(1)} megabytes",       t, flags=re.IGNORECASE)
+    t = re.sub(r"(\d+(?:\.\d+)?)\s*°\s*([CF])",
+               lambda m: f"{m.group(1)} degrees {'celsius' if m.group(2)=='C' else 'fahrenheit'}", t)
+    t = re.sub(r"\$(\d[\d,]*)",               lambda m: f"{m.group(1).replace(',','')} dollars", t)
+
+    # Punctuation / symbols
+    t = re.sub(r"\s*[—–]\s*", ", ", t)          # em/en dash → comma pause
+    t = re.sub(r" \| ", ", ", t)                 # pipe → comma
+    t = re.sub(r"\s*[-=]>\s*", " to ", t)        # arrows
+    t = re.sub(r"(\w)/(\w)", r"\1 or \2", t)     # a/b → a or b
+    t = re.sub(r"\.{3}|…", ", ", t)              # ellipsis → pause
+    t = re.sub(r"\n{2,}", ". ", t)               # blank lines → sentence break
+    t = re.sub(r"\n", " ", t)                    # single newlines → space
+
+    # Collapse whitespace
+    t = re.sub(r"\s{2,}", " ", t).strip()
+
+    # Cap length
+    if len(t) > 3800:
+        t = t[:3800] + "."
+
+    return t or "Done."
+
+
+# ── Semantic / normalised cache key ───────────────────────────────────────────
+def _normalize_text(text: str) -> str:
+    """
+    Normalise text before hashing so near-identical phrases share a cache entry.
+
+    Transforms applied (in order):
+      • strip leading/trailing whitespace
+      • collapse internal whitespace to single spaces
+      • lowercase everything
+      • strip trailing sentence-ending punctuation  (.  !  ?  …)
+      • strip a trailing "sir" suffix (with optional punctuation) so
+        "Task complete, sir." and "Task complete, sir" and
+        "task complete sir" all resolve to the same key
+    """
+    t = text.strip()
+    t = re.sub(r'\s+', ' ', t)          # multi-space → single space
+    t = t.lower()
+    t = re.sub(r'[.!?\u2026]+$', '', t) # trailing sentence enders
+    t = t.strip()
+    # Normalise trailing ", sir" / " sir" / "sir." so phrasing variants collapse
+    t = re.sub(r'[,\s]+sir[.!?]*$', ' sir', t)
+    t = t.strip()
+    return t
+
+
 def _cache_key() -> str:
-    key = f"{TEXT}|{VOICE}|{RATE}|{PITCH}|{VOLUME}"
+    normalised = _normalize_text(TEXT)
+    key = f"{normalised}|{VOICE}|{RATE}|{PITCH}|{VOLUME}"
     return hashlib.md5(key.encode()).hexdigest()
 
 def _cache_path() -> Path | None:
@@ -98,9 +346,9 @@ def _save_cache(data: bytes):
             pass
 
 
-# ── Edge-TTS with retry ───────────────────────────────────────────────────────
-async def _fetch_mp3_network(retries: int = 3) -> bytes:
-    """3 quick retries (2s, 4s gaps = ~6s total) then raise — caller falls back to SAPI."""
+# ── Edge-TTS fetch (full download — used for --output / --stdout) ─────────────
+async def _fetch_mp3_network(retries: int = 1) -> bytes:
+    """1 attempt then raise immediately — caller falls back to SAPI without delay."""
     last_err = None
     for attempt in range(1, retries + 1):
         try:
@@ -115,57 +363,42 @@ async def _fetch_mp3_network(retries: int = 3) -> bytes:
         except Exception as exc:
             last_err = exc
             if attempt < retries:
-                wait = attempt * 2.0   # 2s, 4s — short budget before SAPI kicks in
+                wait = attempt * 2.0
                 print(f"[friday-speak] attempt {attempt} failed ({exc.__class__.__name__}), retry in {wait}s", file=sys.stderr, flush=True)
                 await asyncio.sleep(wait)
     raise last_err
 
-async def _fetch_mp3() -> bytes:
-    """Return MP3 bytes — from cache if available, else download and cache."""
-    cached = _load_cache()
-    if cached:
-        print(f"[friday-speak] cache hit ({len(cached)} bytes)", flush=True)
-        return cached
-    data = await _fetch_mp3_network()
-    _save_cache(data)
-    return data
 
+# ── Windows mixer volume guard ─────────────────────────────────────────────────
+def _fix_ffplay_volume(pid: int, target: float = 1.0, timeout: float = 2.0) -> None:
+    """
+    Poll the Windows audio session for friday-player PID and force volume to 100%.
 
-# ── Windows audio device routing via IPolicyConfig (pycaw + comtypes) ─────────
-def _find_device_id(name_sub: str):
-    """Return (device_id, friendly_name) for the first output device matching name_sub, or None."""
+    Windows remembers per-app mixer volume by executable name. We use
+    friday-player.exe (a copy of ffplay) so its name has no stored preference.
+    This guard catches any edge case where the session still starts below target.
+    """
     try:
         from pycaw.utils import AudioUtilities
-        devs = AudioUtilities.GetAllDevices()
-        sub = name_sub.lower()
-        match = next((d for d in devs if sub in d.FriendlyName.lower()), None)
-        return (match.id, match.FriendlyName) if match else None
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            sessions = AudioUtilities.GetAllSessions()
+            for s in sessions:
+                try:
+                    if s.Process and s.Process.pid == pid and s.SimpleAudioVolume:
+                        current = s.SimpleAudioVolume.GetMasterVolume()
+                        if current < target - 0.01:
+                            s.SimpleAudioVolume.SetMasterVolume(target, None)
+                            print(f"[friday-speak] fixed player mixer volume {current:.0%} → {target:.0%}", flush=True)
+                        return
+                except Exception:
+                    pass
+            time.sleep(0.05)
     except Exception:
-        return None
+        pass
 
 
-def _set_default_endpoint(device_id: str):
-    """Set device_id as default for all three audio roles (console/multimedia/comms). Raises on failure."""
-    from pycaw.api.policyconfig import IPolicyConfig
-    from comtypes.client import CreateObject
-    from comtypes import GUID
-    CLSID_PolicyConfigClient = GUID("{870AF99C-171D-4F9E-AF0D-E63DF40C2BC9}")
-    policy = CreateObject(CLSID_PolicyConfigClient, interface=IPolicyConfig)
-    for role in range(3):
-        policy.SetDefaultEndpoint(device_id, role)
-
-
-def _get_default_output_id() -> str | None:
-    """Return the current default output device ID."""
-    try:
-        from pycaw.utils import AudioUtilities
-        dev = AudioUtilities.GetSpeakers()
-        return dev.id
-    except Exception:
-        return None
-
-
-# ── ffplay fallback (default Windows audio device) ────────────────────────────
+# ── ffplay (plays from bytes via temp file) ────────────────────────────────────
 def _play_ffplay(mp3_data: bytes) -> None:
     with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
         f.write(mp3_data)
@@ -180,11 +413,15 @@ def _play_ffplay(mp3_data: bytes) -> None:
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
 
     try:
-        subprocess.run(
-            ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", tmp],
-            check=True,
+        proc = subprocess.Popen(
+            ["friday-player", "-nodisp", "-autoexit", "-loglevel", "quiet", tmp],
             **kwargs,
         )
+        threading.Thread(target=_fix_ffplay_volume, args=(proc.pid,), daemon=True).start()
+        proc.wait()
+        if proc.returncode not in (0, None):
+            raise subprocess.CalledProcessError(proc.returncode, "ffplay")
+        _write_last_spoken_ts()
     except subprocess.CalledProcessError as e:
         print(f"friday-speak: ffplay error {e.returncode}", file=sys.stderr)
         sys.exit(1)
@@ -195,97 +432,410 @@ def _play_ffplay(mp3_data: bytes) -> None:
             pass
 
 
-def _play_to_device(mp3_data: bytes, device_name_sub: str) -> bool:
+# ── Streaming playback (cache-miss fast path) ──────────────────────────────────
+async def _stream_and_play(switch_done: threading.Event) -> None:
     """
-    Switch Windows default audio output to the named device, play via ffplay, then restore.
-    The device switch happens CONCURRENTLY with the MP3 fetch (caller passes pre-fetched data).
-    Returns True on success, False to fall back to default device.
+    Stream edge-tts audio chunks directly to ffplay stdin while simultaneously
+    building the cache entry on disk.
+
+    The producer task starts immediately and buffers incoming audio chunks in an
+    asyncio.Queue.  We wait (asynchronously — without blocking the event loop)
+    for the Bluetooth device switch to complete, then hand off buffered + future
+    chunks to ffplay.  By the time the switch finishes (~300 ms) several hundred
+    milliseconds of audio are already buffered, so playback starts with no
+    additional wait.
     """
-    try:
-        result = _find_device_id(device_name_sub)
-        if not result:
-            print(f"[friday-speak] device '{device_name_sub}' not found — using default", file=sys.stderr, flush=True)
-            return False
+    loop = asyncio.get_event_loop()
+    audio_q: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=0)
+    cache_buf = io.BytesIO()
+    produce_exc: list[Exception] = []
 
-        target_id, target_name = result
-        original_id = _get_default_output_id()
-
-        # Already the right device — no switch needed, no BT wake delay
-        if original_id and original_id == target_id:
-            print(f"[friday-speak] playing to default device: {target_name}", flush=True)
-            _play_ffplay(mp3_data)
-            return True
-
-        print(f"[friday-speak] switching default to: {target_name}", flush=True)
-        _set_default_endpoint(target_id)
-        # Brief pause: Bluetooth needs a moment to (re)connect before audio starts
-        time.sleep(0.3)
-
+    async def _produce():
         try:
-            _play_ffplay(mp3_data)
+            communicate = edge_tts.Communicate(TEXT, VOICE, rate=RATE, pitch=PITCH, volume=VOLUME)
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    await audio_q.put(chunk["data"])
+        except Exception as exc:
+            produce_exc.append(exc)
         finally:
-            if original_id:
-                _set_default_endpoint(original_id)
-                print(f"[friday-speak] restored default output", flush=True)
+            await audio_q.put(None)  # sentinel — always sent
 
-        print(f"[friday-speak] played via {VOICE} on {target_name}", flush=True)
-        return True
+    producer = asyncio.create_task(_produce())
 
-    except Exception as exc:
-        print(f"[friday-speak] device routing failed ({exc.__class__.__name__}: {exc}) — using default", file=sys.stderr, flush=True)
-        return False
+    # Wait for BT device switch without blocking the event loop
+    await loop.run_in_executor(None, lambda: switch_done.wait(2.0))
+
+    kwargs: dict = {
+        "stdin":  subprocess.PIPE,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if platform.system() == "Windows":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+    proc = subprocess.Popen(
+        ["friday-player", "-nodisp", "-autoexit", "-loglevel", "quiet", "-"],
+        **kwargs,
+    )
+    threading.Thread(target=_fix_ffplay_volume, args=(proc.pid,), daemon=True).start()
+
+    pipe_ok = True
+    try:
+        while True:
+            data = await audio_q.get()
+            if data is None:
+                break
+            cache_buf.write(data)
+            if pipe_ok:
+                try:
+                    proc.stdin.write(data)
+                    proc.stdin.flush()
+                except (BrokenPipeError, OSError):
+                    pipe_ok = False  # ffplay exited early — keep draining queue for cache
+    finally:
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
+
+    await loop.run_in_executor(None, proc.wait)
+    _write_last_spoken_ts()
+
+    # Re-raise any producer error after playback so caller can SAPI-fallback
+    if produce_exc:
+        raise produce_exc[0]
+
+    audio_data = cache_buf.getvalue()
+    if len(audio_data) > 100:
+        _save_cache(audio_data)
+        print(f"[friday-speak] cached {len(audio_data)} bytes for next time", flush=True)
+
+    # Ensure producer task is fully awaited (it should be done by now)
+    await producer
 
 
+# ── Music fade-out ─────────────────────────────────────────────────────────────
 def _fade_and_stop_music(fade_sec: float = 1.5, steps: int = 20) -> None:
     """
-    Fade out any running music (ffplay audio sessions) to silence, then kill
-    the friday-play process via its PID file.  Called automatically before
-    every TTS playback so speech is never buried under music.
+    Fade out ONLY the startup song (friday-play.py's ffplay process) before TTS speaks.
+    Targets the specific PID from friday-play.pid so TTS voices are never accidentally faded.
+    Skipped while friday-play holds music unless FRIDAY_TTS_INTERRUPT_MUSIC=ui.
     """
+    if friday_play_music_hold_active() and not may_interrupt_music_from_tts():
+        print(
+            "[friday-speak] music hold active — skip fade (set FRIDAY_TTS_INTERRUPT_MUSIC=ui to duck)",
+            flush=True,
+        )
+        return
+    pid_file = Path(tempfile.gettempdir()) / "friday-play.pid"
+    if not pid_file.exists():
+        return
+
+    try:
+        song_pid = int(pid_file.read_text().strip())
+    except Exception:
+        return
+
     try:
         from pycaw.utils import AudioUtilities
 
         sessions = AudioUtilities.GetAllSessions()
         music_sessions = [
             s for s in sessions
-            if s.Process and "ffplay" in s.Process.name().lower() and s.SimpleAudioVolume
+            if s.Process and s.Process.pid == song_pid and s.SimpleAudioVolume
         ]
-        if not music_sessions:
-            return  # nothing playing — nothing to do
 
-        step_time = fade_sec / steps
-        for i in range(steps + 1):
-            vol = 1.0 - (i / steps)   # 1.0 → 0.0 linear fade
-            for s in music_sessions:
-                try:
-                    s.SimpleAudioVolume.SetMasterVolume(vol, None)
-                except Exception:
-                    pass
-            if i < steps:
-                time.sleep(step_time)
-
-        # Kill the friday-play ffplay process so it doesn't linger silently at volume 0
-        pid_file = Path(tempfile.gettempdir()) / "friday-play.pid"
-        if pid_file.exists():
-            try:
-                pid = int(pid_file.read_text().strip())
-                os.kill(pid, _signal.SIGTERM)
-                pid_file.unlink(missing_ok=True)
-            except Exception:
-                pass
-
-        print(f"[friday-speak] faded out {len(music_sessions)} music session(s)", flush=True)
+        if music_sessions:
+            step_time = fade_sec / steps
+            for i in range(steps + 1):
+                vol = 1.0 - (i / steps)
+                for s in music_sessions:
+                    try:
+                        s.SimpleAudioVolume.SetMasterVolume(vol, None)
+                    except Exception:
+                        pass
+                if i < steps:
+                    time.sleep(step_time)
+            print(f"[friday-speak] song faded out (PID {song_pid})", flush=True)
+    except ImportError:
+        pass
     except Exception as exc:
         print(f"[friday-speak] fade-out skipped ({exc.__class__.__name__}: {exc})", file=sys.stderr, flush=True)
 
+    try:
+        os.kill(song_pid, _signal.SIGTERM)
+        pid_file.unlink(missing_ok=True)
+    except Exception:
+        pass
 
+
+def _kill_friday_player_processes() -> None:
+    """Stop any in-flight TTS playback from friday-speak (friday-player.exe)."""
+    if platform.system() == "Windows":
+        try:
+            subprocess.run(
+                ["taskkill", "/IM", "friday-player.exe", "/F"],
+                capture_output=True,
+                stdin=subprocess.DEVNULL,
+                timeout=12,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception:
+            pass
+        return
+    try:
+        import psutil  # type: ignore
+
+        for p in psutil.process_iter(["name"]):
+            n = (p.info.get("name") or "").lower()
+            if n in ("friday-player", "friday-player.exe"):
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
+def _try_break_redis_tts_lock() -> None:
+    """Release ambient's distributed lock so a priority speak can proceed."""
+    url = os.environ.get("FRIDAY_AMBIENT_REDIS_URL", "").strip() or "redis://127.0.0.1:6379"
+    try:
+        import redis as _redis  # type: ignore
+
+        r = _redis.Redis.from_url(url, decode_responses=True)
+        r.delete("friday:tts:lock")
+    except Exception:
+        pass
+
+
+def _read_preempted_ambient_line() -> str | None:
+    """If ambient was speaking, grab its line for an apology replay; clear the file."""
+    if not AMBIENT_SPEAKING_FILE.exists():
+        return None
+    try:
+        raw = AMBIENT_SPEAKING_FILE.read_text(encoding="utf-8").strip()
+        if raw:
+            AMBIENT_SPEAKING_FILE.unlink(missing_ok=True)
+            return raw[:2000]
+    except OSError:
+        pass
+    return None
+
+
+def _preempt_for_priority_tts() -> str | None:
+    """
+    Voice replies take precedence over ambient / stuck TTS: stop music, kill
+    friday-player, clear file + Redis locks, then return ambient text to replay.
+    """
+    replay = _read_preempted_ambient_line()
+    _fade_and_stop_music()
+    _kill_friday_player_processes()
+    try:
+        TTS_ACTIVE_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+    _try_break_redis_tts_lock()
+    print("[friday-speak] priority pre-empt: cleared competing playback", flush=True)
+    return replay
+
+
+def _play_priority_followup(ambient_line: str) -> None:
+    """Non-priority child speak: apology + replay of the line ambient was saying."""
+    apology = "Sorry — I'm repeating myself; I talked over that. " + ambient_line.strip()
+    apology = normalize_for_speech(apology)
+    if len(apology) > 3800:
+        apology = apology[:3797] + "."
+    env = {k: v for k, v in os.environ.items() if k != "FRIDAY_TTS_PRIORITY"}
+    kwargs: dict = {
+        "capture_output": True,
+        "timeout": 180,
+        "stdin": subprocess.DEVNULL,
+    }
+    if platform.system() == "Windows":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        subprocess.run(
+            [sys.executable, str(Path(__file__).resolve()), apology],
+            env=env,
+            **kwargs,
+        )
+    except Exception as exc:
+        print(f"[friday-speak] priority follow-up speak failed: {exc}", file=sys.stderr, flush=True)
+
+
+# ── SAPI fallback ──────────────────────────────────────────────────────────────
+def _sapi_speak() -> None:
+    try:
+        safe = TEXT.replace("'", " ").replace('"', " ")[:400]
+        print(f"[friday-speak] SAPI fallback: {safe[:60]}", flush=True)
+        subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             f"Add-Type -AssemblyName System.Speech; "
+             f"$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+             f"$s.SelectVoiceByHints([System.Speech.Synthesis.VoiceGender]::Male); "
+             f"$s.Speak('{safe}')"],
+            timeout=30,
+        )
+        _write_last_spoken_ts()
+    except Exception as sapi_err:
+        print(f"friday-speak: SAPI also failed — {sapi_err}", file=sys.stderr)
+
+
+def _read_tts_lock_pid() -> int | None:
+    try:
+        raw = TTS_ACTIVE_FILE.read_text(encoding="utf-8").strip()
+        if not raw:
+            return None
+        return int(raw)
+    except (OSError, ValueError):
+        return None
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if platform.system() == "Windows":
+        try:
+            import ctypes
+
+            k32 = ctypes.windll.kernel32
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            h = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not h:
+                return False
+            k32.CloseHandle(h)
+            return True
+        except Exception:
+            return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+# ── Main ───────────────────────────────────────────────────────────────────────
 async def speak():
+    global TEXT
+    TEXT = normalize_for_speech(_RAW_TEXT)
     if not TEXT:
         print("friday-speak: no text provided", file=sys.stderr)
         sys.exit(1)
 
-    # Kick off device-switch lookup in a background thread while we fetch the MP3 —
-    # so the BT switch and TTS download overlap instead of running sequentially.
+    # For playback (not --output/--stdout) signal to ambient that TTS is active.
+    is_playback = not (OUTPUT or STDOUT)
+    _priority = os.environ.get("FRIDAY_TTS_PRIORITY", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    preempted_replay: str | None = None
+    if is_playback:
+        # Cursor / IDE voice: do not play TTS over the same session as dictation.
+        _bypass = os.environ.get("FRIDAY_TTS_BYPASS_CURSOR_DEFER", "").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+        _ds = os.environ.get("FRIDAY_DEFER_SPEAK_WHEN_CURSOR", "true").strip().lower()
+        if (
+            not _bypass
+            and _ds not in ("0", "false", "no", "off")
+            and platform.system() == "Windows"
+        ):
+            _scripts_dir = Path(__file__).resolve().parent.parent.parent / "scripts"
+            if str(_scripts_dir) not in sys.path:
+                sys.path.insert(0, str(_scripts_dir))
+            try:
+                from friday_win_focus import should_defer_voice_for_cursor
+
+                if should_defer_voice_for_cursor():
+                    print(
+                        "[friday-speak] deferred playback — Cursor (or configured IDE) has focus",
+                        flush=True,
+                    )
+                    sys.exit(0)
+            except Exception:
+                pass
+        if _priority:
+            # User-facing reply: cut over ambient / stuck TTS instead of waiting behind it.
+            preempted_replay = _preempt_for_priority_tts()
+        # ── Global serialisation: wait for any other speak instance to finish ──
+        # Uses O_CREAT|O_EXCL for atomic lock acquisition on NTFS — eliminates
+        # the TOCTOU race where two processes both see the file absent and both
+        # proceed to speak simultaneously.
+        #
+        # Never use write_text to "take" the lock after a timeout — several waiters
+        # can all pass that branch at once and play overlapping audio.  Instead:
+        # drop stale locks when the recorded PID is dead, extend wait if holder is
+        # alive past 60 s (long lines), and always re-enter the O_EXCL race.
+        _wait_deadline = time.time() + 60.0
+        while True:
+            # Atomic try-acquire: only ONE process wins the O_CREAT|O_EXCL race.
+            try:
+                fd = os.open(str(TTS_ACTIVE_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                try:
+                    os.write(fd, str(os.getpid()).encode())
+                finally:
+                    os.close(fd)
+                # Orphan friday-player from a crashed holder would bypass the file lock
+                # appearing "free" while still playing — clear before we speak.
+                _kill_friday_player_processes()
+                break  # lock acquired — proceed to speak
+            except FileExistsError:
+                pass  # another process holds the lock — fall through to wait
+
+            # Stale lock: corrupt file or holder process exited without unlinking
+            try:
+                if TTS_ACTIVE_FILE.exists():
+                    lp = _read_tts_lock_pid()
+                    if lp is None or not _pid_alive(lp):
+                        _kill_friday_player_processes()
+                        TTS_ACTIVE_FILE.unlink(missing_ok=True)
+                        continue
+            except OSError:
+                pass
+
+            if _priority:
+                # Another friday-speak still starting — pre-empt again and retry.
+                _preempt_for_priority_tts()
+                await asyncio.sleep(0.08)
+                continue
+
+            if time.time() > _wait_deadline:
+                try:
+                    lp = _read_tts_lock_pid()
+                    if lp is not None and _pid_alive(lp):
+                        _wait_deadline = time.time() + 60.0
+                    else:
+                        _kill_friday_player_processes()
+                        TTS_ACTIVE_FILE.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                await asyncio.sleep(0.05)
+                continue
+
+            await asyncio.sleep(0.25)
+
+    try:
+        await _speak_inner()
+    finally:
+        if is_playback:
+            try:
+                TTS_ACTIVE_FILE.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    if is_playback and _priority and preempted_replay:
+        _play_priority_followup(preempted_replay)
+
+
+async def _speak_inner():
+    # Kick off device-switch lookup in a background thread while we start the
+    # TTS request — BT switch and stream overlap instead of running sequentially.
     use_device = DEVICE and DEVICE.lower() not in ("", "default", "none")
     device_result: list = [None]   # [(target_id, target_name, original_id) | None | False]
     switch_done  = threading.Event()
@@ -303,11 +853,9 @@ async def speak():
             target_id, target_name = res
             original_id = _get_default_output_id()
             if original_id and original_id == target_id:
-                # Already correct — nothing to switch
                 device_result[0] = (target_id, target_name, None)
                 switch_done.set()
                 return
-            # Switch now (while MP3 is still downloading)
             _set_default_endpoint(target_id)
             time.sleep(0.3)   # BT wake-up
             device_result[0] = (target_id, target_name, original_id)
@@ -317,76 +865,92 @@ async def speak():
         finally:
             switch_done.set()
 
-    # Start device prep immediately (non-blocking thread)
     threading.Thread(target=_prepare_device, daemon=True).start()
 
-    try:
-        mp3_data = await _fetch_mp3()
-    except Exception as exc:
-        print(f"friday-speak: edge-tts failed — {exc}", file=sys.stderr, flush=True)
-        switch_done.wait(timeout=2)
-        # Restore device if we already switched
-        if device_result[0] and device_result[0] is not False:
-            _tid, _tname, orig = device_result[0]
-            if orig:
-                try: _set_default_endpoint(orig)
-                except Exception: pass
-        # SAPI fallback — instant, no network needed
-        if not OUTPUT and not STDOUT:
+    # ── --output / --stdout: always need full MP3 bytes ───────────────────────
+    if OUTPUT or STDOUT:
+        cached = _load_cache()
+        if cached:
+            print(f"[friday-speak] cache hit ({len(cached)} bytes)", flush=True)
+            mp3_data = cached
+        else:
             try:
-                safe = TEXT.replace("'", " ").replace('"', " ")[:400]
-                print(f"[friday-speak] SAPI fallback: {safe[:60]}", flush=True)
-                subprocess.run(
-                    ["powershell", "-NoProfile", "-Command",
-                     f"Add-Type -AssemblyName System.Speech; "
-                     f"$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
-                     f"$s.SelectVoiceByHints([System.Speech.Synthesis.VoiceGender]::Male); "
-                     f"$s.Speak('{safe}')"],
-                    timeout=30,
-                )
-            except Exception as sapi_err:
-                print(f"friday-speak: SAPI also failed — {sapi_err}", file=sys.stderr)
-        sys.exit(1)
+                mp3_data = await _fetch_mp3_network()
+                _save_cache(mp3_data)
+            except Exception as exc:
+                print(f"friday-speak: edge-tts failed — {exc}", file=sys.stderr, flush=True)
+                sys.exit(1)
 
-    # --output: write MP3 to file
-    if OUTPUT:
         switch_done.wait(timeout=5)
-        if device_result[0] and device_result[0] is not False:
-            _tid, _tname, orig = device_result[0]
-            if orig:
-                try: _set_default_endpoint(orig)
-                except Exception: pass
-        with open(OUTPUT, "wb") as f:
-            f.write(mp3_data)
-        print(f"[friday-speak] wrote {len(mp3_data)} bytes -> {OUTPUT}", flush=True)
+        _restore_device(device_result)
+
+        if OUTPUT:
+            with open(OUTPUT, "wb") as f:
+                f.write(mp3_data)
+            print(f"[friday-speak] wrote {len(mp3_data)} bytes -> {OUTPUT}", flush=True)
+        else:
+            sys.stdout.buffer.write(mp3_data)
+            sys.stdout.buffer.flush()
         return
 
-    # --stdout
-    if STDOUT:
-        switch_done.wait(timeout=5)
-        if device_result[0] and device_result[0] is not False:
-            _tid, _tname, orig = device_result[0]
-            if orig:
-                try: _set_default_endpoint(orig)
-                except Exception: pass
-        sys.stdout.buffer.write(mp3_data)
-        sys.stdout.buffer.flush()
+    # ── Playback mode ─────────────────────────────────────────────────────────
+    cached = _load_cache()
+
+    if cached:
+        # Fast path: cache hit — wait for device, play from bytes
+        print(f"[friday-speak] cache hit ({len(cached)} bytes)", flush=True)
+        switch_done.wait(timeout=10)
+        _fade_and_stop_music()
+        _play_with_device(cached, device_result, use_device)
         return
 
-    # Wait for device switch to complete (it probably already finished while we were fetching)
-    switch_done.wait(timeout=10)
-
-    # Fade out any running music before speaking — always, for every TTS call
+    # Streaming path: cache miss — stream to ffplay while device switch runs
     _fade_and_stop_music()
+    try:
+        await _stream_and_play(switch_done)
+        print(f"[friday-speak] streamed via {VOICE}", flush=True)
+    except Exception as exc:
+        print(f"[friday-speak] stream failed ({exc.__class__.__name__}) — retrying full download…", file=sys.stderr, flush=True)
+        # 1 attempt only — fall through to SAPI immediately on failure
+        try:
+            mp3_data = await _fetch_mp3_network(retries=1)
+            _save_cache(mp3_data)
+            switch_done.wait(timeout=10)
+            _play_with_device(mp3_data, device_result, use_device)
+            print(f"[friday-speak] retry ok via {VOICE}", flush=True)
+        except Exception as retry_exc:
+            print(f"friday-speak: edge-tts retry failed — {retry_exc}", file=sys.stderr, flush=True)
+            switch_done.wait(timeout=2)
+            _restore_device(device_result)
+            _sapi_speak()
+            sys.exit(1)
 
-    if use_device and device_result[0] is not False:
-        info = device_result[0]
+    _restore_device(device_result)
+
+
+# ── Device helpers ─────────────────────────────────────────────────────────────
+def _restore_device(device_result: list) -> None:
+    """Restore the original default audio device if we switched it."""
+    info = device_result[0]
+    if info and info is not False:
+        _tid, _tname, original_id = info
+        if original_id:
+            try:
+                _set_default_endpoint(original_id)
+                print(f"[friday-speak] restored default output", flush=True)
+            except Exception:
+                pass
+
+
+def _play_with_device(mp3_data: bytes, device_result: list, use_device: bool) -> None:
+    """Play mp3_data respecting the device switch that already happened."""
+    info = device_result[0]
+
+    if use_device and info is not False:
         if info is None:
-            # Thread didn't finish in time — fall through to ffplay default
             print(f"[friday-speak] device switch timed out — using default", file=sys.stderr, flush=True)
             _play_ffplay(mp3_data)
             return
-
         target_id, target_name, original_id = info
         try:
             _play_ffplay(mp3_data)
@@ -396,10 +960,10 @@ async def speak():
                 try:
                     _set_default_endpoint(original_id)
                     print(f"[friday-speak] restored default output", flush=True)
-                except Exception: pass
+                except Exception:
+                    pass
         return
 
-    # Fallback / no device specified
     print(f"[friday-speak] playing via {VOICE} on default audio device", flush=True)
     _play_ffplay(mp3_data)
 

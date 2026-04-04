@@ -6,11 +6,10 @@
  * Env vars:
  *   FRIDAY_TTS_EDGE=false      — explicitly disable (enabled by default when script is present)
  *   FRIDAY_TTS_DISABLED=1      — disables all server-side TTS
- *   FRIDAY_EDGE_TTS_VOICE      — voice short-name (default: inherits FRIDAY_TTS_VOICE → en-GB-RyanNeural)
+ *   FRIDAY_EDGE_TTS_VOICE      — voice short-name (default: inherits FRIDAY_TTS_VOICE → en-US-EmmaMultilingualNeural)
  *
- * Good voices:
- *   en-GB-RyanNeural      British male    ← default (Jarvis / FRIDAY feel)
- *   en-GB-ThomasNeural    British male, deeper
+ * Good voices (see FRIDAY_TTS_VOICE_BLOCK — blocked ids are rejected by API and clamped at runtime):
+ *   en-US-EmmaMultilingualNeural — repo default
  *   en-US-GuyNeural       US male neural
  *   en-US-AriaNeural      US female neural
  *   en-IN-NeerjaExpressiveNeural  Indian English / Hinglish
@@ -35,9 +34,79 @@ export function edgeTtsConfigured(env = process.env) {
   return existsSync(SPEAK_SCRIPT);
 }
 
-export function edgeTtsVoice(env = process.env) {
-  return env.FRIDAY_EDGE_TTS_VOICE?.trim() || env.FRIDAY_TTS_VOICE?.trim() || 'en-GB-RyanNeural';
+/** Runtime voice override — set via POST /voice/set-voice, resets on server restart. */
+let _sessionVoice = null;
+
+/** @param {NodeJS.ProcessEnv} [env] */
+export function getVoiceBlockSet(env = process.env) {
+  const set = new Set(
+    String(env.FRIDAY_TTS_VOICE_BLOCK || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
+  set.add('en-AU-WilliamNeural');
+  set.add('en-AU-WilliamMultilingualNeural');
+  return set;
 }
+
+/** @param {string} name */
+export function isVoiceBlocked(name, env = process.env) {
+  if (!name || typeof name !== 'string') return false;
+  return getVoiceBlockSet(env).has(name.trim());
+}
+
+export function setSessionVoice(name) {
+  const v = (typeof name === 'string' && name.trim()) ? name.trim() : null;
+  if (v && isVoiceBlocked(v)) {
+    return false;
+  }
+  _sessionVoice = v;
+  return true;
+}
+
+export function edgeTtsVoice(env = process.env) {
+  if (_sessionVoice && isVoiceBlocked(_sessionVoice, env)) {
+    _sessionVoice = null;
+  }
+  const blocked = getVoiceBlockSet(env);
+  const envMain = env.FRIDAY_TTS_VOICE?.trim() || '';
+  const fallback =
+    (envMain && !blocked.has(envMain) && envMain) || 'en-US-EmmaMultilingualNeural';
+  const edgeOverride = env.FRIDAY_EDGE_TTS_VOICE?.trim() || '';
+  const candidates = [_sessionVoice, edgeOverride, envMain, 'en-US-EmmaMultilingualNeural'].filter(Boolean);
+  for (const c of candidates) {
+    if (!blocked.has(c)) return c;
+  }
+  return fallback;
+}
+
+/** Catalogue entries allowed for GET /voice/voices and set-voice. */
+export function filteredEdgeTtsCatalogue(env = process.env) {
+  const blocked = getVoiceBlockSet(env);
+  return EDGE_TTS_VOICE_CATALOGUE.filter((e) => !blocked.has(e.voice));
+}
+
+/** Curated Edge TTS voice catalogue with descriptions. */
+export const EDGE_TTS_VOICE_CATALOGUE = [
+  { voice: 'en-US-EmmaMultilingualNeural',      lang: 'en-US', gender: 'Female', desc: 'US female multilingual — natural flow (edge-tts maintainer pick)' },
+  { voice: 'en-GB-RyanNeural',                  lang: 'en-GB', gender: 'Male',   desc: 'British male — Jarvis / FRIDAY feel' },
+  { voice: 'en-GB-ThomasNeural',                lang: 'en-GB', gender: 'Male',   desc: 'British male, deeper tone' },
+  { voice: 'en-GB-LibbyNeural',                 lang: 'en-GB', gender: 'Female', desc: 'British female, natural' },
+  { voice: 'en-GB-SoniaNeural',                 lang: 'en-GB', gender: 'Female', desc: 'British female, expressive' },
+  { voice: 'en-US-GuyNeural',                   lang: 'en-US', gender: 'Male',   desc: 'US male, professional' },
+  { voice: 'en-US-ChristopherNeural',           lang: 'en-US', gender: 'Male',   desc: 'US male, articulate' },
+  { voice: 'en-US-DavisNeural',                 lang: 'en-US', gender: 'Male',   desc: 'US male, confident' },
+  { voice: 'en-US-AriaNeural',                  lang: 'en-US', gender: 'Female', desc: 'US female, natural' },
+  { voice: 'en-US-JennyNeural',                 lang: 'en-US', gender: 'Female', desc: 'US female, friendly assistant' },
+  { voice: 'en-US-NancyNeural',                 lang: 'en-US', gender: 'Female', desc: 'US female, calm' },
+  { voice: 'en-IN-NeerjaExpressiveNeural',      lang: 'en-IN', gender: 'Female', desc: 'Indian English, expressive' },
+  { voice: 'en-IN-PrabhatNeural',               lang: 'en-IN', gender: 'Male',   desc: 'Indian English, male' },
+  { voice: 'en-AU-WilliamNeural',               lang: 'en-AU', gender: 'Male',   desc: 'Australian male' },
+  { voice: 'en-AU-NatashaNeural',               lang: 'en-AU', gender: 'Female', desc: 'Australian female' },
+  { voice: 'en-CA-LiamNeural',                  lang: 'en-CA', gender: 'Male',   desc: 'Canadian male' },
+  { voice: 'en-CA-ClaraNeural',                 lang: 'en-CA', gender: 'Female', desc: 'Canadian female' },
+];
 
 /**
  * Synthesize text to MP3 buffer via friday-speak.py --output.
@@ -61,8 +130,8 @@ export async function synthesizeEdgeTtsMp3(text, options = {}) {
           ...process.env,
           FRIDAY_TTS_VOICE:  voice,
           FRIDAY_TTS_DEVICE: '',   // no device routing needed — we return bytes
-          FRIDAY_TTS_RATE:   process.env.FRIDAY_TTS_RATE   || '+0%',
-          FRIDAY_TTS_PITCH:  process.env.FRIDAY_TTS_PITCH  || '+0Hz',
+          FRIDAY_TTS_RATE:   process.env.FRIDAY_TTS_RATE   || '+7.5%',
+          FRIDAY_TTS_PITCH:  process.env.FRIDAY_TTS_PITCH  || '+2Hz',
           FRIDAY_TTS_VOLUME: process.env.FRIDAY_TTS_VOLUME || '+0%',
         },
       },

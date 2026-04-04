@@ -1,22 +1,37 @@
 <#
 .SYNOPSIS
-  Restart OpenClaw stack — kills old processes, handles Docker, then runs
-  ALL services (gateway · agent · voice daemon) in THIS terminal window.
+  Restart OpenClaw stack - kills old processes, handles Docker, then runs
+  ALL services (gateway / agent / voice daemon) in THIS terminal window.
   Close / Ctrl+C the terminal and everything stops.
 
 .PARAMETER SkipDocker
   Skip Docker steps; only free ports and start Node/Python services.
 
+.PARAMETER RestartRedis
+  Restart the Redis container (docker compose restart redis). Default: never touch a running Redis —
+  only n8n + redis-insight are reconciled so local app restarts do not bounce Redis.
+
+.PARAMETER NoKill
+  Do not stop ffplay, friday-play, voice daemon, or free ports 3847/3848.
+  If gateway + agent already respond on /health, exits without starting anything.
+  Otherwise starts via start.mjs with OPENCLAW_NO_FREE_PORTS so existing listeners are not killed.
+
 .EXAMPLE
   pwsh -File scripts/restart-local.ps1
   pwsh -File scripts/restart-local.ps1 -SkipDocker
+  pwsh -File scripts/restart-local.ps1 -SkipDocker -NoKill
+  pwsh -File scripts/restart-local.ps1 -RestartRedis   # only when you want Redis bounced
 #>
-param([switch] $SkipDocker)
+param(
+  [switch] $SkipDocker,
+  [switch] $RestartRedis,
+  [switch] $NoKill
+)
 
 $ErrorActionPreference = 'Continue'
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 
-# ── 1. Kill anything on our ports ────────────────────────────────────────────
+# -- 1. Kill anything on our ports (full restart only) -----------------------
 function Stop-ListenersOnPort {
   param([int[]] $Ports)
   foreach ($port in $Ports) {
@@ -33,75 +48,151 @@ function Stop-ListenersOnPort {
   }
 }
 
+function Test-OpenClawHealthy {
+  $ok3847 = $false
+  $ok3848 = $false
+  try {
+    $r = Invoke-WebRequest -Uri 'http://127.0.0.1:3847/health' -UseBasicParsing -TimeoutSec 2
+    if ($r.StatusCode -lt 500) { $ok3847 = $true }
+  } catch {}
+  try {
+    $r = Invoke-WebRequest -Uri 'http://127.0.0.1:3848/health' -UseBasicParsing -TimeoutSec 2
+    if ($r.StatusCode -lt 500) { $ok3848 = $true }
+  } catch {}
+  return ($ok3847 -and $ok3848)
+}
+
 Write-Host ""
 Write-Host "=== OpenClaw restart ===" -ForegroundColor Yellow
 
-# ── 0. Stop any playing song / TTS ───────────────────────────────────────────
-# Kill every ffplay instance (covers both friday-play.py songs and friday-speak.py TTS)
-$ffplayProcs = @(Get-Process -Name ffplay -ErrorAction SilentlyContinue)
-if ($ffplayProcs.Count -gt 0) {
-  $ffplayProcs | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
-  Write-Host "  killed $($ffplayProcs.Count) ffplay process(es) (song/TTS stopped)"
-}
-
-# Kill friday-play.py Python process (may still be mid-download via yt-dlp)
-Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
-  Where-Object { $_.CommandLine -like '*friday-play*' -or $_.CommandLine -like '*yt_dlp*' } |
-  ForEach-Object {
-    Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-    Write-Host "  killed play/download process (PID $($_.ProcessId))"
+if ($NoKill) {
+  Write-Host "NoKill: skipping OpenClaw process kills and port frees." -ForegroundColor Cyan
+} else {
+  # -- 0. Stop any playing song / TTS ------------------------------------------
+  $ffplayProcs = @(Get-Process -Name ffplay -ErrorAction SilentlyContinue)
+  if ($ffplayProcs.Count -gt 0) {
+    $ffplayProcs | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
+    Write-Host "  killed $($ffplayProcs.Count) ffplay process(es) (song/TTS stopped)"
   }
 
-# Remove stale PID file so friday-play.py starts clean
-$pidFile = Join-Path $env:TEMP "friday-play.pid"
-if (Test-Path $pidFile) { Remove-Item $pidFile -Force -ErrorAction SilentlyContinue }
+  # friday-speak uses a renamed ffplay executable on Windows
+  $fridayPlayer = @(Get-Process -Name 'friday-player' -ErrorAction SilentlyContinue)
+  if ($fridayPlayer.Count -gt 0) {
+    $fridayPlayer | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
+    Write-Host "  killed $($fridayPlayer.Count) friday-player process(es) (Edge TTS playback)"
+  }
 
-# ── Kill ALL openclaw node processes (incl. node --watch parents) ─────────────
-# This prevents node --watch from fighting back after we free ports
-Write-Host "Stopping any OpenClaw node watchers..."
-Get-Process -Name node -ErrorAction SilentlyContinue | ForEach-Object {
-  try {
-    $cmd = (Get-CimInstance Win32_Process -Filter "ProcessId=$($_.Id)" -EA SilentlyContinue).CommandLine
-    if ($cmd -match 'server\.js|start\.mjs') {
-      Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
-      Write-Host "  killed node watcher/server PID $($_.Id)"
+  Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -like '*friday-play*' -or $_.CommandLine -like '*yt_dlp*' } |
+    ForEach-Object {
+      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+      Write-Host "  killed play/download process (PID $($_.ProcessId))"
     }
-  } catch {}
+
+  $pidFile = Join-Path $env:TEMP "friday-play.pid"
+  if (Test-Path $pidFile) { Remove-Item $pidFile -Force -ErrorAction SilentlyContinue }
+
+  # Do not scan-kill all node processes matching server.js/start.mjs — that also hits
+  # Docker Desktop, other IDEs, and unrelated apps. Local OpenClaw listeners are
+  # stopped via the port free step below.
+
+  Write-Host "Freeing ports 3848 and 3847..."
+  Stop-ListenersOnPort @(3848, 3847)
+  Start-Sleep -Milliseconds 600
+
+  Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -like '*friday-listen*' } |
+    ForEach-Object {
+      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+      Write-Host "  killed old voice daemon (PID $($_.ProcessId))"
+    }
+
+  Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -like '*friday-ambient*' } |
+    ForEach-Object {
+      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+      Write-Host "  killed old ambient daemon (PID $($_.ProcessId))"
+    }
+
+  Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -like '*friday-speak*' } |
+    ForEach-Object {
+      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+      Write-Host "  killed stray TTS process (PID $($_.ProcessId))"
+    }
+
+  # Redis + temp files — stale friday:tts:lock or friday-tts-active can block all TTS after a crash
+  $clearLocks = Join-Path $root 'skill-gateway\scripts\clear_friday_locks.py'
+  if (Test-Path $clearLocks) {
+    Write-Host 'Clearing Friday Redis locks + temp TTS files...'
+    & python $clearLocks
+  }
 }
 
-Write-Host "Freeing ports 3848 and 3847..."
-Stop-ListenersOnPort @(3848, 3847)
-
-# Short pause so the OS fully releases TCP ports after kills
-Start-Sleep -Milliseconds 600
-
-# ── 2. Kill any lingering voice daemon ───────────────────────────────────────
-Get-Process -Name python -ErrorAction SilentlyContinue |
-  Where-Object { $_.CommandLine -like '*friday-listen*' } |
-  ForEach-Object {
-    Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
-    Write-Host "  killed old voice daemon (PID $($_.Id))"
-  }
-
-# ── 3. Docker (optional) ─────────────────────────────────────────────────────
+# -- 3. Docker (optional) ----------------------------------------------------
+# Never run bare `docker compose up -d` — it can recreate Redis when the project reconciles.
+# Default: Redis is started only if missing or stopped (compose start or up -d redis); running Redis is never restarted.
 if (-not $SkipDocker) {
   Push-Location $root
-  Write-Host "Docker: compose up -d ..."
-  docker compose up -d
-  if ($LASTEXITCODE -ne 0) {
-    Write-Warning "docker compose up -d failed (exit $LASTEXITCODE)."
+  if ($RestartRedis) {
+    Write-Host "Docker: -RestartRedis — docker compose restart redis ..." -ForegroundColor Cyan
+    docker compose restart redis
+    if ($LASTEXITCODE -ne 0) {
+      Write-Warning "docker compose restart redis failed (exit $LASTEXITCODE)."
+    }
   } else {
-    docker compose restart
+    $redisId = (docker compose ps -q redis 2>$null | Select-Object -First 1).Trim()
+    if ([string]::IsNullOrWhiteSpace($redisId)) {
+      Write-Host "Docker: no redis container yet — docker compose up -d redis ..." -ForegroundColor Cyan
+      docker compose up -d redis
+      if ($LASTEXITCODE -ne 0) {
+        Write-Warning "docker compose up -d redis failed (exit $LASTEXITCODE)."
+      }
+    } else {
+      $running = (docker inspect -f '{{.State.Running}}' $redisId 2>$null).Trim().ToLowerInvariant()
+      if ($running -ne 'true') {
+        Write-Host "Docker: redis container stopped — starting (not recreating) ..." -ForegroundColor Cyan
+        docker compose start redis 2>$null
+        if ($LASTEXITCODE -ne 0) {
+          docker compose up -d redis
+        }
+        if ($LASTEXITCODE -ne 0) {
+          Write-Warning "Could not start redis (exit $LASTEXITCODE)."
+        }
+      } else {
+        Write-Host "Docker: redis already running — left untouched (use -RestartRedis to bounce it)." -ForegroundColor DarkGray
+      }
+    }
+  }
+  Write-Host "Docker: compose up -d n8n redis-insight ..."
+  docker compose up -d n8n redis-insight
+  if ($LASTEXITCODE -ne 0) {
+    Write-Warning "docker compose up -d n8n redis-insight failed (exit $LASTEXITCODE)."
   }
   Pop-Location
 } else {
   Write-Host "Skipping Docker (-SkipDocker)."
 }
 
-# ── 4. Launch all services in THIS terminal via start.mjs ────────────────────
+# -- 4. NoKill: if core HTTP services already healthy, skip spawn -------------
+if ($NoKill -and (Test-OpenClawHealthy)) {
+  Write-Host "OpenClaw already running (pc-agent + skill-gateway /health OK). Not starting another stack in this terminal." -ForegroundColor Green
+  exit 0
+}
+
+if ($NoKill) {
+  Write-Host "Core services not healthy - starting stack without freeing ports..." -ForegroundColor Yellow
+}
+
+# -- 5. Launch all services in THIS terminal via start.mjs -------------------
 Write-Host ""
 Write-Host "Starting services in this terminal (Ctrl+C stops everything)..." -ForegroundColor Yellow
 Write-Host ""
 
 Set-Location $root
+if ($NoKill) {
+  $env:OPENCLAW_NO_FREE_PORTS = '1'
+} else {
+  Remove-Item Env:\OPENCLAW_NO_FREE_PORTS -ErrorAction SilentlyContinue
+}
 node scripts/start.mjs

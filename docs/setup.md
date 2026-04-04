@@ -47,11 +47,15 @@ npm install
 
 (Equivalent: `npm run install:all` from the repo root.)
 
-## 4) Start Docker (N8N + Redis)
+## 4) Start Docker (N8N + Redis + Redis Insight)
 
 ```powershell
 docker compose up -d
 ```
+
+- **N8N** — `http://127.0.0.1:5678`
+- **Redis** — `127.0.0.1:6379` (from Windows / `friday-ambient.py`)
+- **Redis Insight** — `http://127.0.0.1:5540` — **Add Redis database**: host **`redis`**, port **6379**, no TLS (same Docker Compose network as this stack).
 
 Open `http://127.0.0.1:5678`, complete N8N setup, then **Import** `n8n/workflows/friday-intake.json` and **Activate** the workflow. The **PCAgent** node must send **`source: $json.source`** in the JSON body (included in the repo file) so Alexa jobs get spoken-friendly replies from Claude.
 
@@ -140,6 +144,17 @@ The page sends **`ngrok-skip-browser-warning`** so API calls get JSON, not the f
   - `PIPER_MODEL` — path to the voice `.onnx` file (the matching `.onnx.json` should sit beside it).
   The Friday page will then call **`POST /voice/tts`** and play WAV from Piper.
 - **Optional paid:** OpenAI TTS is **disabled by default**. To use it, set `FRIDAY_TTS_OPENAI=true` and `OPENAI_API_KEY` (or `FRIDAY_OPENAI_API_KEY`). You can tune `FRIDAY_TTS_VOICE` and `FRIDAY_TTS_MODEL`.
+
+### Jarvis ambient intelligence (optional)
+
+Proactive **Friday** chatter when nobody has spoken for a while: filler TTS + short Haiku lines, **now-playing** logging (Windows + **py-now-playing**), **Redis** cache/queue, **SQLite** at `data/friday.db`.
+
+1. **`docker compose up -d`** (Redis on `127.0.0.1:6379`) — optional; without Redis the daemon uses an in-memory fallback.
+2. **`pip install -r scripts/requirements-ambient.txt`** (or install `redis`, `anthropic`, `aiohttp`, `py-now-playing` yourself).
+3. In **`.env`**: set **`FRIDAY_AMBIENT=true`**, tune **`FRIDAY_AMBIENT_*`** and **`FRIDAY_USER_*`** (see **`.env.example`**). **`ANTHROPIC_API_KEY`** enables Haiku lines; without it, witty fallbacks still run.
+4. Run **`npm run start:ambient`** or **`npm run start:all`** (starts ambient automatically when **`FRIDAY_AMBIENT=true`** in `.env`).
+
+`friday-speak.py` updates **`%TEMP%\friday-tts-ts`** after each playback so the ambient loop respects real TTS silence.
 
 ## 7) Alexa custom skill
 

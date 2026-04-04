@@ -64,9 +64,9 @@ Run that compound command in a **background** terminal.
 
 When a task completes, the skill-gateway calls `skill-gateway/scripts/friday-speak.py` via `fridaySpeak.js`. This uses **edge-tts** (free, neural) through your Echo Dot (or default audio device).
 
-- Voice is controlled by `FRIDAY_TTS_VOICE` in `.env` — default `en-GB-RyanNeural` (British male, Jarvis-style)
+- Voice is controlled by `FRIDAY_TTS_VOICE` in `.env` — default `en-US-EmmaMultilingualNeural`. **`FRIDAY_TTS_VOICE_BLOCK`** lists Edge voice ids that must never play; see repo root **`CLAUDE.md`** for assistant policy.
 - Device is controlled by `FRIDAY_TTS_DEVICE` — default `Echo Dot`
-- To test manually: `$env:FRIDAY_TTS_VOICE="en-GB-RyanNeural"; python skill-gateway/scripts/friday-speak.py "Task complete, sir."`
+- To test manually: `python skill-gateway/scripts/friday-speak.py "Task complete, sir."` (uses sticky session + `.env`; override with `$env:FRIDAY_TTS_VOICE="en-US-EmmaMultilingualNeural"` if needed)
 - To disable: set `FRIDAY_SPEAK_PY=false` in `.env` (falls back to Windows TTS)
 
 Other good voices: `en-US-AriaNeural`, `en-US-GuyNeural`, `en-GB-SoniaNeural`, `en-IN-NeerjaExpressiveNeural`

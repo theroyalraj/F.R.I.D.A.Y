@@ -35,6 +35,41 @@ import { fridaySpeakEnabled, speakFridayPy, speakGatewayStartup, speakTaskDone, 
 import { alexaMusicConfigured, alexaPlayMusic, alexaStopMusic } from './alexaMusic.js';
 import { playLocalSong } from './fridayPlay.js';
 
+/** When true, startup / done / launch songs use yt-dlp on the PC even if an Alexa cookie exists (hear music on your Windows output). */
+function fridaySongsPreferLocalPc() {
+  return ['1', 'true', 'yes', 'on'].includes(
+    String(process.env.FRIDAY_SONGS_PREFER_LOCAL_PC || '').toLowerCase(),
+  );
+}
+
+/** Play `FRIDAY_STARTUP_SONG` locally or via Alexa (same routing as gateway boot). */
+function playStartupSong(log) {
+  const phrase = process.env.FRIDAY_STARTUP_SONG;
+  if (!phrase?.trim()) return;
+  if (fridaySongsPreferLocalPc()) {
+    playLocalSong(phrase, log);
+  } else if (alexaMusicConfigured()) {
+    alexaPlayMusic(phrase, log).catch((err) => {
+      log.warn({ err: String(err?.message || err) }, 'startup song: Alexa failed — local friday-play');
+      playLocalSong(phrase, log);
+    });
+  } else {
+    playLocalSong(phrase, log);
+  }
+}
+
+/** PC welcome line first; then optional gap; then startup song. If neural TTS is off, skip straight to the song. */
+function scheduleStartupAfterWelcome(log, songGapMs) {
+  const kick = () => {
+    setTimeout(() => playStartupSong(log), Math.max(0, songGapMs));
+  };
+  if (fridaySpeakEnabled()) {
+    speakGatewayStartup(log, 'gateway', { onClose: kick });
+  } else {
+    kick();
+  }
+}
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
@@ -281,25 +316,17 @@ app.post('/alexa', runVerifier, async (req, res, next) => {
 
     if (requestType === 'LaunchRequest') {
       // Any LaunchRequest (probe or real open) = system init:
-      //   1. Play startup song on PC speakers
-      //   2. Speak TTS greeting timed to the song
-      //   3. Respond to Alexa with greeting + keep session open for commands
+      //   1. Speak PC welcome TTS first (friday-speak runs to completion)
+      //   2. Then play startup song (local friday-play or Alexa)
+      //   3. Respond to Alexa with SSML greeting + keep session open for commands
       req.log.info({ ms: Date.now() - t0, probe: !!body.lambdaLaunchProbe }, 'launch — triggering init sequence');
 
-      const initSong   = process.env.FRIDAY_STARTUP_SONG;
-      const playSec    = parseInt(process.env.FRIDAY_PLAY_SECONDS    || '45', 10);
-      const ttsLat     = parseInt(process.env.FRIDAY_TTS_LATENCY_SEC || '15', 10);
-      const greetDelay = Math.max(1000, (playSec - ttsLat - 2) * 1000);
+      const initSong = process.env.FRIDAY_STARTUP_SONG;
+      const welcomeDelayMs = parseInt(process.env.FRIDAY_STARTUP_WELCOME_DELAY_MS || '500', 10);
+      const songGapMs = parseInt(process.env.FRIDAY_STARTUP_SONG_DELAY_MS || '0', 10);
 
-      if (initSong) {
-        setTimeout(() => {
-          if (alexaMusicConfigured()) {
-            alexaPlayMusic(initSong, req.log).catch(() => playLocalSong(initSong, req.log));
-          } else {
-            playLocalSong(initSong, req.log);
-          }
-        }, 500);
-        setTimeout(() => speakGatewayStartup(req.log), greetDelay);
+      if (initSong?.trim()) {
+        setTimeout(() => scheduleStartupAfterWelcome(req.log, songGapMs), welcomeDelayMs);
       } else {
         setTimeout(() => speakGatewayStartup(req.log), 1500);
       }
@@ -470,8 +497,13 @@ app.post('/internal/last-result', async (req, res, next) => {
     // Optional: play a song through Echo Dot when task is done
     const doneSong = process.env.FRIDAY_DONE_SONG;
     if (doneSong) {
-      if (alexaMusicConfigured()) {
-        alexaPlayMusic(doneSong, req.log).catch(() => playLocalSong(doneSong, req.log));
+      if (fridaySongsPreferLocalPc()) {
+        playLocalSong(doneSong, req.log);
+      } else if (alexaMusicConfigured()) {
+        alexaPlayMusic(doneSong, req.log).catch((err) => {
+          req.log.warn({ err: String(err?.message || err) }, 'notify: Alexa music failed — local friday-play');
+          playLocalSong(doneSong, req.log);
+        });
       } else {
         playLocalSong(doneSong, req.log);
       }
@@ -552,6 +584,29 @@ app.post('/internal/alexa-stop', async (req, res) => {
   _lastAlexaStop = now;
   await alexaStopMusic(req.log).catch(() => {});
   res.json({ ok: true });
+});
+
+/**
+ * Speak arbitrary text via Jarvis (friday-speak.py).
+ * Body: { text } — called by N8N workflows for WhatsApp notifications, reminders, etc.
+ */
+app.post('/internal/speak', async (req, res) => {
+  const secret = req.headers['x-openclaw-secret'];
+  if (N8N_WEBHOOK_SECRET && secret !== N8N_WEBHOOK_SECRET) {
+    req.log.warn('internal/speak unauthorized');
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  const { text } = req.body || {};
+  if (!text || typeof text !== 'string' || !text.trim()) {
+    return res.status(400).json({ error: 'text is required' });
+  }
+  res.json({ ok: true });
+  // Fire-and-forget — don't block the response
+  if (fridaySpeakEnabled()) {
+    speakFridayPy(text.trim()).catch(() => {});
+  } else if (winTtsEnabled()) {
+    speakWinTts(text.trim()).catch(() => {});
+  }
 });
 
 /**
@@ -679,7 +734,7 @@ server = app.listen(PORT, () => {
         ? `POST http://127.0.0.1:${PORT}/internal/alexa-notify`
         : undefined,
       alexaVerify: VERIFY_SIG,
-      voice: fridaySpeakEnabled() ? (process.env.FRIDAY_TTS_VOICE || 'en-GB-RyanNeural') : (winTtsEnabled() ? 'winTts' : 'off'),
+      voice: fridaySpeakEnabled() ? (process.env.FRIDAY_TTS_VOICE || 'en-US-EmmaMultilingualNeural') : (winTtsEnabled() ? 'winTts' : 'off'),
       alexaMusic: alexaMusicConfigured() ? 'ready' : 'not configured (run: node scripts/setup-alexa-cookie.mjs)',
       logLevel: process.env.LOG_LEVEL || 'default',
       logDir: process.env.OPENCLAW_LOG_DIR || null,
@@ -689,42 +744,18 @@ server = app.listen(PORT, () => {
   );
 
   // ── Startup sequence ────────────────────────────────────────────────────────
-  // edge-tts has ~15s latency (network + retries + download + playback).
-  // We want audio to come OUT just as the song clip ends, so we need to START
-  // the TTS process early enough to absorb that latency.
-  //
-  // Timeline (default FRIDAY_PLAY_SECONDS=45, TTS_LATENCY=15):
-  //   t=+0.5s   song starts
-  //   t=+30s    TTS process spawned  (45 - 15 = 30)
-  //   t=+43s    TTS audio plays out  (~30 + 13s TTS pipeline)
-  //   t=+45s    song ends (stop 2s before natural end)
-  //
-  const startSong  = process.env.FRIDAY_STARTUP_SONG;
-  const playSec    = parseInt(process.env.FRIDAY_PLAY_SECONDS || '45', 10);
-  // How long it takes for friday-speak.py to produce audible output (network retries + download + device switch).
-  const ttsLatency = parseInt(process.env.FRIDAY_TTS_LATENCY_SEC || '15', 10);
-  // Spawn TTS early enough so audio plays 2 s before song clip ends.
-  const greetingDelay = Math.max(1000, (playSec - ttsLatency - 2) * 1000);
+  // Welcome TTS first (friday-speak exits after playback), then optional gap, then song.
+  const startSong = process.env.FRIDAY_STARTUP_SONG;
+  const welcomeDelayMs = parseInt(process.env.FRIDAY_STARTUP_WELCOME_DELAY_MS || '500', 10);
+  const songGapMs = parseInt(process.env.FRIDAY_STARTUP_SONG_DELAY_MS || '0', 10);
 
-  if (startSong) {
-    const songDelay = parseInt(process.env.FRIDAY_STARTUP_SONG_DELAY_MS || '7000', 10);
-    setTimeout(() => {
-      if (alexaMusicConfigured()) {
-        alexaPlayMusic(startSong, rootLogger).catch(() => playLocalSong(startSong, rootLogger));
-      } else {
-        playLocalSong(startSong, rootLogger);
-      }
-    }, songDelay);
-
+  if (startSong?.trim()) {
     rootLogger.info(
-      { playSec, ttsLatency, greetingFiresAt: `+${Math.round(greetingDelay / 1000)}s` },
-      'startup: song queued — greeting will fire to align with song end',
+      { welcomeDelayMs, songGapMs },
+      'startup: welcome TTS first — song after friday-speak exits (+ gap)',
     );
-
-    // Spawn TTS early so it plays out 2 s before the song clip ends
-    setTimeout(() => speakGatewayStartup(rootLogger), greetingDelay);
+    setTimeout(() => scheduleStartupAfterWelcome(rootLogger, songGapMs), welcomeDelayMs);
   } else {
-    // No song — speak immediately
     setTimeout(() => speakGatewayStartup(rootLogger), 1500);
   }
 });

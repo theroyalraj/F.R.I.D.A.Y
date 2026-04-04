@@ -26,13 +26,36 @@ function normalizeAppName(text) {
   return t;
 }
 
+function stripLeadingArticle(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/^(the|a|an)\s+/, '')
+    .trim();
+}
+
+/**
+ * Match allowlisted "open …" / "launch …" intents.
+ * Voice transcripts are often "can you open the notepad" — not a leading "open …" phrase,
+ * and "open the notepad" used to yield key "the". Strip articles and allow "open …" mid-sentence.
+ */
 export function matchOpenIntent(text) {
   const lower = String(text || '').toLowerCase();
-  if (!/^(open|launch)\s+/.test(lower)) return null;
-  const rest = lower.replace(/^(open|launch)\s+/, '').trim();
-  if (!rest) return null;
-  const key = rest.split(/\s+/)[0];
-  return key;
+
+  if (/^(open|launch)\s+/.test(lower)) {
+    let rest = lower.replace(/^(open|launch)\s+/, '').trim();
+    rest = stripLeadingArticle(rest);
+    if (!rest) return null;
+    const key = rest.split(/\s+/)[0];
+    return key || null;
+  }
+
+  const mid = lower.match(/\bopen\s+(?:the\s+|a\s+|an\s+)?(\w+)\b/);
+  if (mid) return mid[1];
+
+  const launchMid = lower.match(/\blaunch\s+(?:the\s+|a\s+|an\s+)?(\w+)\b/);
+  if (launchMid) return launchMid[1];
+
+  return null;
 }
 
 export function openApp(appKey) {

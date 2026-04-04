@@ -12,7 +12,7 @@
  */
 
 import { spawn, execSync } from 'node:child_process';
-import { existsSync }      from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath }   from 'node:url';
 import path                from 'node:path';
 import http                from 'node:http';
@@ -20,11 +20,47 @@ import http                from 'node:http';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
+/** When set (e.g. by restart-local.ps1 -NoKill), do not kill listeners on 3847/3848 before spawn. */
+const NO_FREE_PORTS = ['1', 'true', 'yes'].includes(
+  String(process.env.OPENCLAW_NO_FREE_PORTS || '').toLowerCase()
+);
+
+/**
+ * Minimal .env loader — parses KEY=VALUE lines (strips inline comments, quotes).
+ * Injects into process.env so all spawned children (Python daemons etc.) inherit them.
+ * System env vars take precedence (never overwritten).
+ */
+function loadDotEnv() {
+  const p = path.join(ROOT, '.env');
+  if (!existsSync(p)) return;
+  try {
+    const text = readFileSync(p, 'utf8');
+    for (const line of text.split('\n')) {
+      const t = line.trim();
+      if (!t || t.startsWith('#')) continue;
+      const eq = t.indexOf('=');
+      if (eq < 1) continue;
+      const k = t.slice(0, eq).trim();
+      if (!k || k in process.env) continue;   // system env wins
+      let v = t.slice(eq + 1).split('#')[0].trim();  // strip inline comments
+      if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'")))
+        v = v.slice(1, -1);
+      process.env[k] = v;
+    }
+  } catch { /* ignore */ }
+}
+loadDotEnv();
+
+function readFridayAmbientFromDotEnv() {
+  return ['1', 'true', 'yes', 'on'].includes(String(process.env.FRIDAY_AMBIENT || '').toLowerCase());
+}
+
 // ── Colours ──────────────────────────────────────────────────────────────────
 const C = {
   gateway:  '\x1b[36m',   // cyan
   agent:    '\x1b[32m',   // green
   listener: '\x1b[35m',   // magenta
+  ambient:  '\x1b[96m',   // bright cyan
   warn:     '\x1b[33m',
   reset:    '\x1b[0m',
 };
@@ -174,9 +210,12 @@ function freePort(port) {
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 async function main() {
-  // Free ports first so the new instances always bind cleanly
-  freePort(3848);
-  freePort(3847);
+  if (!NO_FREE_PORTS) {
+    freePort(3848);
+    freePort(3847);
+  } else {
+    process.stdout.write(`${C.warn}[openclaw] OPENCLAW_NO_FREE_PORTS set — not clearing ports 3847/3848${C.reset}\n`);
+  }
 
   process.stdout.write(`${C.warn}
   ╔══════════════════════════════════════════════════╗
@@ -186,15 +225,9 @@ async function main() {
 ${C.reset}\n`);
 
   await start('gateway', 'node', [
-    '--watch',
-    '--watch-path=skill-gateway/src',
-    '--watch-path=lib',
     'skill-gateway/src/server.js',
   ]);
   await start('agent', 'node', [
-    '--watch',
-    '--watch-path=pc-agent/src',
-    '--watch-path=lib',
     'pc-agent/src/server.js',
   ]);
 
@@ -215,6 +248,15 @@ ${C.reset}\n`);
     await start('listener', 'python', ['scripts/friday-listen.py'], { delayMs: 3000 });
   } else {
     process.stdout.write(`${C.warn}[openclaw] friday-listen.py not found — voice daemon skipped${C.reset}\n`);
+  }
+
+  const ambientOn =
+    readFridayAmbientFromDotEnv() ||
+    ['1', 'true', 'yes', 'on'].includes(String(process.env.FRIDAY_AMBIENT || '').toLowerCase());
+  const ambientScript = path.join(ROOT, 'scripts', 'friday-ambient.py');
+  if (ambientOn && existsSync(ambientScript)) {
+    log('ambient', 'Jarvis ambient daemon will start in 4.5 s...');
+    await start('ambient', 'python', ['scripts/friday-ambient.py'], { delayMs: 4500 });
   }
 
   process.stdout.write(`${C.warn}[openclaw] All services running. Press Ctrl+C to stop everything.${C.reset}\n\n`);

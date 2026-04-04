@@ -10,7 +10,15 @@ import { rootLogger } from './log.js';
 import { runTask } from './taskRunner.js';
 import { prepareTextForTts } from './ttsPrep.js';
 import { piperConfigured, synthesizePiperWav } from './piperTts.js';
-import { edgeTtsConfigured, edgeTtsVoice, synthesizeEdgeTtsMp3 } from './edgeTts.js';
+import {
+  edgeTtsConfigured,
+  edgeTtsVoice,
+  synthesizeEdgeTtsMp3,
+  setSessionVoice,
+  filteredEdgeTtsCatalogue,
+  getVoiceBlockSet,
+  isVoiceBlocked,
+} from './edgeTts.js';
 import { openAiTtsApiKey, openAiTtsConfigured, synthesizeOpenAiMp3 } from './openaiTts.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -39,23 +47,64 @@ const PORT = Number(process.env.PC_AGENT_PORT || 3847);
 // ── Friday startup voice ──────────────────────────────────────────────────────
 const SPEAK_SCRIPT = path.resolve(__dirname, '../../skill-gateway/scripts/friday-speak.py');
 
-const PC_AGENT_GREETINGS = [
-  'P.C. agent online. Voice interface active. Ready to assist, sir.',
-  'All local systems operational. Friday standing by, sir.',
-  'Agent initialised. Claude is armed and standing by, sir.',
-  'Online. What shall we build today, sir?',
-  'Systems up. Voice and command interface ready, sir.',
-];
+function pcAgentStartupGreetingPhrase() {
+  const n = (process.env.FRIDAY_USER_NAME || 'Raj').trim() || 'Raj';
+  const lines = [
+    `P.C. agent online. Voice interface active. Ready to assist, ${n}.`,
+    `All local systems operational. Friday standing by, ${n}.`,
+    `Agent initialised. Claude is armed and standing by, ${n}.`,
+    `Online. What shall we build today, ${n}?`,
+    `Systems up. Voice and command interface ready, ${n}.`,
+  ];
+  return lines[Math.floor(Math.random() * lines.length)];
+}
+
+function parseIntEnv(name, defaultVal) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return defaultVal;
+  const n = parseInt(String(raw).split('#')[0].trim(), 10);
+  return Number.isFinite(n) ? n : defaultVal;
+}
+
+/** Random or fixed rate/pitch for boot greeting — matches friday_greeting_delivery.py */
+function greetingTtsRatePitch() {
+  const off = ['false', '0', 'no', 'off'];
+  const raw = (process.env.FRIDAY_TTS_JARVIS_RANDOM || 'true').toLowerCase();
+  if (off.includes(raw)) {
+    return {
+      FRIDAY_TTS_RATE: process.env.FRIDAY_TTS_JARVIS_RATE || '+7.5%',
+      FRIDAY_TTS_PITCH: process.env.FRIDAY_TTS_JARVIS_PITCH || '+2Hz',
+    };
+  }
+  const rLo = parseIntEnv('FRIDAY_TTS_JARVIS_RATE_MIN_PCT', 3);
+  const rHi = parseIntEnv('FRIDAY_TTS_JARVIS_RATE_MAX_PCT', 12);
+  const pLo = parseIntEnv('FRIDAY_TTS_JARVIS_PITCH_MIN_HZ', 0);
+  const pHi = parseIntEnv('FRIDAY_TTS_JARVIS_PITCH_MAX_HZ', 10);
+  const rMin = Math.min(rLo, rHi);
+  const rMax = Math.max(rLo, rHi);
+  const pMin = Math.min(pLo, pHi);
+  const pMax = Math.max(pLo, pHi);
+  const rp = rMin + Math.floor(Math.random() * (rMax - rMin + 1));
+  const ph = pMin + Math.floor(Math.random() * (pMax - pMin + 1));
+  return {
+    FRIDAY_TTS_RATE: `${rp >= 0 ? '+' : ''}${rp}%`,
+    FRIDAY_TTS_PITCH: `${ph >= 0 ? '+' : ''}${ph}Hz`,
+  };
+}
 
 function speakStartup() {
   if (process.env.FRIDAY_SPEAK_PY === 'false' || process.env.FRIDAY_SPEAK_PY === '0') return;
+  if (process.env.PC_AGENT_STARTUP_SPEAK === 'false' || process.env.PC_AGENT_STARTUP_SPEAK === '0') return;
   if (!existsSync(SPEAK_SCRIPT)) return;
-  const phrase = PC_AGENT_GREETINGS[Math.floor(Math.random() * PC_AGENT_GREETINGS.length)];
+  const phrase = pcAgentStartupGreetingPhrase();
+  const delivery = greetingTtsRatePitch();
   const child = spawn('python', [SPEAK_SCRIPT, phrase], {
     env: {
       ...process.env,
-      FRIDAY_TTS_VOICE:  process.env.FRIDAY_TTS_VOICE  || 'en-GB-RyanNeural',
+      FRIDAY_TTS_VOICE:  process.env.FRIDAY_TTS_VOICE  || 'en-US-EmmaMultilingualNeural',
       FRIDAY_TTS_DEVICE: process.env.FRIDAY_TTS_DEVICE || 'default',
+      FRIDAY_TTS_BYPASS_CURSOR_DEFER: 'true',
+      ...delivery,
     },
     detached: true,
     stdio: ['ignore', 'ignore', 'pipe'],
@@ -207,6 +256,12 @@ voiceRouter.post('/tts', async (req, res) => {
     return res.status(400).json({ error: 'Missing text' });
   }
 
+  // Optional per-session voice from client — validated against allowed (non-blocked) catalogue.
+  const reqVoice   = (typeof req.body?.voice === 'string' && req.body.voice.trim()) ? req.body.voice.trim() : null;
+  const allowed    = filteredEdgeTtsCatalogue();
+  const isKnown    = reqVoice && allowed.some((v) => v.voice === reqVoice);
+  const resolvedVoice = isKnown ? reqVoice : edgeTtsVoice();
+
   if (piperConfigured()) {
     try {
       const wav = synthesizePiperWav(text, {
@@ -229,11 +284,11 @@ voiceRouter.post('/tts', async (req, res) => {
 
   if (edgeTtsConfigured()) {
     try {
-      const mp3 = await synthesizeEdgeTtsMp3(text, { voice: edgeTtsVoice() });
+      const mp3 = await synthesizeEdgeTtsMp3(text, { voice: resolvedVoice });
       res.setHeader('Content-Type', 'audio/mpeg');
       res.setHeader('Cache-Control', 'no-store');
       res.setHeader('X-Friday-Tts', 'edge');
-      res.setHeader('X-Friday-Tts-Voice', edgeTtsVoice());
+      res.setHeader('X-Friday-Tts-Voice', resolvedVoice);
       return res.send(mp3);
     } catch (e) {
       req.log?.warn({ err: String(e.message || e) }, 'edge tts failed — falling through');
@@ -275,8 +330,10 @@ voiceRouter.get('/stream', (req, res) => {
   res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders();
 
-  // Replay recent history so the page isn't blank on (re)connect
-  for (const msg of sseBuffer) {
+  // Replay only tail — full buffer on every reconnect duplicates the whole conversation in the UI
+  const SSE_REPLAY_TAIL = 35;
+  const tail = sseBuffer.slice(-SSE_REPLAY_TAIL);
+  for (const msg of tail) {
     try { res.write(msg); } catch { /* ignore */ }
   }
 
@@ -295,6 +352,37 @@ voiceRouter.post('/event', (req, res) => {
   const { type, ...rest } = req.body || {};
   if (type) broadcastEvent(type, rest);
   res.json({ ok: true, clients: sseClients.size });
+});
+
+/** Return curated Edge TTS voice catalogue + current active voice. */
+voiceRouter.get('/voices', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({
+    ok: true,
+    provider: ttsProviderLabel(),
+    active: edgeTtsConfigured() ? edgeTtsVoice() : null,
+    voices: filteredEdgeTtsCatalogue(),
+    blockedVoices: [...getVoiceBlockSet()],
+  });
+});
+
+/** Set the active Edge TTS voice for this server session (resets on restart). */
+voiceRouter.post('/set-voice', (req, res) => {
+  const { voice } = req.body || {};
+  if (!voice || typeof voice !== 'string') {
+    return res.status(400).json({ error: 'Missing voice name in body: { "voice": "en-US-EmmaMultilingualNeural" }' });
+  }
+  const trimmed = voice.trim();
+  if (isVoiceBlocked(trimmed)) {
+    return res.status(400).json({
+      error: 'Voice is blocked (FRIDAY_TTS_VOICE_BLOCK). Choose another from GET /voice/voices.',
+      blockedVoices: [...getVoiceBlockSet()],
+    });
+  }
+  setSessionVoice(trimmed);
+  const active = edgeTtsVoice();
+  broadcastEvent('voice_changed', { voice: active });
+  res.json({ ok: true, active });
 });
 
 app.use('/voice', voiceRouter);

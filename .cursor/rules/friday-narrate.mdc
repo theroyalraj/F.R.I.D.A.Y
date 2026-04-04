@@ -5,18 +5,26 @@ alwaysApply: true
 
 # Friday Live Narration — MANDATORY
 
-You are working inside the OpenClaw repo. As you work, **speak status out loud** through `friday-speak.py` so Raj hears what you are doing in real time — no silent grinding.
+You are working inside the OpenClaw repo. As you work, **speak status out loud** through `friday-speak.py` so the user hears what you are doing in real time — no silent grinding. (Their spoken name comes from `FRIDAY_USER_NAME` in `.env`.)
 
-## Speak command (always background, never blocking)
+## Speak command (ALWAYS async — NEVER block on it)
 
 ```powershell
-Start-Process python -ArgumentList "skill-gateway/scripts/friday-speak.py", "your status text here" -WorkingDirectory "d:\code\openclaw" -WindowStyle Hidden
+Start-Process python -ArgumentList "skill-gateway/scripts/friday-speak.py", "your status text here" -WorkingDirectory d:\code\openclaw -NoNewWindow -PassThru -Environment @{FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'}
 ```
 
-Or via Shell tool with **`block_until_ms: 0`**:
+Or the short form using PowerShell background job:
+
 ```powershell
-cd d:\code\openclaw; python skill-gateway/scripts/friday-speak.py "your status text here"
+cd d:\code\openclaw; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; Start-Job { python skill-gateway/scripts/friday-speak.py "your status text here" } | Out-Null
 ```
+
+**⚠️ RULE: Every single `friday-speak.py` invocation MUST be fire-and-forget.**
+- NEVER `await`, NEVER block, NEVER wait for the process to exit before continuing.
+- Use PowerShell `Start-Process` (no `-Wait`) or append `; exit 0` and background it.
+- The Bash equivalent: append ` &` to run in background — e.g. `python .../friday-speak.py "text" &`
+- If running via Bash tool: always use `run_in_background: true` on any TTS command, OR append ` &` to the shell command.
+- Blocking on TTS freezes your work loop — this is never acceptable.
 
 ---
 
@@ -25,18 +33,44 @@ cd d:\code\openclaw; python skill-gateway/scripts/friday-speak.py "your status t
 After **every** substantive task — code change, fix, refactor, investigation, install, debug session — you **MUST** run this before your final text reply. No exceptions. No skipping. No forgetting.
 
 ```powershell
-cd d:\code\openclaw; python skill-gateway/scripts/friday-speak.py "Done. [what you changed in one sentence], sir."
+cd d:\code\openclaw; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "Done. [verbose summary of everything changed]."
 ```
 
-**The summary must match what you actually wrote in your reply** — same information, compressed to ≤ 20 words.
+### How to write the completion summary
 
-Examples:
-- `"Done. Wired lambdaLaunchProbe to trigger the startup song and greeting, sir."`
-- `"Done. Fixed the mic backoff loop and cleared the device index, sir."`
-- `"Done. Rewrote friday-play to stop two seconds before the song ends, sir."`
-- `"Done. Tightened the narration rule so summaries are always spoken, sir."`
+- **Be verbose** — cover every meaningful change, file touched, and outcome. They are listening, not reading.
+- **Aim for 3–6 sentences** spoken naturally. Do not compress or truncate.
+- **Name the files and features** — say what was added/changed/fixed and why it matters.
+- End naturally for speech — "sir" is optional, not required every time.
+- Clear, confident narration for TTS; no need for stiff British formality in every sentence.
 
-Keep it under 20 words. Always end with **"sir."**
+### ⚠️ ALWAYS write for the human ear — never the eye
+
+The text goes directly to a voice synthesiser. Every word must sound natural when spoken aloud.
+
+**DO:**
+- Spell out numbers: "twelve" not "12", "one hundred" not "100"
+- Spell out units: "twelve seconds" not "12s", "five hundred milliseconds" not "500ms"
+- Name files conversationally: "the ambient script" not "friday-ambient.py", "the speak script" not "friday-speak.py"
+- Name env vars conversationally: "the post-TTS gap setting" not "FRIDAY_AMBIENT_POST_TTS_GAP"
+- Say "slash" for paths if you must mention them: "voice slash set-voice"
+
+**NEVER:**
+- Use markdown: no `**bold**`, no `# headings`, no `- bullet points`, no backticks
+- Use variable names or env var syntax: no `FRIDAY_TTS_DEVICE=`, no `_normalize_for_speech()`
+- Use symbols that sound wrong spoken: no `→`, `|`, `%`, `—` mid-sentence
+- Use code-like syntax: no `POST_TTS_GAP=12s`, no `(exit_code: 0)`, no `[friday-speak]`
+- Truncate to save characters — the synthesiser can handle length; robotic compression sounds bad
+
+### Examples of good verbose summaries
+
+```
+"Done. I've added a light theme as the default on both the voice and listen pages, with a dark mode toggle in the top right that persists across refreshes. The browser voice picker now lists every available speech synthesis voice grouped by language, with quality badges and a description. I also added a server voice picker for the Edge TTS voices, backed by two new API endpoints — GET slash voice slash voices and POST slash voice slash set-voice — so you can swap the neural voice at runtime without restarting the server. The listen monitor picks up voice changes live via a new SSE event."
+```
+
+```
+"Done. Fixed the mic backoff loop in friday-listen — the reconnect delay was doubling on every no-speech error instead of only on hard failures, causing it to go silent after a few minutes. I also cleared the device index so it falls back to the Windows default mic instead of crashing when the headset is unplugged."
+```
 
 ---
 
@@ -44,13 +78,15 @@ Keep it under 20 words. Always end with **"sir."**
 
 | Moment | What to say |
 |--------|-------------|
-| Starting research / exploration | `"Researching [topic], sir."` |
-| Found something important | `"Found it. [one-line summary], sir."` |
-| About to edit a file | `"Updating [filename], sir."` |
-| Running a command / install | `"Running [command], sir."` |
-| Waiting on a slow process | `"Still running, sir. Hang tight."` |
-| Spawning a subagent | `"Launching parallel agent for [task], sir."` |
-| **Task complete** | **⚠️ Mandatory spoken summary — see above** |
+| Starting research / exploration | `"Researching [topic]."` |
+| Found something important | `"Found it. [one-line summary]."` |
+| About to edit a file | `"Updating [filename]."` |
+| Running a command / install | `"Running [command]."` |
+| Waiting on a slow process | `"Still running. Hang tight."` |
+| Spawning a subagent | `"Launching parallel agent for [task]."` |
+| **Task complete** | **⚠️ Mandatory verbose spoken summary — see above** |
+
+Mid-task narration (research, file edits, running commands) can stay short — one sentence is fine. Only the **completion summary** needs to be verbose.
 
 ---
 
@@ -59,18 +95,22 @@ Keep it under 20 words. Always end with **"sir."**
 When using the Task tool to launch subagents, narrate before and after each launch:
 
 ```
-speak → "Spinning up two agents in parallel, sir."
+speak → "Spinning up two agents in parallel."
 → launch Task A + Task B
-speak → "Both agents running. Reporting back when done, sir."
+speak → "Both agents running. Reporting back when done."
 ... finish ...
-speak → "All done. [summary], sir."
+speak → "All done. [verbose summary]."
 ```
+
+**Subagent voice (mandatory in subagent prompts):** each Task subagent must use the teen / young-adult pool only. Tell the subagent to run pick and speak with:
+
+`$env:FRIDAY_TTS_SESSION='subagent'` and `pick-session-voice.py --subagent` before any `friday-speak.py`, and the same env plus `FRIDAY_TTS_BYPASS_CURSOR_DEFER=true` on every `friday-speak.py` call. Main Cursor chat uses `FRIDAY_TTS_VOICE` from the environment (Jarvis by default); subagents stay on the separate sticky teen pool.
 
 ---
 
 ## Tone
 
-- Always "sir" at the end — British Jarvis / FRIDAY style
-- Keep each phrase under 20 words — punchy, not a speech
-- Never say "I am an AI" or meta-commentary — stay in character
+- The user can speak casually; narration should be listenable, not a roleplay duel.
+- Prefer clear, composed delivery — British-ish polish is fine but not mandatory on every line.
+- Skip "I am an AI" filler; otherwise stay practical, not theatrical.
 - Plays through whatever is set as the default Windows audio device

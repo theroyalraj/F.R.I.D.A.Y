@@ -1,0 +1,109 @@
+---
+description: Tools and scripts available to Friday / OpenClaw agent — Gmail, TTS, WhatsApp, system
+alwaysApply: true
+---
+
+# Friday Tools Reference
+
+These scripts live in `scripts/` or `skill-gateway/scripts/` and are callable from the agent or Cursor.
+
+---
+
+## Gmail (IMAP)
+
+Script: `scripts/gmail.py`
+Config in `.env`: `GMAIL_ADDRESS`, `GMAIL_APP_PWD` (16-char Google App Password, spaces OK)
+Requirement: IMAP must be enabled in Gmail settings; Google Workspace domains need admin to enable IMAP.
+
+```powershell
+# List recent emails
+python scripts/gmail.py list --count 10
+
+# Unread only
+python scripts/gmail.py unread --count 5
+
+# Read a specific email by UID
+python scripts/gmail.py read <UID>
+
+# Search by subject keyword
+python scripts/gmail.py search "invoice"
+```
+
+Output is JSON — pipe to Claude or parse fields: `uid`, `from`, `subject`, `date`, `body`.
+
+**Agent usage:** When user says "check my email", "any unread?", "read email from X" — run the appropriate command and summarise the results in speech.
+
+---
+
+## TTS — friday-speak.py
+
+Script: `skill-gateway/scripts/friday-speak.py`
+**ALWAYS run async / fire-and-forget. Never block.**
+
+```powershell
+# Bash (run_in_background: true) or append &
+python skill-gateway/scripts/friday-speak.py "text to speak" &
+```
+
+Env overrides (optional, set inline):
+- `FRIDAY_TTS_VOICE` — Edge TTS voice name (default: en-US-EmmaMultilingualNeural)
+- **`FRIDAY_TTS_VOICE_BLOCK`** — comma-separated Edge voice ids **never** to use; see repo root **`CLAUDE.md`** — do not suggest or set blocked voices in `.env`, scripts, or docs.
+- `FRIDAY_TTS_PRIORITY=1` — pre-empts ambient and competing TTS
+- `FRIDAY_TTS_BYPASS_CURSOR_DEFER=true` — speak even when Cursor is focused
+
+Falls back to Windows SAPI automatically if edge-tts network is unreachable.
+
+---
+
+## WhatsApp (Evolution API)
+
+Requires docker compose `--profile whatsapp` running.
+API on `http://127.0.0.1:8181`, key in `EVOLUTION_API_KEY`.
+Instance name in `EVOLUTION_INSTANCE` (default: openclaw).
+
+Send a message:
+```powershell
+curl -X POST http://127.0.0.1:8181/message/sendText/openclaw \
+  -H "apikey: $EVOLUTION_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"number": "917870455443", "text": "Hello"}'
+```
+
+Allowlist (numbers that can send commands): `WHATSAPP_ALLOWED_NUMBERS`
+Always-notify number (every Jarvis reply goes here): `WHATSAPP_NOTIFY_NUMBER`
+
+---
+
+## Voice listen daemon
+
+Script: `scripts/friday-listen.py`
+Always-on mic → transcribes speech → POSTs to pc-agent `/voice/command` → speaks reply.
+Start: `python scripts/friday-listen.py`
+
+Ambient chatter: `scripts/friday-ambient.py` — fires every 60–120 seconds (after last TTS).
+
+---
+
+## pc-agent endpoints
+
+Base: `http://127.0.0.1:3847`
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/task` | Run a Claude task (requires `X-Agent-Secret` header) |
+| POST | `/voice/command` | Voice command (no auth, local only) |
+| GET  | `/voice/ping` | Health / TTS provider info |
+| GET  | `/voice/stream` | SSE stream of voice events |
+| GET  | `/friday` | Web UI |
+
+---
+
+## skill-gateway endpoints
+
+Base: `http://127.0.0.1:3848`
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/alexa` | Alexa skill webhook |
+| POST | `/openclaw/trigger` | Manual trigger (requires `X-Openclaw-Secret`) |
+

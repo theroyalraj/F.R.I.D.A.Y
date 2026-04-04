@@ -10,6 +10,7 @@
  */
 
 import { pickFridayGreetingIndex } from './memory.js';
+import { fridayUserDisplayName } from './fridayUserProfile.js';
 
 export const PHRASES = {
   task_done: [
@@ -196,7 +197,8 @@ export const PHRASES = {
 export function pickNotifyPhrase(userId, type, aiSummary) {
   const pool = PHRASES[type] || PHRASES.message;
   const ix   = pickFridayGreetingIndex(`notify:${type}:${userId}`, pool.length);
-  const base = pool[ix];
+  const name = fridayUserDisplayName();
+  const base = pool[ix].replace(/\bRaj\b/g, name);
 
   if (!aiSummary) return base;
 

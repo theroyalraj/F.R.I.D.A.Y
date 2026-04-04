@@ -57,5 +57,5 @@ Speak via friday-speak.py before committing:
 
 ```powershell
 cd d:\code\openclaw
-python skill-gateway/scripts/friday-speak.py "Saving a checkpoint to wip before I make this change, sir."
+$env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "Saving a checkpoint to wip before I make this change."
 ```

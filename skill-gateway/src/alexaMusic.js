@@ -116,10 +116,14 @@ export async function alexaPlayMusic(searchPhrase, log) {
   if (!alexaMusicConfigured()) return;
 
   const ready = await initAlexa(log);
-  if (!ready) return;
+  if (!ready) {
+    throw new Error('Alexa music: init failed (cookie invalid or alexa-remote2 unavailable)');
+  }
 
   const device = await getTargetDevice(log);
-  if (!device) return;
+  if (!device) {
+    throw new Error('Alexa music: no matching device');
+  }
 
   const provider = process.env.ALEXA_MUSIC_PROVIDER || 'AMAZON_MUSIC';
 
@@ -134,6 +138,7 @@ export async function alexaPlayMusic(searchPhrase, log) {
     });
     log?.info({ searchPhrase, provider, device: device.accountName }, 'alexaMusic: play sent');
   } catch (e) {
+    log?.debug({ err: String(e?.message || e) }, 'alexaMusic: playSearchPhrase failed, trying text command');
     // Fallback: try as a text command ("Alexa, play X")
     try {
       await new Promise((resolve, reject) => {
@@ -147,6 +152,7 @@ export async function alexaPlayMusic(searchPhrase, log) {
       log?.info({ searchPhrase, via: 'text-command' }, 'alexaMusic: play sent (text-command fallback)');
     } catch (e2) {
       log?.warn({ err: String(e2.message) }, 'alexaMusic: play failed');
+      throw e2;
     }
   }
 }

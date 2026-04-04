@@ -1,0 +1,5 @@
+# Optional deps for scripts/friday-ambient.py (Jarvis ambient intelligence)
+redis>=5.0.0
+anthropic>=0.40.0
+aiohttp>=3.9.0
+py-now-playing>=0.1.0
