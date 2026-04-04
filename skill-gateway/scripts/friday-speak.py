@@ -1299,7 +1299,9 @@ async def speak():
         if _opener_chance > 1.0:
             _opener_chance = min(_opener_chance / 100.0, 1.0)
         if random.random() < _opener_chance:
-            TEXT = random.choice(_THINKING_OPENERS) + TEXT
+            _opener = random.choice(_THINKING_OPENERS)
+            TEXT = _opener + TEXT
+            print(f"[friday-speak] thinking opener: {_opener.strip()}", flush=True)
 
     preempted_replay: str | None = None
     if is_playback:
