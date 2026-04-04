@@ -274,37 +274,33 @@ app.post('/alexa', runVerifier, async (req, res, next) => {
     }
 
     if (requestType === 'LaunchRequest') {
-      // lambdaLaunchProbe = true means the Lambda just cold-started and is pinging
-      // to confirm the bridge is alive. Treat it as a full system init: play the
-      // startup song + speak a welcome greeting, exactly like a server restart.
-      if (body.lambdaLaunchProbe) {
-        req.log.info({ ms: Date.now() - t0 }, 'lambda launch probe — triggering init sequence');
+      // Any LaunchRequest (probe or real open) = system init:
+      //   1. Play startup song on PC speakers
+      //   2. Speak TTS greeting timed to the song
+      //   3. Respond to Alexa with greeting + keep session open for commands
+      req.log.info({ ms: Date.now() - t0, probe: !!body.lambdaLaunchProbe }, 'launch — triggering init sequence');
 
-        const initSong = process.env.FRIDAY_STARTUP_SONG;
-        const playSec  = parseInt(process.env.FRIDAY_PLAY_SECONDS || '45', 10);
-        const ttsLat   = parseInt(process.env.FRIDAY_TTS_LATENCY_SEC || '15', 10);
-        const greetDelay = Math.max(1000, (playSec - ttsLat - 2) * 1000);
+      const initSong   = process.env.FRIDAY_STARTUP_SONG;
+      const playSec    = parseInt(process.env.FRIDAY_PLAY_SECONDS    || '45', 10);
+      const ttsLat     = parseInt(process.env.FRIDAY_TTS_LATENCY_SEC || '15', 10);
+      const greetDelay = Math.max(1000, (playSec - ttsLat - 2) * 1000);
 
-        if (initSong) {
-          setTimeout(() => {
-            if (alexaMusicConfigured()) {
-              alexaPlayMusic(initSong, req.log).catch(() => playLocalSong(initSong, req.log));
-            } else {
-              playLocalSong(initSong, req.log);
-            }
-          }, 500);
-          setTimeout(() => speakGatewayStartup(req.log), greetDelay);
-        } else {
-          setTimeout(() => speakGatewayStartup(req.log), 1500);
-        }
-
-        const probeSsml = nextFridayGreetingSsml(userId, locale);
-        return res.json(skillResponse({ ssml: probeSsml, shouldEndSession: true }));
+      if (initSong) {
+        setTimeout(() => {
+          if (alexaMusicConfigured()) {
+            alexaPlayMusic(initSong, req.log).catch(() => playLocalSong(initSong, req.log));
+          } else {
+            playLocalSong(initSong, req.log);
+          }
+        }, 500);
+        setTimeout(() => speakGatewayStartup(req.log), greetDelay);
+      } else {
+        setTimeout(() => speakGatewayStartup(req.log), 1500);
       }
 
+      // If there is a pending user-reply prompt, surface it first
       const pending = getAwaitingUserReply(userId);
-      let ssml;
-      let repromptSsml;
+      let ssml, repromptSsml;
       if (pending?.prompt) {
         ssml = buildSsmlSpeak(
           `Reminder: your PC needs something from you — ${pending.prompt}. When you have handled it, say I took care of it. You can also give me a new command.`,
@@ -312,11 +308,12 @@ app.post('/alexa', runVerifier, async (req, res, next) => {
         );
         repromptSsml = buildSsmlSpeak('Say I took care of it, or tell me what to do next.', locale);
       } else {
-        ssml = nextFridayGreetingSsml(userId, locale);
+        ssml         = nextFridayGreetingSsml(userId, locale);
         repromptSsml = buildSsmlSpeak('What should we try on the PC?', locale);
       }
-      req.log.info({ ms: Date.now() - t0, awaiting: Boolean(pending) }, 'launch response');
-      speakAlexaLaunch(req.log);
+
+      // For a probe the Lambda doesn't care about the session, but keeping it open
+      // costs nothing and lets a real voice invocation immediately issue commands.
       return res.json(skillResponse({ ssml, shouldEndSession: false, repromptSsml }));
     }
 
