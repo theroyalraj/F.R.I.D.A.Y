@@ -10,10 +10,12 @@ How it works:
   5. Prints the chosen voice name to stdout.
 
 Voice policy (main Cursor chat — default):
-  • Uses FRIDAY_TTS_VOICE from the environment (Jarvis / Ryan by default). Same voice every time.
+  • Uses FRIDAY_TTS_VOICE from the environment (Jarvis / Ryan by default), except each new chat
+    has a 50% chance to pick a Hindi or Hinglish-suited Edge voice instead (hi-IN or en-IN neural).
 
 Optional party mode:
   • Set FRIDAY_TTS_MAIN_RANDOM_VOICES=true to restore random adult voices + rare Ana roll.
+    The same 50% Hindi / Hinglish branch applies first; otherwise Ana roll + adult pool as before.
 
 Subagents (Task tool):
   Run:  FRIDAY_TTS_SESSION=subagent  python pick-session-voice.py --subagent
@@ -49,6 +51,14 @@ TEEN_POOL = [
     "en-NZ-MollyNeural",
     "en-US-SteffanNeural",
     "en-NZ-MitchellNeural",  # young male, balances pool vs Ana-tier child
+]
+
+# Hindi + Indian English — good for Hindi or Roman Hinglish session TTS (matches indic_tts defaults).
+HINDI_HINGLISH_POOL = [
+    "hi-IN-SwaraNeural",
+    "hi-IN-MadhurNeural",
+    "en-IN-NeerjaExpressiveNeural",
+    "en-IN-PrabhatNeural",
 ]
 
 # Main chat adults — balanced Jarvis / FRIDAY style; excludes Ana and teen-only voices.
@@ -88,6 +98,7 @@ _LOCALE_LABELS = {
     "en-CA": "Canadian",
     "en-IN": "Indian English",
     "en-NZ": "New Zealand",
+    "hi-IN": "Hindi",
 }
 
 
@@ -137,13 +148,23 @@ def _main_random_voices_enabled() -> bool:
     return v in ("1", "true", "yes", "on")
 
 
+def _pick_from_pool_excluding(pool: list[str], last_voice: str) -> str:
+    choices = [v for v in pool if v != last_voice] or pool
+    return random.choice(choices)
+
+
 def _pick_main_chat_voice(state: dict) -> str:
+    last_voice = state.get("voice", "")
+    use_hindi_hinglish = random.random() < 0.5
+
+    if use_hindi_hinglish:
+        return _pick_from_pool_excluding(HINDI_HINGLISH_POOL, last_voice)
+
     if _main_random_voices_enabled():
-        last_voice = state.get("voice", "")
         if random.randint(1, CHILD_ROLL_MAX) == 1:
             return CHILD_VOICE
-        pool = [v for v in ADULT_POOL if v != last_voice] or ADULT_POOL
-        return random.choice(pool)
+        return _pick_from_pool_excluding(ADULT_POOL, last_voice)
+
     return os.environ.get("FRIDAY_TTS_VOICE", "en-GB-RyanNeural").strip() or "en-GB-RyanNeural"
 
 
@@ -166,6 +187,12 @@ def _speak_welcome(voice: str) -> None:
         greeting = (
             f"Friday online, {who}. Your session voice today is {friendly}. "
             f"All responses this chat will use this voice."
+        )
+    elif voice in HINDI_HINGLISH_POOL:
+        friendly = _friendly_voice_name(voice)
+        greeting = (
+            f"Friday online, {who}. Your session voice is {friendly}, "
+            "suited to Hindi or Hinglish. All responses this chat will use this voice."
         )
     else:
         greeting = (
