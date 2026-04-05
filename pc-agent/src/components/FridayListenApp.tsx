@@ -13,7 +13,7 @@ import { PersonaRosterModal } from './PersonaRosterModal';
 import LaunchOverlay from './LaunchOverlay';
 import AnimatedAvatar from './AnimatedAvatar';
 import TopMusicDock from './TopMusicDock';
-import SecurityScanPanel from './SecurityScanPanel';
+import ArgusWhatsAppTray from './ArgusWhatsAppTray';
 import {
   COMPANY_PERSONAS,
   SPEAKING_PERSONA_ORDER,
@@ -39,6 +39,9 @@ const QUICK_CURSOR_RAISE_MR =
   '@cursor Follow .cursor/rules/github-pr-after-push.mdc. In this workspace git repo: push the current branch if it is ahead of origin, then use gh per that rule to open or update a PR with a clear title and body from recent commits and the diff summary. If a pull request already exists for this head branch, do not create another; paste the existing link.';
 const QUICK_CURSOR_NARRATED_REVIEW =
   '@cursor Review the current working tree diff. Reply with a tight code-review summary meant to be read aloud: main risks, missing tests or edge cases, style nits if any, and one closing verdict sentence.';
+/** Pre-commit: readonly security and quality scan on the repo (code paths, not npm audit). */
+const QUICK_CURSOR_PRECOMMIT =
+  '@cursor Follow .cursor/rules/pre-commit-quality-scan.mdc. Run a readonly security and code-quality pass on this repo: focus on secrets, injection, unsafe defaults, auth, and risky patterns in our source. Do not rely on npm audit as the primary signal. Summarize blockers versus suggestions. If we are about to commit, say what should be fixed first.';
 
 /* ── Voice metadata ───────────────────────────────────────── */
 interface VoiceMeta { icon: string; color: string; shortName: string; }
@@ -135,12 +138,25 @@ const FridayListenApp: React.FC = () => {
   const fileRef = useRef<HTMLInputElement>(null);
   const glowRef = useRef<HTMLDivElement>(null);
   const celebrationAskTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** After task summary TTS: speak celebration line only once summary finishes (SSE speak → listening). */
+  const celebrationAfterSummaryRef = useRef<{
+    askText: string;
+    armedAt: number;
+    phase: 'armed' | 'after_speak';
+  } | null>(null);
+  const celebrationListenFallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const speakCelebrationAskRef = useRef<(t: string) => void>(() => {});
+  /** Tracks when TTS last finished speaking — used to skip celebration ask if spoken recently. */
+  const lastSpokeAtRef = useRef<number>(0);
+  const connectionStatusRef = useRef(connectionStatus);
+  const celebrationRetryRef = useRef<ReturnType<typeof setInterval> | null>(null);
   /** SSE drops briefly on agent restart — avoid flashing Offline when HTTP is fine */
   const sseOfflineTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [uptime] = useUptime(setUptime);
   const [integrationsDrawerOpen, setIntegrationsDrawerOpen] = useState(
     () => typeof window !== 'undefined' && !window.matchMedia(INTEGRATIONS_NARROW_MQ).matches,
   );
+  const [argusWaTrayOpen, setArgusWaTrayOpen] = useState(false);
   const [isNarrow, setIsNarrow] = useState(
     () => typeof window !== 'undefined' && window.matchMedia(INTEGRATIONS_NARROW_MQ).matches,
   );
@@ -150,9 +166,9 @@ const FridayListenApp: React.FC = () => {
   const [celebrationOffer, setCelebrationOffer] = useState<CelebrationPayload | null>(null);
   const [claudeModel, setClaudeModel] = useState(() => {
     try {
-      return typeof localStorage !== 'undefined' ? localStorage.getItem(LS_CLAUDE_MODEL) || 'auto' : 'auto';
+      return typeof localStorage !== 'undefined' ? localStorage.getItem(LS_CLAUDE_MODEL) || 'haiku' : 'haiku';
     } catch {
-      return 'auto';
+      return 'haiku';
     }
   });
   const [openclawStrip, setOpenclawStrip] = useState<{
@@ -183,8 +199,82 @@ const FridayListenApp: React.FC = () => {
       clearTimeout(celebrationAskTimerRef.current);
       celebrationAskTimerRef.current = null;
     }
+    if (celebrationListenFallbackTimerRef.current) {
+      clearTimeout(celebrationListenFallbackTimerRef.current);
+      celebrationListenFallbackTimerRef.current = null;
+    }
+    if (celebrationRetryRef.current) {
+      clearInterval(celebrationRetryRef.current);
+      celebrationRetryRef.current = null;
+    }
+    celebrationAfterSummaryRef.current = null;
     setCelebrationOffer(null);
   }, []);
+
+  /** Post-summary celebration copy: cooperative priority — never preempts the task summary TTS.
+   *  • Drop if someone is currently speaking; retry every 30s.
+   *  • Skip entirely if TTS spoke within the last 10 min.
+   *  • Expire (discard) after 15 min TTL.
+   */
+  const speakCelebrationAsk = useCallback(
+    (t: string) => {
+      const text = String(t || '').trim();
+      if (!text) return;
+      const createdAt = Date.now();
+      const TTL_MS = 15 * 60_000;
+      const COOLDOWN_MS = 10 * 60_000;
+      const RETRY_MS = 30_000;
+
+      // Clear any previous retry
+      if (celebrationRetryRef.current) {
+        clearInterval(celebrationRetryRef.current);
+        celebrationRetryRef.current = null;
+      }
+
+      const trySpeak = () => {
+        const now = Date.now();
+        // Expired — discard
+        if (now - createdAt > TTL_MS) {
+          if (celebrationRetryRef.current) {
+            clearInterval(celebrationRetryRef.current);
+            celebrationRetryRef.current = null;
+          }
+          return;
+        }
+        // Currently speaking — retry later
+        if (connectionStatusRef.current === 'speaking') return;
+        // Spoken within last 10 min — skip entirely
+        if (lastSpokeAtRef.current && now - lastSpokeAtRef.current < COOLDOWN_MS) {
+          if (celebrationRetryRef.current) {
+            clearInterval(celebrationRetryRef.current);
+            celebrationRetryRef.current = null;
+          }
+          return;
+        }
+        // Good to speak
+        if (celebrationRetryRef.current) {
+          clearInterval(celebrationRetryRef.current);
+          celebrationRetryRef.current = null;
+        }
+        void fetch('/voice/speak-async', {
+          method: 'POST',
+          headers: { ...authHeaders() as Record<string, string>, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text, priority: 'cooperative' }),
+        }).catch(() => {});
+      };
+
+      // Try immediately, then poll every 30s
+      trySpeak();
+      if (!celebrationRetryRef.current) {
+        celebrationRetryRef.current = setInterval(trySpeak, RETRY_MS);
+      }
+    },
+    [authHeaders],
+  );
+
+  useEffect(() => {
+    speakCelebrationAskRef.current = speakCelebrationAsk;
+  }, [speakCelebrationAsk]);
 
   useEffect(() => {
     const mq = window.matchMedia(INTEGRATIONS_NARROW_MQ);
@@ -328,13 +418,22 @@ const FridayListenApp: React.FC = () => {
       postEvent('sse_stream_open');
     } else if (event.type === 'security_scan_complete') {
       window.dispatchEvent(new CustomEvent('openclaw:security-scan-complete', { detail: event }));
-      const d = event as { highOrCritical?: number; skipped?: boolean };
-      if (!d.skipped && typeof d.highOrCritical === 'number' && d.highOrCritical > 0) {
-        showToast(`Security scan: ${d.highOrCritical} high or critical npm issues — check Security scan panel`, 'error');
-      } else if (!d.skipped) {
-        showToast('Security scan finished — no high or critical npm findings', 'success');
+      const d = event as { highOrCritical?: number; skipped?: boolean; listenToast?: boolean };
+      if (d.listenToast !== false) {
+        if (!d.skipped && typeof d.highOrCritical === 'number' && d.highOrCritical > 0) {
+          showToast(`Security scan: ${d.highOrCritical} high or critical npm issues — check Security scan panel`, 'error');
+        } else if (!d.skipped) {
+          showToast('Security scan finished — no high or critical npm findings', 'success');
+        }
       }
       window.dispatchEvent(new CustomEvent('openclaw:todos-refresh'));
+    } else if (event.type === 'code_security_scan_complete') {
+      window.dispatchEvent(new CustomEvent('openclaw:code-security-scan-complete', { detail: event }));
+      const d = event as { summary?: { high?: number; medium?: number } };
+      const hi = d.summary?.high ?? 0;
+      if (hi > 0) {
+        showToast(`Code scan: ${hi} high-severity pattern hits — open Argus security tray for details`, 'error');
+      }
     } else if (event.type === 'speak_style_changed') window.dispatchEvent(new CustomEvent('openclaw:speak-style-changed'));
     else if (event.type === 'echo_personality_changed') window.dispatchEvent(new CustomEvent('openclaw:echo-personality-changed'));
     else if (event.type === 'voice_changed') {
@@ -401,10 +500,30 @@ const FridayListenApp: React.FC = () => {
           persona: mergePersona(activePersonaKey, personaOverrides, currentVoice, personaCatalog),
         });
       }
+      // Celebration line must run after task summary TTS — arm on speak long enough to be summary, then listen.
+      if (!sseStaleSpeak && event.type === 'speak') {
+        const g = celebrationAfterSummaryRef.current;
+        const preview = String(event.text || '').trim();
+        if (g && g.phase === 'armed' && preview.length >= 24 && Date.now() - g.armedAt < 25_000) {
+          g.phase = 'after_speak';
+        }
+      }
       if (!sseStaleSpeak && (event.type === 'speak' || event.type === 'thinking')) {
         setSpeakingText(event.text || 'Speaking...');
       }
       if (event.type === 'listening' || event.type === 'reply') setSpeakingText('');
+      if (!sseStaleSpeak && event.type === 'listening') {
+        const g = celebrationAfterSummaryRef.current;
+        if (g?.phase === 'after_speak') {
+          celebrationAfterSummaryRef.current = null;
+          if (celebrationListenFallbackTimerRef.current) {
+            clearTimeout(celebrationListenFallbackTimerRef.current);
+            celebrationListenFallbackTimerRef.current = null;
+          }
+          const line = g.askText;
+          window.setTimeout(() => speakCelebrationAskRef.current(line), 500);
+        }
+      }
       // "Always Speak via UI" — play SSE reply through the browser even when Python daemons are silent
       if (event.type === 'reply' && alwaysSpeakViaUi && event.text?.trim()) {
         fetch('/voice/speak-async', {
@@ -418,8 +537,10 @@ const FridayListenApp: React.FC = () => {
 
   const prevConnRef = useRef(connectionStatus);
   useEffect(() => {
+    connectionStatusRef.current = connectionStatus;
     if (prevConnRef.current === 'speaking' && connectionStatus === 'listening') {
       setSpeakingText('');
+      lastSpokeAtRef.current = Date.now();
     }
     prevConnRef.current = connectionStatus;
   }, [connectionStatus]);
@@ -559,21 +680,50 @@ const FridayListenApp: React.FC = () => {
         if (data.deferredOpenRouter) {
           pendingJarvisSpeak = true;
         }
-        if (data.ok && data.celebration?.song && data.celebration?.askText) {
+        if (
+          data.ok &&
+          data.celebration?.song &&
+          data.celebration?.askText &&
+          !mentions.includes('cursor')
+        ) {
           const cel = data.celebration as CelebrationPayload;
           setCelebrationOffer({
             song: cel.song,
             askText: cel.askText,
             delayMsBeforeAsk: cel.delayMsBeforeAsk ?? 4000,
           });
-          celebrationAskTimerRef.current = setTimeout(() => {
+          if (celebrationAskTimerRef.current) {
+            clearTimeout(celebrationAskTimerRef.current);
             celebrationAskTimerRef.current = null;
-            fetch('/voice/speak-async', {
-              method: 'POST',
-              headers: { ...authHeaders() as Record<string, string> },
-              body: JSON.stringify({ text: cel.askText }),
-            }).catch(() => {});
-          }, cel.delayMsBeforeAsk ?? 4000);
+          }
+          if (celebrationListenFallbackTimerRef.current) {
+            clearTimeout(celebrationListenFallbackTimerRef.current);
+            celebrationListenFallbackTimerRef.current = null;
+          }
+          celebrationAfterSummaryRef.current = null;
+
+          const willSpeakSummary = Boolean(
+            data.summary && (alwaysSpeakViaUi || data.speakAsync !== false),
+          );
+
+          if (willSpeakSummary) {
+            celebrationAfterSummaryRef.current = {
+              askText: cel.askText,
+              armedAt: Date.now(),
+              phase: 'armed',
+            };
+            celebrationListenFallbackTimerRef.current = setTimeout(() => {
+              celebrationListenFallbackTimerRef.current = null;
+              const g = celebrationAfterSummaryRef.current;
+              celebrationAfterSummaryRef.current = null;
+              if (g?.askText) speakCelebrationAsk(g.askText);
+            }, 50_000);
+          } else {
+            celebrationAskTimerRef.current = setTimeout(() => {
+              celebrationAskTimerRef.current = null;
+              speakCelebrationAsk(cel.askText);
+            }, cel.delayMsBeforeAsk ?? 4000);
+          }
         }
       } catch (err) {
         addBubble({ type: 'error', text: String(err), ts: Date.now(), persona: getReplyPersona() });
@@ -599,6 +749,7 @@ const FridayListenApp: React.FC = () => {
       personaOverrides,
       currentVoice,
       showToast,
+      speakCelebrationAsk,
     ],
   );
 
@@ -616,6 +767,10 @@ const FridayListenApp: React.FC = () => {
 
   const onQuickNarratedReview = useCallback(() => {
     void sendChatFromListenUi(QUICK_CURSOR_NARRATED_REVIEW);
+  }, [sendChatFromListenUi]);
+
+  const onQuickPrecommit = useCallback(() => {
+    void sendChatFromListenUi(QUICK_CURSOR_PRECOMMIT);
   }, [sendChatFromListenUi]);
 
   const onCelebrationPlay = useCallback(async () => {
@@ -886,6 +1041,16 @@ const FridayListenApp: React.FC = () => {
           <button
             type="button"
             className={styles['top-btn']}
+            onClick={() => setArgusWaTrayOpen(true)}
+            title="Argus security scan and WhatsApp (side tray)"
+            aria-label="Open Argus and WhatsApp side tray"
+          >
+            {'\uD83D\uDC6E'}
+            {'\uD83D\uDCAC'}
+          </button>
+          <button
+            type="button"
+            className={styles['top-btn']}
             onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
             title={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
             aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
@@ -909,7 +1074,7 @@ const FridayListenApp: React.FC = () => {
               type="button"
               className={styles['top-btn']}
               onClick={() => setIntegrationsDrawerOpen(true)}
-              title="Mail and WhatsApp"
+              title="Mail and tasks"
             >
               {'\uD83D\uDCE7'}
             </button>
@@ -982,51 +1147,65 @@ const FridayListenApp: React.FC = () => {
           >
             Review
           </button>
+          <button
+            type="button"
+            className={styles['top-btn']}
+            onClick={onQuickPrecommit}
+            disabled={sending}
+            title="Send pre-commit code security and quality scan instructions to Cursor (source-level, not npm audit)"
+          >
+            Scan
+          </button>
           <SpeakStylePanel showToast={showToast} />
           <EchoPersonalityPanel showToast={showToast} edgeVoices={edgeVoices} theme={theme} />
         </div>
       </div>
 
-      <div className={styles['openclaw-stack-wrap']}>
-        <div className={styles['openclaw-policy-bar']}>
-          <SecurityScanPanel authHeaders={authHeaders} theme={theme} showToast={showToast} variant="avatar" />
+      {openclawStrip && (
+        <div className={styles['openclaw-status-bar']} role="status" aria-live="polite">
+          <span className={styles['openclaw-status-brand']}>OpenClaw</span>
+          <span className={openclawStrip.gwOk ? styles['oc-ok'] : styles['oc-bad']}>
+            gateway {openclawStrip.gwOk ? 'OK' : 'down'}
+          </span>
+          <span className={openclawStrip.agentOk ? styles['oc-ok'] : styles['oc-bad']}>
+            agent {openclawStrip.agentOk ? 'OK' : 'down'}
+          </span>
+          {openclawStrip.roleCount > 0 && (
+            <span className={styles['oc-meta']}>
+              roster {openclawStrip.roleCount}
+              {openclawStrip.fromDb ? ' · Postgres' : ' · defaults'}
+            </span>
+          )}
+          {openclawStrip.err && <span className={styles['oc-err']}>{openclawStrip.err}</span>}
+          {(() => {
+            const working = sessions.filter((s) => s.status === 'active').length;
+            const free = sessions.filter((s) => s.status === 'idle').length;
+            return (
+              <button
+                type="button"
+                className={styles['oc-agents-btn']}
+                onClick={() => setAgentPanelOpen(true)}
+                title="Click to view detailed agent panel"
+              >
+                <span className={styles['oc-agents-icon']}>⚡</span>
+                <span>{working} working</span>
+                <span className={styles['oc-agents-sep']}>·</span>
+                <span>{free} free</span>
+              </button>
+            );
+          })()}
         </div>
-        {openclawStrip && (
-          <div className={styles['openclaw-status-bar']} role="status" aria-live="polite">
-            <span className={styles['openclaw-status-brand']}>OpenClaw</span>
-            <span className={openclawStrip.gwOk ? styles['oc-ok'] : styles['oc-bad']}>
-              gateway {openclawStrip.gwOk ? 'OK' : 'down'}
-            </span>
-            <span className={openclawStrip.agentOk ? styles['oc-ok'] : styles['oc-bad']}>
-              agent {openclawStrip.agentOk ? 'OK' : 'down'}
-            </span>
-            {openclawStrip.roleCount > 0 && (
-              <span className={styles['oc-meta']}>
-                roster {openclawStrip.roleCount}
-                {openclawStrip.fromDb ? ' · Postgres' : ' · defaults'}
-              </span>
-            )}
-            {openclawStrip.err && <span className={styles['oc-err']}>{openclawStrip.err}</span>}
-            {(() => {
-              const working = sessions.filter((s) => s.status === 'active').length;
-              const free = sessions.filter((s) => s.status === 'idle').length;
-              return (
-                <button
-                  type="button"
-                  className={styles['oc-agents-btn']}
-                  onClick={() => setAgentPanelOpen(true)}
-                  title="Click to view detailed agent panel"
-                >
-                  <span className={styles['oc-agents-icon']}>⚡</span>
-                  <span>{working} working</span>
-                  <span className={styles['oc-agents-sep']}>·</span>
-                  <span>{free} free</span>
-                </button>
-              );
-            })()}
-          </div>
-        )}
-      </div>
+      )}
+
+      <ArgusWhatsAppTray
+        open={argusWaTrayOpen}
+        onClose={() => setArgusWaTrayOpen(false)}
+        authHeaders={authHeaders}
+        theme={theme}
+        showToast={showToast}
+        peripheralSpeak={peripheralSpeak}
+        speakingPersonaKey={speakingPersonaKey}
+      />
 
       {/* Main layout: sidebar + chat */}
       <div className={styles['main-layout']}>

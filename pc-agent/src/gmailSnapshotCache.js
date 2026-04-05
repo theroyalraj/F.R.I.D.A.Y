@@ -101,6 +101,40 @@ export async function setCachedGmailSnapshot(q, snap) {
   }
 }
 
+const ARCHIVED_KEY = 'openclaw:gmail:archived';
+const ARCHIVED_TTL = 86_400; // 24h
+
+/** Mark a mail UID as archived in Redis so it's filtered from future fetches. */
+export async function markMailArchived(uid) {
+  const redis = await _getRedis();
+  if (!redis) return;
+  try {
+    await redis.sAdd(ARCHIVED_KEY, String(uid));
+    await redis.expire(ARCHIVED_KEY, ARCHIVED_TTL);
+  } catch { /* ignore */ }
+}
+
+/** Get all archived UIDs (to filter from snapshots). */
+export async function getArchivedMailUids() {
+  const redis = await _getRedis();
+  if (!redis) return new Set();
+  try {
+    const members = await redis.sMembers(ARCHIVED_KEY);
+    return new Set(members);
+  } catch {
+    return new Set();
+  }
+}
+
+/** Remove a UID from the archived set (e.g. if mark-unread is called). */
+export async function unmarkMailArchived(uid) {
+  const redis = await _getRedis();
+  if (!redis) return;
+  try {
+    await redis.sRem(ARCHIVED_KEY, String(uid));
+  } catch { /* ignore */ }
+}
+
 /** Invalidate all openclaw:gmail:snapshot:* keys (call when new mail arrives). */
 export async function invalidateAllGmailSnapshotCaches() {
   const redis = await _getRedis();

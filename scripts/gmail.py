@@ -176,7 +176,10 @@ def cmd_archive(args):
     # Mark as seen
     m.uid("STORE", uid, "+FLAGS", "(\\Seen)")
     # Move to [Gmail]/All Mail (archive) — fallback: just mark read if label not found
-    result = m.uid("COPY", uid, "[Gmail]/All Mail")
+    result = m.uid("COPY", uid, '"[Gmail]/All Mail"')
+    if result[0] != "OK":
+        # Try without [Gmail] prefix (some locales / providers)
+        result = m.uid("COPY", uid, '"All Mail"')
     if result[0] == "OK":
         m.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
         m.expunge()

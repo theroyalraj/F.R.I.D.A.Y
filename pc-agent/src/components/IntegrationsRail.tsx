@@ -6,7 +6,6 @@ import { COMPANY_PERSONAS, personaIcon, type CompanyPersonaKey } from '../data/c
 import styles from '../styles/listen.module.css';
 
 type MailRow = { uid: string; from: string; subject: string; date: string };
-type MarkedMail = { [uid: string]: boolean };
 
 const MAIL_BATCH = 8;
 
@@ -52,8 +51,7 @@ export const IntegrationsRail: React.FC<Props> = ({
     hasMoreRecent: false,
   });
   const [selectedMail, setSelectedMail] = useState<MailRow | null>(null);
-  const [markedMails, setMarkedMails] = useState<MarkedMail>({});
-  const [archivingMails, setArchivingMails] = useState<{ [uid: string]: boolean }>({});
+  const markedReadRef = useRef<Set<string>>(new Set());
   const [isDragging, setIsDragging] = useState(false);
   const [lastGmailRefresh, setLastGmailRefresh] = useState<number>(Date.now());
   const [gmailAutoRefresh, setGmailAutoRefresh] = useState(true);
@@ -107,72 +105,25 @@ export const IntegrationsRail: React.FC<Props> = ({
     };
   }, [isDragging]);
 
-  const toggleMailMark = (uid: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    const isMarking = !markedMails[uid];
-
-    // Optimistic UI update
-    setMarkedMails((prev) => ({
-      ...prev,
-      [uid]: isMarking,
-    }));
-
-    if (isMarking) {
-      // Mark as unread and remove from unread list
-      void (async () => {
-        try {
-          const r = await fetch('/integrations/mail/mark-unread', {
-            method: 'POST',
-            headers: { ...authHeaders() as Record<string, string>, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ uid }),
-          });
-          if (!r.ok) {
-            showToast('Failed to mark email', 'error');
-            // Revert optimistic update on error
-            setMarkedMails((prev) => { const n = { ...prev }; delete n[uid]; return n; });
-            return;
-          }
-          // Remove from unread list after marking as done
-          setGmail((g) => ({
-            ...g,
-            unread: g.unread.filter((m) => m.uid !== uid),
-          }));
-          showToast('Email marked as done', 'success');
-        } catch (err) {
-          showToast(String((err as Error).message || err), 'error');
-          // Revert on error
-          setMarkedMails((prev) => { const n = { ...prev }; delete n[uid]; return n; });
-        }
-      })();
-    }
-  };
-
-  const archiveMail = async (uid: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    setArchivingMails((prev) => ({ ...prev, [uid]: true }));
-    try {
-      const r = await fetch('/integrations/mail/archive', {
-        method: 'POST',
-        headers: { ...authHeaders() as Record<string, string>, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ uid }),
-      });
-      const d = await r.json();
-      if (!r.ok) {
-        showToast(d.error || `Archive failed (${r.status})`, 'error');
-      } else {
-        showToast('Email archived', 'success');
-        setGmail((g) => ({
-          ...g,
-          unread: g.unread.filter((m) => m.uid !== uid),
-          recent: g.recent.filter((m) => m.uid !== uid),
-        }));
-        if (selectedMail?.uid === uid) setSelectedMail(null);
-      }
-    } catch (err) {
-      showToast(String((err as Error).message || err), 'error');
-    } finally {
-      setArchivingMails((prev) => { const n = { ...prev }; delete n[uid]; return n; });
-    }
+  /** Select an unread email — auto-marks it as read (archive) in the background. */
+  const selectAndMarkRead = (m: MailRow) => {
+    setSelectedMail(m);
+    const uid = m.uid;
+    if (markedReadRef.current.has(uid)) return; // already marked
+    markedReadRef.current.add(uid);
+    // Remove from unread list after a short delay so user sees the content
+    setTimeout(() => {
+      setGmail((g) => ({
+        ...g,
+        unread: g.unread.filter((x) => x.uid !== uid),
+      }));
+    }, 1500);
+    // Fire-and-forget: archive in Gmail + mark in Redis
+    fetch('/integrations/mail/archive', {
+      method: 'POST',
+      headers: { ...authHeaders() as Record<string, string>, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ uid }),
+    }).catch(() => {});
   };
 
   const refreshMail = useCallback(async (forceFresh = false) => {
@@ -409,17 +360,9 @@ export const IntegrationsRail: React.FC<Props> = ({
                         <button
                           type="button"
                           className={`${styles['integrations-mail-row']} ${selectedMail?.uid === m.uid ? styles['integrations-mail-row-active'] : ''}`}
-                          onClick={() => setSelectedMail(m)}
+                          onClick={() => selectAndMarkRead(m)}
                         >
                           <div style={{ display: 'flex', alignItems: 'center', width: '100%', minWidth: 0 }}>
-                            <div
-                              className={`${styles['integrations-mail-mark']} ${markedMails[m.uid] ? styles['marked'] : ''}`}
-                              onClick={(e) => toggleMailMark(m.uid, e)}
-                              role="checkbox"
-                              aria-checked={markedMails[m.uid] ?? false}
-                            >
-                              {markedMails[m.uid] ? '✓' : ''}
-                            </div>
                             <div style={{ flex: 1, minWidth: 0 }}>
                               <span className={styles['integrations-mail-subj']}>{m.subject || '(no subject)'}</span>
                               <div className={styles['integrations-mail-from']}>{m.from}</div>
@@ -428,16 +371,6 @@ export const IntegrationsRail: React.FC<Props> = ({
                               {shortFromDate(m).props.children}
                             </span>
                           </div>
-                        </button>
-                        <button
-                          type="button"
-                          className={styles['integrations-mail-archive']}
-                          onClick={(e) => archiveMail(m.uid, e)}
-                          disabled={archivingMails[m.uid]}
-                          title="Archive (mark done)"
-                          aria-label="Archive email"
-                        >
-                          {archivingMails[m.uid] ? '⋯' : '✓ Done'}
                         </button>
                       </div>
                     ))}
@@ -454,14 +387,6 @@ export const IntegrationsRail: React.FC<Props> = ({
                           onClick={() => setSelectedMail(m)}
                         >
                           <div style={{ display: 'flex', alignItems: 'center', width: '100%', minWidth: 0 }}>
-                            <div
-                              className={`${styles['integrations-mail-mark']} ${markedMails[m.uid] ? styles['marked'] : ''}`}
-                              onClick={(e) => toggleMailMark(m.uid, e)}
-                              role="checkbox"
-                              aria-checked={markedMails[m.uid] ?? false}
-                            >
-                              {markedMails[m.uid] ? '✓' : ''}
-                            </div>
                             <div style={{ flex: 1, minWidth: 0 }}>
                               <span className={styles['integrations-mail-subj']}>{m.subject || '(no subject)'}</span>
                               <div className={styles['integrations-mail-from']}>{m.from}</div>
@@ -470,16 +395,6 @@ export const IntegrationsRail: React.FC<Props> = ({
                               {shortFromDate(m).props.children}
                             </span>
                           </div>
-                        </button>
-                        <button
-                          type="button"
-                          className={styles['integrations-mail-archive']}
-                          onClick={(e) => archiveMail(m.uid, e)}
-                          disabled={archivingMails[m.uid]}
-                          title="Archive (mark done)"
-                          aria-label="Archive email"
-                        >
-                          {archivingMails[m.uid] ? '⋯' : '✓ Done'}
                         </button>
                       </div>
                     ))}

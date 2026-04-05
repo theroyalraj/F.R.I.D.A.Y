@@ -8,6 +8,9 @@ import {
   getCachedGmailSnapshot,
   setCachedGmailSnapshot,
   invalidateAllGmailSnapshotCaches,
+  markMailArchived,
+  getArchivedMailUids,
+  unmarkMailArchived,
 } from './gmailSnapshotCache.js';
 
 const _ROOT = path.dirname(path.dirname(path.dirname(fileURLToPath(import.meta.url))));
@@ -210,6 +213,21 @@ function flattenEvolutionMessages(data, maxCollect) {
 export function createIntegrationsRouter(authMiddleware) {
   const r = express.Router();
   r.use(express.json({ limit: '256kb' }));
+  /**
+   * Public GET — POST /integrations/mail/archive is the real API; this avoids 401 when opening the URL in a browser.
+   */
+  r.get('/mail/archive', (_req, res) => {
+    res.type('json');
+    res.json({
+      ok: true,
+      method: 'POST',
+      path: '/integrations/mail/archive',
+      description: 'Archive a Gmail message by IMAP UID (moves out of INBOX, marks read).',
+      auth: 'Authorization: Bearer <PC_AGENT_SECRET or JWT>',
+      body: { uid: 'string | number (required)' },
+      example: { uid: '12345' },
+    });
+  });
   r.use(authMiddleware);
 
   r.get('/gmail', async (req, res) => {
@@ -224,13 +242,22 @@ export function createIntegrationsRouter(authMiddleware) {
       String(req.query.refresh || '').toLowerCase() === 'true';
 
     try {
+      const archived = await getArchivedMailUids();
+      const filterArchived = (data) => {
+        if (!archived.size) return data;
+        const out = { ...data };
+        if (Array.isArray(out.unread)) out.unread = out.unread.filter((m) => !archived.has(String(m.uid)));
+        if (Array.isArray(out.recent)) out.recent = out.recent.filter((m) => !archived.has(String(m.uid)));
+        return out;
+      };
+
       if (!forceFresh) {
         const cached = await getCachedGmailSnapshot(q);
         if (cached && typeof cached === 'object') {
           const out = { ...cached };
           delete out._cache;
           try {
-            res.json({ ...out, source: 'redis' });
+            res.json({ ...filterArchived(out), source: 'redis' });
           } catch (ser) {
             req.log?.warn({ err: String(ser?.message || ser) }, 'integrations gmail cached json failed');
             res.status(503).json({ ok: false, error: 'Could not serialize cached mail snapshot' });
@@ -242,7 +269,7 @@ export function createIntegrationsRouter(authMiddleware) {
       const snap = await fetchGmailSnapshot(q);
       await setCachedGmailSnapshot(q, snap);
       try {
-        res.json({ ...snap, source: 'imap' });
+        res.json({ ...filterArchived(snap), source: 'imap' });
       } catch (ser) {
         req.log?.warn({ err: String(ser?.message || ser) }, 'integrations gmail response json failed');
         res.status(503).json({ ok: false, error: 'Could not serialize mail snapshot' });
@@ -533,10 +560,13 @@ export function createIntegrationsRouter(authMiddleware) {
     }
   });
 
-  /** Archive (mark done) a Gmail message by UID — removes from inbox and marks read. */
+  /** Archive (mark done) a Gmail message by UID — removes from inbox and marks read.
+   *  Also marks UID in Redis so it's filtered from future snapshot fetches (24h TTL). */
   r.post('/mail/archive', async (req, res) => {
     const { uid } = req.body || {};
     if (!uid) return res.status(400).json({ error: 'uid required' });
+    // Mark in Redis immediately so UI never sees it again
+    await markMailArchived(uid);
     try {
       const result = spawnSync(
         'python',
@@ -548,6 +578,7 @@ export function createIntegrationsRouter(authMiddleware) {
         const msg = (result.stderr || '').trim() || `exit ${result.status}`;
         return res.status(500).json({ ok: false, error: msg });
       }
+      await invalidateAllGmailSnapshotCaches();
       const out = (result.stdout || '').trim();
       let data = null;
       try { data = out ? JSON.parse(out) : null; } catch { data = { raw: out }; }
@@ -557,10 +588,11 @@ export function createIntegrationsRouter(authMiddleware) {
     }
   });
 
-  /** Mark email as unread (done) by UID — marks message as unread for tracking. */
+  /** Mark email as unread by UID — also removes from archived set so it reappears. */
   r.post('/mail/mark-unread', async (req, res) => {
     const { uid } = req.body || {};
     if (!uid) return res.status(400).json({ error: 'uid required' });
+    await unmarkMailArchived(uid);
     try {
       const result = spawnSync(
         'python',
