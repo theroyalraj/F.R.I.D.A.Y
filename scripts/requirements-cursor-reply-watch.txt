@@ -1,0 +1,2 @@
+# cursor-reply-watch.py — OS file events for agent-transcripts (faster than poll).
+watchdog>=4.0.0

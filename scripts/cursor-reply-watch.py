@@ -2,6 +2,9 @@
 """
 cursor-reply-watch.py — tail Cursor agent JSONL transcripts and speak assistant prose only.
 
+Uses watchdog OS file notifications under CURSOR_TRANSCRIPTS_DIR (with a periodic rescan fallback)
+instead of polling. Requires: pip install -r scripts/requirements-cursor-reply-watch.txt
+
 Watches every agent-transcript UUID folder under CURSOR_TRANSCRIPTS_DIR. Main chat UUID is
 session-voice.json "chat_id"; any other UUID is treated as a Task subagent transcript.
 
@@ -44,6 +47,9 @@ Incremental thinking (same line growing across JSONL updates):
   Thinking blocks may carry final/partial flags — we only speak immediately when final is true (or partial is explicitly false).
   When flags are missing, we buffer and speak once after FRIDAY_CURSOR_THINKING_DEBOUNCE_SEC of no updates (default 0.65).
 
+Filesystem debounce (rapid JSONL writes):
+  FRIDAY_CURSOR_FILE_DEBOUNCE_SEC — coalesce events per file before tail read (default 0.035)
+
 Run:  python scripts/cursor-reply-watch.py
 
 Thinking smoke tests — python scripts/cursor-watcher-smoke-thinking.py
@@ -69,6 +75,17 @@ import sys
 import threading
 import time
 from pathlib import Path
+
+try:
+    from watchdog.events import FileSystemEventHandler
+    from watchdog.observers import Observer
+except ImportError:
+    print(
+        "cursor-reply-watch: missing watchdog — install with:\n"
+        "  pip install -r scripts/requirements-cursor-reply-watch.txt",
+        flush=True,
+    )
+    raise SystemExit(1) from None
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _ENV_FILE = _REPO_ROOT / ".env"
@@ -101,9 +118,11 @@ from thinking_openers import pick_thinking_opener
 _PICK_SCRIPT = _SKILL_SCRIPTS / "pick-session-voice.py"
 _SPEAK_SCRIPT = _REPO_ROOT / "skill-gateway" / "scripts" / "friday-speak.py"
 
+# Legacy poll tuning (unused when watchdog is active; kept for reference / tooling).
 POLL_SEC = 0.35
 POLL_ACTIVE_SEC = 0.15
-RESCAN_SEC = 10.0
+# Fallback directory rescan if an OS file event is missed (network drive, driver quirks).
+RESCAN_SEC = 30.0
 _ACTIVE_WINDOW_SEC = 5.0
 _SPOKEN_HASHES_MAX = 500
 
@@ -512,6 +531,12 @@ def _env_float(key: str, default: float) -> float:
         return default
 
 
+def _file_event_debounce_sec() -> float:
+    """Coalesce rapid writes to the same JSONL before reading (ms-scale)."""
+    v = _env_float("FRIDAY_CURSOR_FILE_DEBOUNCE_SEC", 0.035)
+    return max(0.005, min(v, 1.0))
+
+
 def _wrap_oversized_chunk(chunk: str, lim: int) -> list[str]:
     """Split a long chunk at spaces so no fragment exceeds lim characters."""
     chunk = chunk.strip()
@@ -780,6 +805,24 @@ def _is_voice_agent_chat_prose(s: str) -> bool:
     return bool(_RE_VOICE_AGENT_CHAT.search(t))
 
 
+class ThinkingFlushCtx:
+    """Schedules thinking debounce flushes under the shared state_map lock."""
+
+    __slots__ = ("lock", "state_map", "speak_main", "speak_sub")
+
+    def __init__(
+        self,
+        lock: threading.Lock,
+        state_map: dict[str, dict],
+        speak_main: bool,
+        speak_sub: bool,
+    ) -> None:
+        self.lock = lock
+        self.state_map = state_map
+        self.speak_main = speak_main
+        self.speak_sub = speak_sub
+
+
 def _thinking_debounce_sec() -> float:
     v = _env_float("FRIDAY_CURSOR_THINKING_DEBOUNCE_SEC", 0.65)
     return max(0.15, min(v, 30.0))
@@ -846,6 +889,8 @@ def _thinking_buffer_update(
     is_main: bool,
     speak_main: bool,
     speak_sub: bool,
+    path_str: str | None = None,
+    thinking_ctx: ThinkingFlushCtx | None = None,
 ) -> None:
     """Incremental streaming: speak NEW sentences as they arrive, not all at once.
 
@@ -879,11 +924,15 @@ def _thinking_buffer_update(
     unseen = thinking_prose[spoken_len:].strip()
     if not unseen:
         st["thinking_debounce_at"] = now + _thinking_debounce_sec()
+        if path_str and thinking_ctx is not None:
+            _schedule_thinking_flush(path_str, st, thinking_ctx)
         return
 
     parts = re.split(r"(?<=[.!?…])\s+", unseen)
     if len(parts) <= 1:
         st["thinking_debounce_at"] = now + _thinking_debounce_sec()
+        if path_str and thinking_ctx is not None:
+            _schedule_thinking_flush(path_str, st, thinking_ctx)
         return
 
     ready = parts[:-1]
@@ -909,9 +958,18 @@ def _thinking_buffer_update(
             st["thinking_batch_buf"] = batch
 
     st["thinking_debounce_at"] = now + _thinking_debounce_sec()
+    if path_str and thinking_ctx is not None:
+        _schedule_thinking_flush(path_str, st, thinking_ctx)
+
+
+def _cancel_thinking_timer(st: dict) -> None:
+    t = st.pop("_thinking_timer", None)
+    if isinstance(t, threading.Timer):
+        t.cancel()
 
 
 def _thinking_clear_pending(st: dict) -> None:
+    _cancel_thinking_timer(st)
     st.pop("thinking_pending", None)
     st.pop("thinking_debounce_at", None)
     st.pop("thinking_spoken_len", None)
@@ -959,6 +1017,274 @@ def _flush_thinking_debounce(
             speak_sub=speak_sub,
         )
     _thinking_clear_pending(st)
+
+
+def _schedule_thinking_flush(path_str: str, st: dict, ctx: ThinkingFlushCtx) -> None:
+    """Cancel any prior debounce timer and arm a new one for this state's thinking_debounce_at."""
+    _cancel_thinking_timer(st)
+    dead = st.get("thinking_debounce_at")
+    if dead is None:
+        return
+    delay = max(0.001, dead - time.monotonic())
+
+    def fire() -> None:
+        with ctx.lock:
+            st_live = ctx.state_map.get(path_str)
+            if st_live is None:
+                return
+            st_live.pop("_thinking_timer", None)
+            _flush_thinking_debounce(
+                st_live,
+                time.monotonic(),
+                speak_main=ctx.speak_main,
+                speak_sub=ctx.speak_sub,
+            )
+
+    timer = threading.Timer(delay, fire)
+    timer.daemon = True
+    st["_thinking_timer"] = timer
+    timer.start()
+
+
+def _rescan_transcript_paths(state_map: dict[str, dict]) -> None:
+    known = {str(p.resolve()) for p in _list_transcript_files()}
+    for p in known:
+        if p not in state_map:
+            try:
+                off = Path(p).stat().st_size
+            except OSError:
+                off = 0
+            state_map[p] = {
+                "offset": off,
+                "carry": "",
+                "spoken_hashes": set(),
+                "last_activity": 0.0,
+            }
+    for old in list(state_map.keys()):
+        if old not in known:
+            st = state_map.pop(old, None)
+            if st is not None:
+                _cancel_thinking_timer(st)
+
+
+def _jsonl_under_root(path: Path) -> bool:
+    try:
+        path.resolve().relative_to(_TRANSCRIPTS_ROOT)
+    except ValueError:
+        return False
+    return path.suffix.lower() == ".jsonl"
+
+
+def _process_jsonl_path(
+    path_str: str,
+    state_map: dict[str, dict],
+    *,
+    now: float,
+    main_uuid: str,
+    speak_main: bool,
+    speak_sub: bool,
+    speak_thinking: bool,
+    thinking_ctx: ThinkingFlushCtx | None,
+) -> None:
+    st = state_map.get(path_str)
+    if st is None:
+        return
+    p = Path(path_str)
+    try:
+        sz = p.stat().st_size
+    except OSError:
+        return
+    off = st["offset"]
+    if sz < off:
+        off = 0
+        st["carry"] = ""
+    st["offset"] = off
+    if sz == off:
+        return
+    st["last_activity"] = now
+    try:
+        with p.open("r", encoding="utf-8", errors="replace") as f:
+            f.seek(off)
+            chunk = f.read()
+        st["offset"] = sz
+    except OSError:
+        return
+
+    data = st["carry"] + chunk
+    lines = data.split("\n")
+    st["carry"] = lines.pop() if lines else ""
+    folder_uuid = p.parent.name
+    spoken_hashes: set = st["spoken_hashes"]
+
+    for line in lines:
+        if not line.strip():
+            continue
+
+        if not main_uuid:
+            continue
+
+        is_main = bool(folder_uuid == main_uuid)
+        is_sub = not is_main
+        st["is_main"] = is_main
+
+        if speak_thinking:
+            thinking_raw, stream_kind = _thinking_parse_line(line)
+            if thinking_raw:
+                thinking_prose = strip_to_prose(thinking_raw)
+                if thinking_prose:
+                    if stream_kind == "final":
+                        spoken_len = st.get("thinking_spoken_len", 0)
+                        tail = thinking_prose[spoken_len:].strip()
+                        batch = (st.pop("thinking_batch_buf", None) or "").strip()
+                        merged = " ".join(x for x in (batch, tail) if x).strip()
+                        _thinking_clear_pending(st)
+                        if merged:
+                            _thinking_speak_once(
+                                merged,
+                                spoken_hashes,
+                                rate_basis_len=len(thinking_prose),
+                                is_main=is_main,
+                                speak_main=speak_main,
+                                speak_sub=speak_sub,
+                            )
+                    else:
+                        _thinking_buffer_update(
+                            st,
+                            thinking_prose,
+                            now=now,
+                            spoken_hashes=spoken_hashes,
+                            is_main=is_main,
+                            speak_main=speak_main,
+                            speak_sub=speak_sub,
+                            path_str=path_str,
+                            thinking_ctx=thinking_ctx,
+                        )
+
+        raw_text = _assistant_text_from_line(line)
+        if not raw_text:
+            continue
+        prose = strip_to_prose(raw_text)
+        if not prose:
+            continue
+
+        h = _content_hash(prose)
+        if h in spoken_hashes:
+            continue
+        spoken_hashes.add(h)
+
+        if len(spoken_hashes) > _SPOKEN_HASHES_MAX:
+            to_remove = list(spoken_hashes)[:_SPOKEN_HASHES_MAX // 2]
+            for old_h in to_remove:
+                spoken_hashes.discard(old_h)
+
+        if is_main and speak_main:
+            _speak_main(prose)
+        elif is_sub and speak_sub:
+            _speak_subagent(prose)
+
+
+class _TranscriptEventHandler(FileSystemEventHandler):
+    """Debounced filesystem notifications → transcript tail reads."""
+
+    def __init__(
+        self,
+        *,
+        state_map: dict[str, dict],
+        lock: threading.Lock,
+        speak_main: bool,
+        speak_sub: bool,
+        speak_thinking: bool,
+        warned_no_chat: list[bool],
+    ) -> None:
+        super().__init__()
+        self._state_map = state_map
+        self._lock = lock
+        self._speak_main = speak_main
+        self._speak_sub = speak_sub
+        self._speak_thinking = speak_thinking
+        self._warned_no_chat = warned_no_chat
+        self._debounce_lock = threading.Lock()
+        self._path_timers: dict[str, threading.Timer] = {}
+
+    def close(self) -> None:
+        with self._debounce_lock:
+            for t in self._path_timers.values():
+                t.cancel()
+            self._path_timers.clear()
+
+    def on_created(self, event) -> None:  # noqa: ANN001
+        if event.is_directory:
+            with self._lock:
+                _rescan_transcript_paths(self._state_map)
+            return
+        self._queue_path(event.src_path)
+
+    def on_modified(self, event) -> None:  # noqa: ANN001
+        if event.is_directory:
+            return
+        self._queue_path(event.src_path)
+
+    def _queue_path(self, src_path: str) -> None:
+        path = Path(src_path)
+        if not _jsonl_under_root(path):
+            return
+        try:
+            key = str(path.resolve())
+        except OSError:
+            return
+        debounce = _file_event_debounce_sec()
+        with self._debounce_lock:
+            old = self._path_timers.pop(key, None)
+            if old is not None:
+                old.cancel()
+
+            def run() -> None:
+                with self._debounce_lock:
+                    self._path_timers.pop(key, None)
+                self._process_resolved_path(key)
+
+            t = threading.Timer(debounce, run)
+            t.daemon = True
+            self._path_timers[key] = t
+            t.start()
+
+    def _process_resolved_path(self, key: str) -> None:
+        with self._lock:
+            if key not in self._state_map:
+                _rescan_transcript_paths(self._state_map)
+                if key not in self._state_map:
+                    return
+            session = _load_session()
+            main_uuid = (session.get("chat_id") or "").strip()
+            if not main_uuid and not self._warned_no_chat[0]:
+                self._warned_no_chat[0] = True
+                print(
+                    "cursor-reply-watch: .session-voice.json has no chat_id yet — open main Composer chat once "
+                    "so pick-session-voice can run, or paste chat_id from agent-transcripts.",
+                    flush=True,
+                )
+            thinking_ctx = (
+                ThinkingFlushCtx(self._lock, self._state_map, self._speak_main, self._speak_sub)
+                if self._speak_thinking
+                else None
+            )
+            now = time.monotonic()
+            _process_jsonl_path(
+                key,
+                self._state_map,
+                now=now,
+                main_uuid=main_uuid,
+                speak_main=self._speak_main,
+                speak_sub=self._speak_sub,
+                speak_thinking=self._speak_thinking,
+                thinking_ctx=thinking_ctx,
+            )
+
+
+def _periodic_rescan_worker(state_map: dict[str, dict], lock: threading.Lock, stop: threading.Event) -> None:
+    while not stop.wait(timeout=RESCAN_SEC):
+        with lock:
+            _rescan_transcript_paths(state_map)
 
 
 def _merge_new_paths(state_map: dict[str, dict], *, seek_end: bool) -> None:
@@ -1018,159 +1344,54 @@ def main() -> None:
     _maybe_seed_chat_id_if_single_transcript()
 
     state_map: dict[str, dict] = {}
-    last_rescan = 0.0
-    warned_no_chat = False
+    map_lock = threading.Lock()
+    warned_no_chat: list[bool] = [False]
 
     _merge_new_paths(state_map, seek_end=True)
 
     print(
-        f"cursor-reply-watch: root={_TRANSCRIPTS_ROOT} main={speak_main} subagent={speak_sub} thinking={speak_thinking}",
+        f"cursor-reply-watch: root={_TRANSCRIPTS_ROOT} main={speak_main} subagent={speak_sub} "
+        f"thinking={speak_thinking} mode=watchdog rescan_sec={RESCAN_SEC}",
         flush=True,
     )
 
-    while True:
-        now = time.monotonic()
-        if now - last_rescan >= RESCAN_SEC:
-            last_rescan = now
-            known = {str(p.resolve()) for p in _list_transcript_files()}
-            for p in known:
-                if p not in state_map:
-                    try:
-                        off = Path(p).stat().st_size
-                    except OSError:
-                        off = 0
-                    state_map[p] = {
-                        "offset": off,
-                        "carry": "",
-                        "spoken_hashes": set(),
-                        "last_activity": 0.0,
-                    }
-            for old in list(state_map.keys()):
-                if old not in known:
-                    del state_map[old]
+    if not _TRANSCRIPTS_ROOT.is_dir():
+        print(
+            f"cursor-reply-watch: transcript root missing — {_TRANSCRIPTS_ROOT}",
+            flush=True,
+        )
 
-        session = _load_session()
-        main_uuid = (session.get("chat_id") or "").strip()
-        if not main_uuid and not warned_no_chat:
-            warned_no_chat = True
-            print(
-                "cursor-reply-watch: .session-voice.json has no chat_id yet — open main Composer chat once "
-                "so pick-session-voice can run, or paste chat_id from agent-transcripts.",
-                flush=True,
-            )
+    handler = _TranscriptEventHandler(
+        state_map=state_map,
+        lock=map_lock,
+        speak_main=speak_main,
+        speak_sub=speak_sub,
+        speak_thinking=speak_thinking,
+        warned_no_chat=warned_no_chat,
+    )
+    observer = Observer()
+    observer.schedule(handler, str(_TRANSCRIPTS_ROOT), recursive=True)
+    observer.start()
 
-        any_recently_active = False
-        for path_str, st in list(state_map.items()):
-            p = Path(path_str)
-            try:
-                sz = p.stat().st_size
-            except OSError:
-                continue
-            off = st["offset"]
-            if sz < off:
-                off = 0
-                st["carry"] = ""
-            if sz != off:
-                st["last_activity"] = now
-                any_recently_active = True
-                try:
-                    with p.open("r", encoding="utf-8", errors="replace") as f:
-                        f.seek(off)
-                        chunk = f.read()
-                    st["offset"] = sz
-                except OSError:
-                    continue
+    stop_rescan = threading.Event()
+    rescan_thread = threading.Thread(
+        target=_periodic_rescan_worker,
+        args=(state_map, map_lock, stop_rescan),
+        name="cursor-reply-rescan",
+        daemon=True,
+    )
+    rescan_thread.start()
 
-                data = st["carry"] + chunk
-                lines = data.split("\n")
-                st["carry"] = lines.pop() if lines else ""
-                folder_uuid = p.parent.name
-                spoken_hashes: set = st["spoken_hashes"]
-
-                for line in lines:
-                    if not line.strip():
-                        continue
-
-                    if not main_uuid:
-                        continue
-
-                    is_main = bool(folder_uuid == main_uuid)
-                    is_sub = not is_main
-                    st["is_main"] = is_main
-
-                    # --- thinking capture (runs even when reply TTS is off) ---
-                    if speak_thinking:
-                        thinking_raw, stream_kind = _thinking_parse_line(line)
-                        if thinking_raw:
-                            thinking_prose = strip_to_prose(thinking_raw)
-                            if thinking_prose:
-                                if stream_kind == "final":
-                                    spoken_len = st.get("thinking_spoken_len", 0)
-                                    tail = thinking_prose[spoken_len:].strip()
-                                    batch = (st.pop("thinking_batch_buf", None) or "").strip()
-                                    merged = " ".join(x for x in (batch, tail) if x).strip()
-                                    _thinking_clear_pending(st)
-                                    if merged:
-                                        _thinking_speak_once(
-                                            merged,
-                                            spoken_hashes,
-                                            rate_basis_len=len(thinking_prose),
-                                            is_main=is_main,
-                                            speak_main=speak_main,
-                                            speak_sub=speak_sub,
-                                        )
-                                else:
-                                    _thinking_buffer_update(
-                                        st,
-                                        thinking_prose,
-                                        now=now,
-                                        spoken_hashes=spoken_hashes,
-                                        is_main=is_main,
-                                        speak_main=speak_main,
-                                        speak_sub=speak_sub,
-                                    )
-
-                    # --- regular reply TTS ---
-                    raw_text = _assistant_text_from_line(line)
-                    if not raw_text:
-                        continue
-                    prose = strip_to_prose(raw_text)
-                    if not prose:
-                        continue
-
-                    h = _content_hash(prose)
-                    if h in spoken_hashes:
-                        continue
-                    spoken_hashes.add(h)
-
-                    if len(spoken_hashes) > _SPOKEN_HASHES_MAX:
-                        to_remove = list(spoken_hashes)[:_SPOKEN_HASHES_MAX // 2]
-                        for old_h in to_remove:
-                            spoken_hashes.discard(old_h)
-
-                    if is_main and speak_main:
-                        _speak_main(prose)
-                    elif is_sub and speak_sub:
-                        _speak_subagent(prose)
-
-        if speak_thinking:
-            now_flush = time.monotonic()
-            for st in state_map.values():
-                _flush_thinking_debounce(
-                    st,
-                    now_flush,
-                    speak_main=speak_main,
-                    speak_sub=speak_sub,
-                )
-
-        # Adaptive polling: faster when transcripts are actively being written
-        if any_recently_active or any(
-            now - st.get("last_activity", 0) < _ACTIVE_WINDOW_SEC
-            for st in state_map.values()
-        ):
-            time.sleep(POLL_ACTIVE_SEC)
-        else:
-            time.sleep(POLL_SEC)
+    try:
+        while True:
+            time.sleep(86400.0)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop_rescan.set()
+        handler.close()
+        observer.stop()
+        observer.join(timeout=5.0)
 
 
 if __name__ == "__main__":
