@@ -94,15 +94,15 @@ See `friday-thinking-sounds.mdc` for the full phrase pools. The table below show
 
 | Moment | When to actually speak | Example |
 |--------|------------------------|---------|
-| Starting research / exploration | Only if ack didn't already cover it | "Let me dig into this." |
-| Found something important | Only if the finding changes the plan | "Okay, I see the issue." |
-| About to edit a file | Only on long multi-file edits; skip for single quick edits | "Updating the narrate rule now." |
-| Running a command / install | Only if the command takes 10+ seconds | "Kicking the install off." |
-| Waiting on a slow process | Only after 10+ seconds of silence | "Still on it, hang tight." |
+| Starting research / exploration | Only in the ack itself; no separate filler | "Got it, let me dig into this." |
+| Found something important | Only if 2-minute cooldown has elapsed | "Okay, I see the issue." |
+| About to edit a file | Only if 2-minute cooldown has elapsed | "Updating the narrate rule now." |
+| Running a command / install | Only if 2-minute cooldown has elapsed | "Kicking the install off." |
+| Waiting on a slow process | Only if 2-minute cooldown has elapsed | "Still on it, hang tight." |
 | Spawning a subagent | Always (these are meaningful events) | "Spinning up an agent for that." |
-| **Task complete** | **Always — mandatory verbose spoken summary** | See above |
+| **Task complete** | **Always — bypasses cooldown** | See above |
 
-Mid-task narration must sound like a person, not a script reading filenames. One phrase per logical step — and only when it adds information the user hasn't already heard.
+**2-minute cooldown:** after any speak call, no mid-task filler for 2 minutes. See `friday-thinking-sounds.mdc` for full details. Only the completion summary and subagent launches bypass this.
 
 ---
 

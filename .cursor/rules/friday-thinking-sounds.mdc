@@ -112,12 +112,27 @@ Always sound like a person who happens to be describing what they're doing:
 
 ---
 
-## Frequency — LESS IS MORE
+## Frequency — 2-MINUTE COOLDOWN
 
-- **Quick tasks (under ~4 tool calls total):** ack and completion summary are enough. Skip all phase filler.
-- **Medium tasks (4–10 tool calls):** at most ONE phase filler in the middle, only if the user would otherwise hear silence for 10+ seconds.
-- **Long tasks (10+ tool calls or subagents):** one filler every ~10 seconds of silence. Never more than one per message.
-- **Mid-task check-ins (Phase 4):** only if a single step runs longer than 10 seconds (slow install, long build). Not for ordinary reads/edits.
-- **On discovery (Phase 5):** only if the finding changes the plan. Routine "found it" after a simple grep is noise — just proceed.
-- **Never stack:** if your ack or thinking narration in the same message already described the next step, skip the phase filler. Two speak calls saying nearly the same thing is worse than one.
-- **Never repeat:** if the last thing the user heard was "reading through the code", do not say "let me have a look" on the very next message. Either say something new or say nothing.
+After any `friday-speak.py` call (ack, thinking, or filler), **wait at least 2 minutes before the next mid-task filler**. The only exceptions that bypass the cooldown are:
+
+1. **Completion summary** ("Done. ...") — always fires regardless of cooldown.
+2. **User-requested speech** — the user explicitly asks you to say something.
+
+### What this means in practice
+
+- **Message 1** fires the ack (and optionally combined thinking). The 2-minute cooldown starts.
+- **Messages 2–N** during the cooldown: **no phase filler, no check-ins, no discovery lines.** Just work silently.
+- After 2 minutes of real wall-clock time since the last speak: you may fire ONE filler if the user would otherwise hear extended silence.
+- **Completion summary** always fires at the end, cooldown or not.
+
+### Quick tasks vs long tasks
+
+- **Quick tasks (under ~4 tool calls):** ack and completion summary only. No filler ever.
+- **Medium tasks (4–10 tool calls):** ack, then silence during the cooldown, then completion. Filler only if the task outlasts the 2-minute window.
+- **Long tasks (10+ tool calls or subagents):** ack, then at most one filler per 2-minute window, then completion.
+
+### Still enforced
+
+- **Never stack:** if your ack already described the next step, skip any filler in the same message.
+- **Never repeat:** if the last thing the user heard was "reading through the code", do not say "let me have a look" later. Say something new or say nothing.
