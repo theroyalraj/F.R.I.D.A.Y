@@ -75,6 +75,34 @@
     setTimeout(() => el.remove(), 2_800);
   }
 
+  /** Windows default output: muted vs disabled (not the same) — Sentinel / Composer TTS. */
+  function applyWatcherOutput(w) {
+    const row = $('footerWatcherRow');
+    const el = $('footerWatcherOutput');
+    if (!row || !el) return;
+    row.classList.remove('footer-muted', 'footer-disabled');
+    if (!w || typeof w !== 'object') {
+      el.textContent = 'unknown';
+      return;
+    }
+    const bits = [];
+    if (w.audioDisabled) bits.push('output disabled');
+    else if (w.muted) bits.push('muted');
+    else bits.push('ok');
+    if (w.deviceName) bits.push(String(w.deviceName));
+    el.textContent = bits.join(' — ');
+    if (w.audioDisabled) row.classList.add('footer-disabled');
+    else if (w.muted) row.classList.add('footer-muted');
+  }
+
+  async function refreshWatcherOutputPing() {
+    try {
+      const r = await fetch('/voice/ping');
+      const d = await r.json();
+      if (d?.watcherOutput) applyWatcherOutput(d.watcherOutput);
+    } catch (_) {}
+  }
+
   async function loadVoices() {
     try {
       const r = await fetch('/voice/voices');
@@ -370,11 +398,15 @@
 
     fetch('/voice/ping')
       .then(r => r.json())
-      .then(d => { if (d?.tts?.edgeVoice) $('footerVoice').textContent = d.tts.edgeVoice; })
+      .then(d => {
+        if (d?.tts?.edgeVoice) $('footerVoice').textContent = d.tts.edgeVoice;
+        applyWatcherOutput(d?.watcherOutput);
+      })
       .catch(() => {});
 
     loadVoices();
     connect();
+    setInterval(refreshWatcherOutputPing, 45_000);
   }
 
   init();

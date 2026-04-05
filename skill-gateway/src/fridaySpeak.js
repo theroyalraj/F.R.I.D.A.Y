@@ -6,13 +6,13 @@
  *
  * Env vars:
  *   FRIDAY_SPEAK_PY=false          — disable entirely (enabled by default when script is present)
- *   FRIDAY_TTS_VOICE               — edge-tts voice (default: en-US-EmmaMultilingualNeural)
+ *   FRIDAY_TTS_VOICE               — edge-tts voice (default: en-US-AvaMultilingualNeural)
  *   FRIDAY_TTS_DEVICE              — audio device substring (default: Echo Dot)
  *   FRIDAY_TTS_RATE                — speed e.g. "+7.5%" (default: ~1.075×)
  *   FRIDAY_TTS_PITCH               — pitch e.g. "+2Hz" (default: +2Hz)
  *
  * Good voices (honour FRIDAY_TTS_VOICE_BLOCK in .env — see CLAUDE.md):
- *   en-US-EmmaMultilingualNeural — US female multilingual (repo default)
+ *   en-US-AvaMultilingualNeural — US female multilingual (repo default)
  *   en-US-AriaNeural      — US female neural
  *   en-US-GuyNeural       — US male neural
  *   en-GB-SoniaNeural     — British female
@@ -42,10 +42,10 @@ export function fridaySpeakEnabled(env = process.env) {
  * Speak text via friday-speak.py — fire-and-forget.
  * @param {string} text
  * @param {import('pino').Logger} [log]
- * @param {{ bypassCursorDefer?: boolean, interruptMusic?: boolean, priority?: boolean, onClose?: () => void }} [opts]  bypassCursorDefer: skip IDE focus mute; priority: FRIDAY_TTS_PRIORITY=1 (pre-empt + never defer on Windows); interruptMusic: duck friday-play; onClose: after playback or skip
+ * @param {{ bypassCursorDefer?: boolean, interruptMusic?: boolean, priority?: boolean, onClose?: () => void, speakChannel?: string, speakPersonaKey?: string }} [opts]  bypassCursorDefer: skip IDE focus mute; priority: FRIDAY_TTS_PRIORITY=1 (pre-empt + never defer on Windows); interruptMusic: duck friday-play; onClose: after playback or skip; speakChannel/speakPersonaKey: optional SSE hints for Friday Listen integrations rail (friday-speak.py tts_speak payload)
  */
 export function speakFridayPy(text, log, opts = {}) {
-  const { onClose, bypassCursorDefer, interruptMusic, priority } = opts;
+  const { onClose, bypassCursorDefer, interruptMusic, priority, speakChannel, speakPersonaKey } = opts;
 
   if (!fridaySpeakEnabled()) {
     try {
@@ -81,15 +81,23 @@ export function speakFridayPy(text, log, opts = {}) {
 
   // Local song fade-out is handled inside friday-speak.py via pycaw (PID-targeted)
   log?.info({ text: safeText.slice(0, 80) }, 'fridaySpeak: spawning');
+  const ch = typeof speakChannel === 'string' && speakChannel.trim() ? speakChannel.trim().slice(0, 32) : '';
+  const pk =
+    typeof speakPersonaKey === 'string' && speakPersonaKey.trim()
+      ? speakPersonaKey.trim().toLowerCase().slice(0, 24)
+      : '';
+
   const child = spawn('python', [SPEAK_SCRIPT, safeText], {
     env: {
       ...process.env,
-      FRIDAY_TTS_VOICE:  process.env.FRIDAY_TTS_VOICE  || 'en-US-EmmaMultilingualNeural',
+      FRIDAY_TTS_VOICE:  process.env.FRIDAY_TTS_VOICE  || 'en-US-AvaMultilingualNeural',
       FRIDAY_TTS_RATE:   process.env.FRIDAY_TTS_RATE   || '+7.5%',
       FRIDAY_TTS_PITCH:  process.env.FRIDAY_TTS_PITCH  || '+2Hz',
       ...(bypassCursorDefer ? { FRIDAY_TTS_BYPASS_CURSOR_DEFER: 'true' } : {}),
       ...(interruptMusic ? { FRIDAY_TTS_INTERRUPT_MUSIC: 'ui' } : {}),
       ...(priority ? { FRIDAY_TTS_PRIORITY: '1' } : {}),
+      ...(ch ? { FRIDAY_TTS_SPEAK_CHANNEL: ch } : {}),
+      ...(pk ? { FRIDAY_TTS_SPEAK_PERSONA: pk } : {}),
     },
     // detached + unref lets the speech outlive a node --watch restart.
     // Pipe stderr so failures are visible in the terminal instead of silently swallowed.

@@ -9,6 +9,7 @@ Usage:
   python friday-play.py "Back in Black AC DC"
   python friday-play.py "Back in Black AC DC" --seconds=30
   python friday-play.py "Back in Black AC DC" --full
+  python friday-play.py --set-volume=35   # persist level + retune live player (if running)
   python friday-play.py --mp3=C:\\path\\clip.mp3 --seconds=12   # play local cached MP3 (no yt-dlp)
 
 Env vars (all optional):
@@ -16,7 +17,7 @@ Env vars (all optional):
   FRIDAY_PLAY_SECONDS  max play seconds (default: 45; --full ignores this)
   FRIDAY_PLAY_EARLY_STOP_SEC  trim this many seconds before natural end when duration metadata looks reliable (default: 2)
   FRIDAY_PLAY_MIN_TRUSTED_DURATION_SEC  if ffprobe duration is below this, metadata is treated as unreliable — no early trim, cap by FRIDAY_PLAY_SECONDS only (default: 30)
-  FRIDAY_PLAY_VOLUME     ffplay startup volume 0–100 (default: 100). Use ~10–20 for quiet background so TTS stays clear.
+  FRIDAY_PLAY_VOLUME     ffplay startup volume 0–100 (default: 20). Music is quiet background; TTS auto-ducks it further via FRIDAY_MUSIC_DUCK_LEVEL.
   FRIDAY_MUSIC_DEVICE  Windows: friendly-name substring for output (e.g. Speakers).
                        Briefly sets default endpoint so ffplay opens on that device,
                        then restores your previous default so TTS can stay on another output.
@@ -31,6 +32,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -69,11 +71,67 @@ MUSIC_DEVICE_HINT = os.environ.get("FRIDAY_MUSIC_DEVICE", "").strip()
 PID_FILE  = Path(tempfile.gettempdir()) / "friday-play.pid"
 
 
+def _play_volume_percent() -> int:
+    """ffplay -volume is 0 (silent) through 100 (full). Redis / file / FRIDAY_PLAY_VOLUME."""
+    from music_volume_prefs import read_music_play_volume_percent
+
+    return read_music_play_volume_percent()
+
+
+def _set_music_mixer_volume(pid: int, target: float, timeout: float = 3.0) -> None:
+    """After ffplay spawns, pin its Windows mixer session to the desired volume.
+    This lets friday-speak duck/restore via the same mixer API."""
+    try:
+        from pycaw.utils import AudioUtilities
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            for s in AudioUtilities.GetAllSessions():
+                try:
+                    if s.Process and s.Process.pid == pid and s.SimpleAudioVolume:
+                        s.SimpleAudioVolume.SetMasterVolume(max(0.0, min(1.0, target)), None)
+                        return
+                except Exception:
+                    pass
+            time.sleep(0.08)
+    except Exception:
+        pass
+
+
+def _maybe_cli_set_volume(cli_flags: list[str], search_phrase: str) -> None:
+    """Persist level and retune live ffplay session if present; then exit.
+    Only when no search phrase — avoids hijacking `friday-play.py \"q\" --set-volume=…` typos."""
+    sv = next((f for f in cli_flags if f.startswith("--set-volume=")), None)
+    if not sv:
+        return
+    if search_phrase.strip():
+        return
+    from music_volume_prefs import write_music_play_volume_percent
+
+    raw = sv.split("=", 1)[1].strip()
+    try:
+        pct = int(float(raw))
+    except ValueError:
+        print("[friday-play] --set-volume=N expects a number 0–100", file=sys.stderr)
+        sys.exit(1)
+    pct = max(0, min(100, pct))
+    write_music_play_volume_percent(pct)
+    if PID_FILE.exists():
+        try:
+            pid = int(PID_FILE.read_text().strip())
+            _set_music_mixer_volume(pid, pct / 100.0)
+        except Exception as e:
+            print(f"[friday-play] set-volume: mixer update skipped: {e}", file=sys.stderr, flush=True)
+    print(f"[friday-play] music volume -> {pct}%", flush=True)
+    sys.exit(0)
+
+
 def _win_no_window_kw() -> dict:
     """Avoid extra console windows for yt-dlp / ffprobe when parent was started with python.exe."""
     if platform.system() == "Windows":
         return {"creationflags": subprocess.CREATE_NO_WINDOW}
     return {}
+
+_maybe_cli_set_volume(flags, SEARCH)
 
 if not SEARCH:
     # Called with --stop: kill any running playback
@@ -135,16 +193,6 @@ def _env_float(key: str, default: str) -> float:
 EARLY_STOP_SEC = _env_float("FRIDAY_PLAY_EARLY_STOP_SEC", "2")
 # If probed duration is below this, it is often wrong for VBR/cached MP3s — do not use (duration - early_stop) or you get ~2 s clips.
 MIN_TRUSTED_DURATION_SEC = _env_float("FRIDAY_PLAY_MIN_TRUSTED_DURATION_SEC", "30")
-
-
-def _play_volume_percent() -> int:
-    """ffplay -volume is 0 (silent) through 100 (full)."""
-    raw = os.environ.get("FRIDAY_PLAY_VOLUME", "100").split("#")[0].strip()
-    try:
-        v = int(float(raw))
-    except ValueError:
-        v = 100
-    return max(0, min(100, v))
 
 
 def get_duration(mp3_path: Path) -> float | None:
@@ -210,7 +258,7 @@ def play(mp3_path: Path):
     try:
         if MUSIC_DEVICE_HINT and platform.system() == "Windows":
             try:
-                from friday_win_audio import (
+                from friday_platform_audio import (
                     find_output_device_id,
                     get_default_output_id,
                     set_default_endpoint,
@@ -243,11 +291,16 @@ def play(mp3_path: Path):
         except OSError:
             pass
         set_music_active_ttl(music_redis_ttl_for_play_seconds(play_sec))
+        threading.Thread(
+            target=_set_music_mixer_volume,
+            args=(proc.pid, vol / 100.0),
+            daemon=True,
+        ).start()
 
         if switched_for_music and original_default_id:
             time.sleep(0.22)
             try:
-                from friday_win_audio import set_default_endpoint
+                from friday_platform_audio import set_default_endpoint
 
                 set_default_endpoint(original_default_id)
                 print("[friday-play] restored default output for TTS / other apps", flush=True)
@@ -259,7 +312,7 @@ def play(mp3_path: Path):
     finally:
         if switched_for_music and original_default_id:
             try:
-                from friday_win_audio import set_default_endpoint
+                from friday_platform_audio import set_default_endpoint
 
                 set_default_endpoint(original_default_id)
             except Exception:

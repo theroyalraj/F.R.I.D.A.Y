@@ -1,0 +1,35 @@
+{
+  "todos": [
+    {
+      "id": "29395bf7-bc12-4f04-bda5-aed8e753d9a9",
+      "title": "Review Deloitte AI Architect role",
+      "detail": "Check the AI Architect position at Deloitte with 32 connections",
+      "priority": "medium",
+      "done": false,
+      "source": "email: Finkraft is hiring for AI Engineer",
+      "createdAt": "2026-04-05T05:38:55.649Z",
+      "updatedAt": "2026-04-05T05:38:55.649Z"
+    },
+    {
+      "id": "51be1fed-0c39-4d9f-9abc-93016b0f83cc",
+      "title": "Review SAP Machine Learning Engineer position",
+      "detail": "Evaluate the Application AI role at SAP in Bengaluru",
+      "priority": "medium",
+      "done": false,
+      "source": "email: Finkraft is hiring for AI Engineer",
+      "createdAt": "2026-04-05T05:38:55.635Z",
+      "updatedAt": "2026-04-05T05:38:55.635Z"
+    },
+    {
+      "id": "c8cb3e9a-04ea-4bb4-af06-b8bc0554e310",
+      "title": "Review Finkraft AI Engineer job posting",
+      "detail": "Check the job details and apply with resume and profile if interested",
+      "priority": "medium",
+      "done": false,
+      "source": "email: Finkraft is hiring for AI Engineer",
+      "createdAt": "2026-04-05T05:38:55.605Z",
+      "updatedAt": "2026-04-05T05:38:55.605Z"
+    }
+  ],
+  "reminders": []
+}

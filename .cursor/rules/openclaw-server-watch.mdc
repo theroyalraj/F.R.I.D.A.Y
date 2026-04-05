@@ -1,0 +1,31 @@
+---
+description: When pc-agent or skill-gateway code or env changes need a restart vs auto-reload
+alwaysApply: true
+---
+
+# OpenClaw server reload — watch vs `restart:force`
+
+## Auto-reload (nodemon-style)
+
+`scripts/start.mjs` (used by `npm run start:all`, `npm run restart:force`, etc.) spawns **gateway** and **pc-agent** with **Node `--watch`** by default:
+
+- Watches: `skill-gateway/src`, `pc-agent/src`, and repo root `lib/`.
+- Saving `.js` (and other watched files) there **restarts that Node process** without running `restart:force` again.
+
+**Watch is OFF** when `NODE_ENV=production`, unless `OPENCLAW_SERVER_WATCH=1` is set.  
+**Disable watch** locally: `OPENCLAW_SERVER_WATCH=0`.
+
+## Anthropic rate limits (pc-agent fast path)
+
+On **429 / overload**, OpenClaw arms Redis key **`openclaw:anthropic:cooldown`** (TTL from **Retry-After** or **`ANTHROPIC_RATE_LIMIT_COOLDOWN_SEC`**, default 60). While the key exists, **Anthropic is not called**; **OpenRouter** still runs when configured. The HTTP ack uses an **empty** `summary` (no spoken rate-limit line). Successful Anthropic responses **clear** the cooldown key.
+
+## When you must run `npm run restart:force`
+
+- **Root `.env`** — dotenv loads once at process start; file watch does **not** reload env.
+- **Dependencies** (`npm install` / lockfile changes) — restart processes.
+- **Replacing** a stuck listener or clearing ports — user must ask for force restart per the no-restart policy.
+- **Python daemons** (listen, ambient, watchers) — not covered by Node watch; restart stack or the specific script if needed.
+
+## Agent edits
+
+After **server code** changes in `pc-agent/src` or `skill-gateway/src`, rely on **watch** if the user’s stack was started via `start.mjs`. If they run plain `node pc-agent/src/server.js` without `--watch`, tell them to use `npm run dev:agent` / `dev:gateway` or `restart:force`.

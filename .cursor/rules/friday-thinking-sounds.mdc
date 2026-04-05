@@ -3,11 +3,15 @@ description: Human-like thinking and generating sounds — speak filler phrases 
 alwaysApply: true
 ---
 
-# Friday Thinking Sounds — Narrate Like a Human
+# Friday Thinking Sounds — Narrate Like a Human (Less Is More)
 
-The agent must never grind silently. Every phase of work has a natural human sound. Pick ONE phrase at random from the appropriate pool below and fire it async (`block_until_ms: 0`) before starting that phase.
+Phase filler keeps the user informed during long work. But **fewer, better-placed phrases beat constant chatter**. If the ack or thinking narration already covers what you are about to do, **skip the filler entirely** — do not pile a phase sound on top of speech that just said the same thing.
 
-**Rule:** Never pick the same phrase twice in a row within a single task. Vary it. Sound like a person, not a script.
+**Rules:**
+- Never pick the same phrase twice in a row within a single task. Vary it.
+- Sound like a person, not a script.
+- **Combine, don't stack.** If your ack already says "Got it, let me check the narrate rules", do NOT also fire a Phase 1 "Let me have a look". The ack covered it.
+- **Quick tasks need no filler.** If the whole job is read one file, make one edit, done — the ack and completion summary are enough. Phase sounds add nothing.
 
 ---
 
@@ -108,9 +112,27 @@ Always sound like a person who happens to be describing what they're doing:
 
 ---
 
-## Frequency
+## Frequency — 2-MINUTE COOLDOWN
 
-- **Start of every major phase**: always speak (even just "On it.")
-- **Mid-task if it takes more than two tool call rounds**: speak a check-in from Phase 4
-- **On discovery**: speak a Phase 5 line before reporting findings
-- **Do not** speak a filler before every single small tool call — that becomes noise. One phrase per logical step is right.
+After any `friday-speak.py` call (ack, thinking, or filler), **wait at least 2 minutes before the next mid-task filler**. The only exceptions that bypass the cooldown are:
+
+1. **Completion summary** ("Done. ...") — always fires regardless of cooldown.
+2. **User-requested speech** — the user explicitly asks you to say something.
+
+### What this means in practice
+
+- **Message 1** fires the ack (and optionally combined thinking). The 2-minute cooldown starts.
+- **Messages 2–N** during the cooldown: **no phase filler, no check-ins, no discovery lines.** Just work silently.
+- After 2 minutes of real wall-clock time since the last speak: you may fire ONE filler if the user would otherwise hear extended silence.
+- **Completion summary** always fires at the end, cooldown or not.
+
+### Quick tasks vs long tasks
+
+- **Quick tasks (under ~4 tool calls):** ack and completion summary only. No filler ever.
+- **Medium tasks (4–10 tool calls):** ack, then silence during the cooldown, then completion. Filler only if the task outlasts the 2-minute window.
+- **Long tasks (10+ tool calls or subagents):** ack, then at most one filler per 2-minute window, then completion.
+
+### Still enforced
+
+- **Never stack:** if your ack already described the next step, skip any filler in the same message.
+- **Never repeat:** if the last thing the user heard was "reading through the code", do not say "let me have a look" later. Say something new or say nothing.

@@ -1,0 +1,23 @@
+---
+description: After pushing a feature branch, open or update a GitHub pull request with gh
+alwaysApply: true
+---
+
+# GitHub: push then pull request
+
+When you **push** a branch to `origin` that is **not** the default branch (see `gh repo view --json defaultBranchRef`), **always**:
+
+1. **Push** with `git push -u origin HEAD` (or the branch name the user uses).
+2. **Open a PR** if none exists for this head:
+   - `gh pr list --head <branch> --state open`
+   - If empty: `gh pr create --base main` (or the repo default branch from `gh repo view`) with a clear title and body (summary, risks, test notes).
+3. If a PR already exists, **push is enough** unless the user asked to edit the PR description.
+
+## Do not
+
+- Skip `git push` when the user asked to publish work.
+- Create duplicate PRs for the same branch.
+
+## Base branch
+
+Use the repository default branch as `--base` unless the user specified another target.

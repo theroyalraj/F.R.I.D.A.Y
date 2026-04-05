@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "friday-listen",
+      "autoPort": true,
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["-e", "const http=require('http');const port=process.env.PORT||3850;const s=http.createServer((q,r)=>{const opts={hostname:'127.0.0.1',port:3847,path:q.url,method:q.method,headers:q.headers};const p=http.request(opts,pr=>{r.writeHead(pr.statusCode,pr.headers);pr.pipe(r)});q.pipe(p);p.on('error',()=>{r.writeHead(502);r.end()})});s.listen(port,()=>console.log('proxy on '+port))"],
+      "port": 3850
+    }
+  ]
+}

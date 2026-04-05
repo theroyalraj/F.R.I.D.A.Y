@@ -1,0 +1,2 @@
+# pip install -r scripts/requirements-learning-export.txt
+psycopg2-binary>=2.9.9

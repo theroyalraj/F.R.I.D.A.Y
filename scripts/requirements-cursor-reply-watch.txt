@@ -1,0 +1,5 @@
+# cursor-reply-watch.py — OS file events for agent-transcripts (faster than poll).
+# cursor-grpc-watch + cursor_grpc/stream_client.py — HTTP/2 to Cursor API
+watchdog>=4.0.0
+httpx[http2]>=0.27.0
+h2>=4.0.0

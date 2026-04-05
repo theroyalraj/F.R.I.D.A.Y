@@ -92,7 +92,7 @@ export async function touchVoiceContext(context, voice) {
 
 /**
  * Read voice data for a named context.
- * Returns { voice, set_at, last_used, status } or null if not found.
+ * Returns { voice, set_at, last_used, status, autoPlay } or null if not found.
  * @param {string} context
  */
 export async function getVoiceContext(context) {
@@ -105,6 +105,31 @@ export async function getVoiceContext(context) {
   } catch {
     return null;
   }
+}
+
+/**
+ * Check if autoPlay is enabled for a context (background-only playback).
+ * @param {string} context
+ * @returns {Promise<boolean>}
+ */
+export async function isAutoPlayEnabled(context) {
+  const data = await getVoiceContext(context);
+  return data?.autoPlay === 'true' || data?.autoPlay === true;
+}
+
+/**
+ * Set autoPlay flag for a context.
+ * @param {string} context
+ * @param {boolean} enabled
+ */
+export async function setAutoPlay(context, enabled) {
+  const c = await _getClient();
+  if (!c) return;
+  try {
+    await c.hSet(`${KEY_PREFIX}${context}`, {
+      autoPlay: String(enabled),
+    });
+  } catch { /* ignore */ }
 }
 
 /**
@@ -153,4 +178,62 @@ export async function getAllVoiceContexts() {
 export async function restoreApiVoice() {
   const data = await getVoiceContext('api');
   return data?.voice || null;
+}
+
+const TTS_AUDIT_KEY = 'friday:tts:audit';
+/** Sentinel / cursor-reply-watch: default output mute + audio-disabled snapshot (JSON string). */
+const WATCHER_OUTPUT_HEALTH_KEY = 'friday:voice:watcher:output_health';
+const WATCHER_OUTPUT_HEALTH_TTL_SEC = 600;
+
+/**
+ * Last N TTS audit JSON lines (newest first) from Redis — written by friday-speak.py.
+ * @param {number} [max]
+ * @returns {Promise<Record<string, unknown>[]>}
+ */
+export async function getTtsAuditEntries(max = 50) {
+  const c = await _getClient();
+  if (!c) return [];
+  try {
+    const raw = await c.lRange(TTS_AUDIT_KEY, 0, Math.max(0, max - 1));
+    return raw.map((s) => {
+      try {
+        return JSON.parse(s);
+      } catch {
+        return { raw: s };
+      }
+    });
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Store default output health for Composer TTS / Sentinel (mute + audioDisabled).
+ * @param {Record<string, unknown>} payload
+ */
+export async function setWatcherOutputHealth(payload) {
+  const c = await _getClient();
+  if (!c) return;
+  try {
+    const body = JSON.stringify({
+      ...payload,
+      updatedAt: new Date().toISOString(),
+    });
+    await c.set(WATCHER_OUTPUT_HEALTH_KEY, body, { EX: WATCHER_OUTPUT_HEALTH_TTL_SEC });
+  } catch {
+    /* ignore */
+  }
+}
+
+/** @returns {Promise<Record<string, unknown> | null>} */
+export async function getWatcherOutputHealth() {
+  const c = await _getClient();
+  if (!c) return null;
+  try {
+    const s = await c.get(WATCHER_OUTPUT_HEALTH_KEY);
+    if (!s) return null;
+    return JSON.parse(s);
+  } catch {
+    return null;
+  }
 }

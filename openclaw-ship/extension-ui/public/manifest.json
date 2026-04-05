@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "OpenClaw Friday UI",
+  "version": "0.2.0",
+  "description": "Portable Friday chat UI — connects to any pc-agent URL (Bearer PC_AGENT_SECRET or JWT).",
+  "permissions": ["storage", "tabs"],
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "action": {},
+  "background": {
+    "service_worker": "background.js"
+  }
+}

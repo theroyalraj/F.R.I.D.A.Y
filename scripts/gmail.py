@@ -3,10 +3,10 @@
 gmail.py — Read, search and list Gmail via IMAP (built-in Python, no extra deps).
 
 Usage:
-  python scripts/gmail.py list [--count N] [--folder FOLDER]
+  python scripts/gmail.py list [--count N] [--folder FOLDER] [--offset N]
   python scripts/gmail.py read <UID>
   python scripts/gmail.py search <query>
-  python scripts/gmail.py unread [--count N]
+  python scripts/gmail.py unread [--count N] [--offset N]
 
 Config (env or .env):
   GMAIL_ADDRESS   your Gmail address
@@ -41,6 +41,16 @@ GMAIL_ADDRESS = os.environ.get("GMAIL_ADDRESS", "").strip()
 GMAIL_APP_PWD = os.environ.get("GMAIL_APP_PWD", "").strip().replace(" ", "")
 IMAP_HOST     = "imap.gmail.com"
 IMAP_PORT     = 993
+
+def _configure_stdio_utf8() -> None:
+    """Avoid UnicodeEncodeError on Windows (cp1252) when mail subjects contain emoji."""
+    for stream in (sys.stdout, sys.stderr):
+        reconf = getattr(stream, "reconfigure", None)
+        if callable(reconf):
+            try:
+                reconf(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
 
 def _connect() -> imaplib.IMAP4_SSL:
     if not GMAIL_ADDRESS or not GMAIL_APP_PWD:
@@ -106,24 +116,43 @@ def _fetch_full(m: imaplib.IMAP4_SSL, uid: str) -> dict:
         "body":    textwrap.shorten(body.strip(), width=4000, placeholder="… [truncated]"),
     }
 
+def _paginate_uids(raw_uids: list, count: int, offset: int) -> list:
+    """Return up to ``count`` UIDs, skipping the newest ``offset`` (older mail page)."""
+    if not raw_uids:
+        return []
+    count = max(1, int(count))
+    offset = max(0, int(offset))
+    if offset >= len(raw_uids):
+        return []
+    if offset == 0:
+        picked = raw_uids[-count:]
+    else:
+        picked = raw_uids[-(offset + count) : -offset]
+    return picked
+
+
 def cmd_list(args):
-    count  = int(_arg(args, "--count",  "10"))
+    count = int(_arg(args, "--count", "10"))
+    off = int(_arg(args, "--offset", "0"))
     folder = _arg(args, "--folder", "INBOX")
     m = _connect()
     m.select(folder, readonly=True)
     _, uids = m.uid("search", None, "ALL")
-    all_uids = uids[0].split()[-count:]
-    results = [_fetch_envelope(m, u) for u in reversed(all_uids)]
+    all_uids = uids[0].split()
+    picked = _paginate_uids(all_uids, count, off)
+    results = [_fetch_envelope(m, u) for u in reversed(picked)]
     m.logout()
     print(json.dumps(results, ensure_ascii=False, indent=2))
 
 def cmd_unread(args):
     count = int(_arg(args, "--count", "10"))
+    off = int(_arg(args, "--offset", "0"))
     m = _connect()
     m.select("INBOX", readonly=True)
     _, uids = m.uid("search", None, "UNSEEN")
-    all_uids = uids[0].split()[-count:]
-    results = [_fetch_envelope(m, u) for u in reversed(all_uids)]
+    all_uids = uids[0].split()
+    picked = _paginate_uids(all_uids, count, off)
+    results = [_fetch_envelope(m, u) for u in reversed(picked)]
     m.logout()
     print(json.dumps(results, ensure_ascii=False, indent=2))
 
@@ -136,6 +165,42 @@ def cmd_read(args):
     result = _fetch_full(m, uid)
     m.logout()
     print(json.dumps(result, ensure_ascii=False, indent=2))
+
+def cmd_archive(args):
+    """Mark a message as read and move it out of INBOX (archive) by UID."""
+    if not args:
+        print("Usage: gmail.py archive <UID>", file=sys.stderr); sys.exit(1)
+    uid = args[0].encode()
+    m = _connect()
+    m.select("INBOX")
+    # Mark as seen
+    m.uid("STORE", uid, "+FLAGS", "(\\Seen)")
+    # Move to [Gmail]/All Mail (archive) — fallback: just mark read if label not found
+    result = m.uid("COPY", uid, '"[Gmail]/All Mail"')
+    if result[0] != "OK":
+        # Try without [Gmail] prefix (some locales / providers)
+        result = m.uid("COPY", uid, '"All Mail"')
+    if result[0] == "OK":
+        m.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
+        m.expunge()
+        m.logout()
+        print(json.dumps({"ok": True, "uid": args[0], "action": "archived"}))
+    else:
+        # Fallback: just mark as read (no All Mail label)
+        m.logout()
+        print(json.dumps({"ok": True, "uid": args[0], "action": "marked_read"}))
+
+def cmd_mark_unread(args):
+    """Mark a message as unread (unseen) by UID — for task tracking."""
+    if not args:
+        print("Usage: gmail.py mark-unread <UID>", file=sys.stderr); sys.exit(1)
+    uid = args[0].encode()
+    m = _connect()
+    m.select("INBOX")
+    # Mark as unseen (unread)
+    m.uid("STORE", uid, "-FLAGS", "(\\Seen)")
+    m.logout()
+    print(json.dumps({"ok": True, "uid": args[0], "action": "marked_unread"}))
 
 def cmd_search(args):
     if not args:
@@ -156,12 +221,13 @@ def _arg(args, flag, default):
     return default
 
 def main():
+    _configure_stdio_utf8()
     argv = sys.argv[1:]
     if not argv:
         print(__doc__); sys.exit(0)
     cmd  = argv[0]
     rest = argv[1:]
-    {"list": cmd_list, "unread": cmd_unread, "read": cmd_read, "search": cmd_search}.get(
+    {"list": cmd_list, "unread": cmd_unread, "read": cmd_read, "search": cmd_search, "archive": cmd_archive, "mark-unread": cmd_mark_unread}.get(
         cmd, lambda _: (print(f"Unknown command: {cmd}", file=sys.stderr), sys.exit(1))
     )(rest)
 

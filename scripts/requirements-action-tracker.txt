@@ -1,0 +1,3 @@
+# pip install -r scripts/requirements-action-tracker.txt
+# Tracker calls Anthropic via HTTPS (stdlib); no anthropic SDK required.
+psycopg2-binary>=2.9.9

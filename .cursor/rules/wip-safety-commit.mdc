@@ -1,15 +1,17 @@
 ---
-description: Auto-commit and push to wip branch before any breaking change or new feature to keep main safe
+description: Scan then commit and push to a new temp wip checkpoint branch before risky work; optional spoken checkpoint summary
 alwaysApply: true
 ---
 
 # WIP Safety Commit — Protect Main
 
-Before making any change that could break existing behaviour **or** introduces a new feature, commit all current work to the `wip` branch and push it first.
+Before making any change that could break existing behaviour **or** introduces a new feature, commit all current work and push it to a **new temporary** checkpoint branch first (do **not** only overwrite the single shared `wip` ref unless the user explicitly asked for that).
+
+**Prerequisite:** When you run the WIP commit flow, follow **`pre-commit-quality-scan.mdc`** first: launch a **new readonly subagent** for a security, quality, and standards scan, then proceed with staging and commit below.
 
 ## When to trigger
 
-Commit to `wip` before:
+Run this checkpoint flow before:
 - Adding a new endpoint, module, script, or file
 - Refactoring or rewriting an existing module
 - Changing startup sequences, audio pipeline, or TTS logic
@@ -22,17 +24,29 @@ Commit to `wip` before:
 ```powershell
 cd d:\code\openclaw
 
-# 1 — stage everything
+# 0 — after readonly subagent scan from pre-commit-quality-scan.mdc (when required)
+
+# 1 — new temp branch (example name; pick a short slug for the work you are about to do)
+git checkout -b wip/checkpoint-<short-slug>-20260405
+
+# 2 — stage everything
 git add -A
 
-# 2 — commit with a wip message describing what is stable so far
+# 3 — commit with a wip message describing what is stable so far
 git commit -m "wip: stable checkpoint before <next change>"
 
-# 3 — push to wip branch (creates it on remote if needed)
-git push origin HEAD:wip
+# 4 — push the new branch (first push sets upstream)
+git push -u origin HEAD
+
+# 5 — optional: return to main (or your previous branch) to do the risky edit there
+git checkout main
 ```
 
-Then make your change on the working tree (still on `main` locally — only the remote `wip` branch is updated as a safety snapshot).
+Replace the date segment with the real commit day if needed; if the branch name collides, append `-2`, `-3`, etc.
+
+**Voice:** If Cursor narration is on per **`cursor-agent-narration.mdc`**, after a successful push run **`friday-speak.py`** once with **`FRIDAY_TTS_PRIORITY=1`** and **`FRIDAY_TTS_BYPASS_CURSOR_DEFER=true`**: a verbose spoken summary of what was checkpointed, why, and the branch name in speakable form (see **`no-markdown-in-speech.mdc`**). If narration is off, skip speech.
+
+Then make your change on the working tree on your usual branch (e.g. `main`).
 
 ## Commit message format
 
@@ -53,9 +67,13 @@ Examples:
 
 ## Announce it
 
-Speak via friday-speak.py before committing — **always `block_until_ms: 0`**:
+When narration is on: prefer **one** post-push checkpoint explanation (covers outcome and branch name). Optionally precede with a single short pre-commit line only if it adds information the post-push line will not repeat — **max two speak calls** in the checkpoint flow; **`block_until_ms: 0`** always.
+
+Post-push example (adjust the spoken text to match the real branch and message):
 
 ```powershell
 cd d:\code\openclaw
-$env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "Saving a checkpoint to wip before I make this change."
+$env:FRIDAY_TTS_PRIORITY='1'
+$env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'
+python skill-gateway/scripts/friday-speak.py "Done saving checkpoint. I pushed a new branch wip slash checkpoint slash your slug with everything staged so far, so main stays safe before the next change."
 ```

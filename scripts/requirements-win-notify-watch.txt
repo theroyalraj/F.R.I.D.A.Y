@@ -1,0 +1,3 @@
+# win-notify-watch.py dependencies
+# PostgreSQL driver for state management (watermark, dedup, notification history)
+psycopg2-binary>=2.9

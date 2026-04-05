@@ -1,0 +1,211 @@
+.authWrap {
+  min-height: 100%;
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: clamp(1rem, 4vw, 2.5rem) clamp(0.75rem, 3vw, 1.25rem);
+  background: radial-gradient(ellipse 120% 80% at 50% 20%, rgba(167, 139, 250, 0.12), transparent),
+    var(--fr-bg, #05060a);
+}
+
+.card {
+  width: 100%;
+  max-width: min(32rem, 100%);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(167, 139, 250, 0.25);
+  border-radius: 16px;
+  padding: clamp(1.5rem, 4vw, 2.25rem) clamp(1.25rem, 4vw, 2rem);
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.35);
+}
+
+.cardWide {
+  max-width: min(36rem, 100%);
+}
+
+.light .card {
+  background: rgba(255, 255, 255, 0.92);
+  border-color: rgba(167, 139, 250, 0.35);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.08);
+}
+
+.title {
+  font-size: clamp(1.45rem, 4vw, 1.85rem);
+  font-weight: 600;
+  margin-bottom: 0.35rem;
+  color: var(--fr-text, #f4f4f8);
+}
+
+.light .title {
+  color: #111827;
+}
+
+.sub {
+  font-size: clamp(0.9rem, 2.2vw, 1rem);
+  opacity: 0.75;
+  margin-bottom: 1.5rem;
+  color: var(--fr-text, #f4f4f8);
+  line-height: 1.5;
+}
+
+.light .sub {
+  color: #374151;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-bottom: 1rem;
+}
+
+.field label {
+  font-size: clamp(0.82rem, 2vw, 0.9rem);
+  font-weight: 500;
+  opacity: 0.9;
+}
+
+.field input,
+.field textarea,
+.field select {
+  font: inherit;
+  font-size: 1rem;
+  line-height: 1.35;
+  padding: 0.75rem 0.85rem;
+  min-height: 2.75rem;
+  border-radius: 10px;
+  border: 1px solid rgba(167, 139, 250, 0.35);
+  background: rgba(0, 0, 0, 0.35);
+  color: var(--fr-text, #f4f4f8);
+  width: 100%;
+}
+
+.field select {
+  cursor: pointer;
+  appearance: auto;
+}
+
+.field select option {
+  color: #111827;
+  background: #fff;
+}
+
+.field input::placeholder,
+.field textarea::placeholder {
+  color: rgba(244, 244, 248, 0.45);
+  opacity: 1;
+}
+
+.light .field input::placeholder,
+.light .field textarea::placeholder {
+  color: rgba(17, 24, 39, 0.45);
+}
+
+.light .field input,
+.light .field textarea,
+.light .field select {
+  background: #fff;
+  color: #111827;
+  border-color: #d1d5db;
+}
+
+.field textarea {
+  min-height: 5.5rem;
+  resize: vertical;
+}
+
+.err {
+  font-size: 0.85rem;
+  color: #fb7185;
+  margin-bottom: 0.75rem;
+}
+
+.hint {
+  display: block;
+  font-size: 0.78rem;
+  opacity: 0.72;
+  margin-top: 0.25rem;
+  line-height: 1.35;
+}
+
+.light .hint {
+  color: #4b5563;
+}
+
+.steps {
+  font-size: 0.88rem;
+  opacity: 0.8;
+  margin-bottom: 1rem;
+  line-height: 1.45;
+}
+
+.actions {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-top: 1.25rem;
+}
+
+.btn {
+  font: inherit;
+  font-size: clamp(0.95rem, 2.2vw, 1.05rem);
+  font-weight: 600;
+  padding: 0.75rem 1.35rem;
+  min-height: 2.75rem;
+  border-radius: 10px;
+  border: none;
+  cursor: pointer;
+  background: linear-gradient(135deg, #a78bfa, #38bdf8);
+  color: #0a0a0f;
+}
+
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.btnGhost {
+  background: transparent;
+  color: var(--fr-text, #f4f4f8);
+  border: 1px solid rgba(167, 139, 250, 0.45);
+}
+
+.light .btnGhost {
+  color: #374151;
+}
+
+.linkBtn {
+  background: none;
+  border: none;
+  color: #38bdf8;
+  cursor: pointer;
+  font: inherit;
+  text-decoration: underline;
+  padding: 0;
+}
+
+.steps {
+  font-size: clamp(0.85rem, 2vw, 0.95rem);
+  opacity: 0.7;
+  margin-bottom: 1rem;
+  line-height: 1.45;
+}
+
+.bannerMember {
+  font-size: 0.9rem;
+  padding: 0.75rem 1rem;
+  border-radius: 10px;
+  background: rgba(56, 189, 248, 0.12);
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  margin-bottom: 1rem;
+}
+
+.loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100%;
+  min-height: 100dvh;
+  color: var(--fr-text, #f4f4f8);
+  font-size: clamp(1rem, 2.5vw, 1.1rem);
+}

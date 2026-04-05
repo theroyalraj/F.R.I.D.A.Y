@@ -11,12 +11,14 @@
     "dev": "node --watch --watch-path=src --watch-path=../lib src/server.js"
   },
   "dependencies": {
+    "node-cron": "^3.0.3",
     "alexa-remote2": "^8.0.4",
     "alexa-verifier": "^3.0.2",
     "dotenv": "^16.4.5",
     "express": "^4.21.0",
     "pino": "^9.6.0",
     "pino-http": "^10.4.0",
-    "pino-pretty": "^13.0.0"
+    "pino-pretty": "^13.0.0",
+    "redis": "^4.7.0"
   }
 }

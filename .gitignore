@@ -1,6 +1,8 @@
+.cache/
 __pycache__/
 *.pyc
 node_modules/
+openclaw-ship/extension-ui/dist/
 .env
 *.log
 logs/
@@ -14,3 +16,5 @@ data/*.db
 data/*.db-*
 data/perception/
 .session-voice.json
+.friday-silent-wellness-last
+pc-agent/tmp-signup-body.json

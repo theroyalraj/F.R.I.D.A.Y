@@ -76,21 +76,33 @@ The text goes directly to a voice synthesiser. Every word must sound natural whe
 
 ---
 
+## Combine, don't stack — max 2 speak calls per message
+
+**The golden rule: if you have nothing new to say, say nothing.** Fold content into an adjacent call instead of firing a separate one.
+
+| Instead of… | Do this |
+|-------------|---------|
+| ack + separate thinking + separate phase filler (3 calls) | Combine ack and thinking into ONE call. Skip the filler. |
+| ack that says "Got it, updating the rules" + filler that says "Writing this out in the narrate rule" | Just say "Got it, updating the narrate rule now." — one call covers both. |
+| Filler that repeats what the ack already said | Skip it entirely. |
+
+**Hard cap: never fire more than 2 `friday-speak.py` calls in a single message.** Prefer 1 when the task is straightforward.
+
 ## When to narrate during work
 
 See `friday-thinking-sounds.mdc` for the full phrase pools. The table below shows the moment and example phrasing — always pick naturally, never repeat robotically.
 
-| Moment | Example (pick one — vary each time) |
-|--------|--------------------------------------|
-| Starting research / exploration | "Right, let me have a look at that." / "On it." / "Let me dig into this." |
-| Found something important | "Got it." / "There it is." / "Okay, I see the issue." |
-| About to edit a file | "Writing this out in [file name]." / "Patching that into [file name]." / "Updating [file name] now." — **always name the file naturally** (e.g. "the speak script", "server dot JS", "the env file") |
-| Running a command / install | "Running that now." / "Firing that off." / "Kicking that off." |
-| Waiting on a slow process | "Still on it — hang tight." / "Getting there." / "Nearly there." |
-| Spawning a subagent | "Spinning up an agent for [task]." |
-| **Task complete** | **⚠️ Mandatory verbose spoken summary — see above** |
+| Moment | When to actually speak | Example |
+|--------|------------------------|---------|
+| Starting research / exploration | Only in the ack itself; no separate filler | "Got it, let me dig into this." |
+| Found something important | Only if 2-minute cooldown has elapsed | "Okay, I see the issue." |
+| About to edit a file | Only if 2-minute cooldown has elapsed | "Updating the narrate rule now." |
+| Running a command / install | Only if 2-minute cooldown has elapsed | "Kicking the install off." |
+| Waiting on a slow process | Only if 2-minute cooldown has elapsed | "Still on it, hang tight." |
+| Spawning a subagent | Always (these are meaningful events) | "Spinning up an agent for that." |
+| **Task complete** | **Always — bypasses cooldown** | See above |
 
-Mid-task narration must sound like a person, not a script reading filenames. One phrase per logical step — not before every tool call.
+**2-minute cooldown:** after any speak call, no mid-task filler for 2 minutes. See `friday-thinking-sounds.mdc` for full details. Only the completion summary and subagent launches bypass this.
 
 ---
 
@@ -106,13 +118,13 @@ speak → "Both agents running. Reporting back when done."
 speak → "All done. [verbose summary]."
 ```
 
-**Subagent voice (mandatory in subagent prompts):** each Task subagent must use the adult subagent voice pool — never Ana or any child/teen voice. No separate `pick-session-voice.py` call needed — `friday-speak.py` auto-picks if missing. Just set:
+**Subagent voice (mandatory in subagent prompts):** each Task subagent must use the **young-sounding** subagent voice pool (Jenny, Aria, Michelle, etc. — see `pick-session-voice.py`). No separate `pick-session-voice.py` call needed — `friday-speak.py` auto-picks if missing. Just set:
 
 `$env:FRIDAY_TTS_SESSION='subagent'` plus `FRIDAY_TTS_PRIORITY='1'` and `FRIDAY_TTS_BYPASS_CURSOR_DEFER=true` on **every** `friday-speak.py` call.
 
 `FRIDAY_TTS_PRIORITY=1` is non-negotiable for subagents — without it, subagents queue silently behind ambient TTS and the user never hears them. Priority pre-empts ambient, clears any TTS lock, and speaks immediately.
 
-Main Cursor chat uses `FRIDAY_TTS_VOICE` from the environment (Jarvis by default); subagents stay on the separate sticky teen pool.
+Main Cursor chat uses `FRIDAY_TTS_VOICE` from the environment (Jarvis by default); subagents stay on the separate young-sounding sticky pool.
 
 ---
 

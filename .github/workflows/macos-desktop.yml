@@ -1,0 +1,63 @@
+# macOS build: PR checks + optional release signing.
+# Set repo secrets: MACOS_CERTIFICATE_P12, MACOS_CERTIFICATE_PASSWORD, APPLE_ID, APPLE_TEAM_ID,
+# APP_SPECIFIC_PASSWORD, and TAURI_SIGNING_PRIVATE_KEY for notarization + updater.
+name: macos-desktop
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/desktop/**'
+      - 'pc-agent/**'
+      - 'skill-gateway/**'
+  pull_request:
+    paths:
+      - 'apps/desktop/**'
+
+jobs:
+  rust-check:
+    name: Tauri Rust check
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: apps/desktop/src-tauri
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: cargo check
+        run: cargo check
+
+  node-check:
+    name: Gateway + agent smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm ci
+      - run: node --check skill-gateway/src/server.js
+      - run: node --check pc-agent/src/server.js
+
+  # Uncomment after icons exist and Apple signing secrets are configured:
+  # build-release:
+  #   if: github.ref == 'refs/heads/main'
+  #   runs-on: macos-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: actions/setup-node@v4
+  #       with:
+  #         node-version: '20'
+  #     - uses: dtolnay/rust-toolchain@stable
+  #     - run: npm ci
+  #     - run: npm run build --prefix apps/desktop
+  #     - run: npm run tauri build --prefix apps/desktop
+  #       env:
+  #         APPLE_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+  #         APPLE_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+  #         APPLE_ID: ${{ secrets.APPLE_ID }}
+  #         APPLE_PASSWORD: ${{ secrets.APP_SPECIFIC_PASSWORD }}
+  #         APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}

@@ -21,7 +21,7 @@ Optional party mode:
 
 Subagents (Task tool):
   Run:  FRIDAY_TTS_SESSION=subagent  python pick-session-voice.py --subagent
-  Uses a GLOBAL sticky subagent_voice from the adult pool — same voice across ALL chats, never Ana.
+  Uses a GLOBAL sticky subagent_voice from the young-sounding pool — same voice across ALL chats.
 
 Cursor-reply TTS (cursor-reply-watch.py — distinct from main + subagent):
   python pick-session-voice.py --cursor-reply
@@ -100,15 +100,13 @@ ADULT_POOL = [v for v in [
     "en-IE-ConnorNeural",               # warm Irish male
 ] if v not in _BLOCKED_VOICES]
 
-# Subagent pool — adult voices only; distinct enough from the main pool to be recognisable
+# Subagent pool — young-sounding voices; distinct from the main adult pool
 SUBAGENT_POOL = [v for v in [
-    "en-US-ChristopherNeural",          # deep, confident American male
-    "en-US-GuyNeural",                  # clear American male anchor-style
-    "en-US-EricNeural",                 # calm, natural American male
-    "en-GB-SoniaNeural",                # polished British female
-    "en-IE-ConnorNeural",               # warm Irish male
-    "en-US-AndrewMultilingualNeural",   # warm American male
-    "en-US-BrianMultilingualNeural",    # smooth American male
+    "en-US-JennyNeural",                 # perky young American female
+    "en-US-AriaNeural",                  # youthful American female
+    "en-US-MichelleNeural",              # warm younger American female
+    "en-US-BlueNeural",                  # lighter American male
+    "en-US-NancyNeural",                 # lighter American female
 ] if v not in _BLOCKED_VOICES]
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
@@ -187,7 +185,7 @@ def _hindi_hinglish_candidates() -> list[str]:
 
 
 def _env_main_voice_raw() -> str:
-    return os.environ.get("FRIDAY_TTS_VOICE", "en-US-EmmaMultilingualNeural").strip() or "en-US-EmmaMultilingualNeural"
+    return os.environ.get("FRIDAY_TTS_VOICE", "en-US-AvaMultilingualNeural").strip() or "en-US-AvaMultilingualNeural"
 
 
 def _session_use_env_voice_only() -> bool:
@@ -204,7 +202,7 @@ def _pick_main_chat_voice(state: dict) -> str:
             return preferred
         if ADULT_POOL:
             return _pick_from_pool_excluding(ADULT_POOL, last_voice)
-        return "en-US-EmmaMultilingualNeural"
+        return "en-US-AvaMultilingualNeural"
 
     use_hindi_hinglish = random.random() < 0.5
 
@@ -226,7 +224,7 @@ def _pick_main_chat_voice(state: dict) -> str:
         return preferred
     if ADULT_POOL:
         return _pick_from_pool_excluding(ADULT_POOL, last_voice)
-    return "en-US-EmmaMultilingualNeural"
+    return "en-US-AvaMultilingualNeural"
 
 
 def _jarvis_greeting_env(voice: str) -> dict:
@@ -240,12 +238,41 @@ def _jarvis_greeting_env(voice: str) -> dict:
     }
 
 
-def _speak_welcome(voice: str) -> None:
-    """Fire-and-forget: speak the session-start greeting in the new voice."""
+def _welcome_lock_acquire(chat_id: str) -> bool:
+    """Atomic Redis NX guard — returns True only for the FIRST caller per chat_id.
+
+    Prevents two concurrent pick-session-voice invocations (e.g. Cursor hook +
+    cursor-reply-watch seeding) from both passing is_new=True and speaking the
+    welcome twice for the same chat.  TTL of 60 s auto-clears on crash.
+    """
+    if not chat_id:
+        return True  # no chat_id guard possible — allow (single-process path)
+    try:
+        url = (
+            os.environ.get("OPENCLAW_REDIS_URL", "").strip()
+            or os.environ.get("FRIDAY_AMBIENT_REDIS_URL", "").strip()
+            or "redis://127.0.0.1:6379"
+        )
+        import redis as _redis  # type: ignore
+        r = _redis.Redis.from_url(url, decode_responses=True)
+        key = f"friday:voice:welcome_lock:{chat_id[:32]}"
+        return bool(r.set(key, "1", nx=True, ex=60))
+    except Exception:
+        return True  # Redis unavailable — fall back to allowing the welcome
+
+
+def _speak_welcome(voice: str, chat_id: str = "") -> None:
+    """Fire-and-forget: speak the session-start greeting in the new voice.
+
+    Only fires once per chat_id (Redis NX lock).  Suppressed when
+    FRIDAY_PICK_SESSION_NO_WELCOME=true.
+    """
     if os.environ.get("FRIDAY_PICK_SESSION_NO_WELCOME", "").strip().lower() in (
         "1", "true", "yes", "on",
     ):
         return
+    if not _welcome_lock_acquire(chat_id):
+        return  # another process already spoke the welcome for this chat
     who = _user_display_name()
     if _main_random_voices_enabled():
         greeting = (
@@ -276,47 +303,54 @@ def _env_cursor_reply_voice_override() -> str:
     return os.environ.get("FRIDAY_CURSOR_REPLY_VOICE", "").strip()
 
 
-def pick_voice(*, subagent: bool = False, cursor_reply: bool = False) -> str:
+def pick_voice(*, subagent: bool = False, cursor_reply: bool = False, thinking: bool = False) -> str:
     chat_id = _latest_chat_uuid()
     state   = _load_state()
 
     if cursor_reply:
-        # Anchor to main Composer chat id (authoritative); fall back to latest folder if unset.
-        anchor = state.get("chat_id") or chat_id
+        # cursor-reply voice is GLOBAL sticky — no chat anchor; never re-picks on restart.
+        # Env override wins if set and not blocked.
         override = _env_cursor_reply_voice_override()
-        if override:
-            if override in _BLOCKED_VOICES:
-                override = ""
+        if override and override in _BLOCKED_VOICES:
+            override = ""
         if override:
             cur = state.get("cursor_reply_voice", "")
-            if state.get("cursor_reply_chat_id") == anchor and cur == override and cur not in _BLOCKED_VOICES:
+            if cur == override and cur not in _BLOCKED_VOICES:
+                # Remove stale per-chat anchor from previous version if present.
+                if "cursor_reply_chat_id" in state:
+                    state.pop("cursor_reply_chat_id")
+                    _save_state(state)
                 _redis_touch_voice_context("cursor:reply", cur)
                 return cur
-            state["cursor_reply_chat_id"] = anchor
+            state.pop("cursor_reply_chat_id", None)
             state["cursor_reply_voice"] = override
             _save_state(state)
             _redis_touch_voice_context("cursor:reply", override)
             return override
 
-        main_v = state.get("voice", "")
-        sub_v = state.get("subagent_voice", "")
-        pool = [v for v in ADULT_POOL if v not in _BLOCKED_VOICES and v != main_v and v != sub_v]
+        cur = state.get("cursor_reply_voice", "")
+        if cur and cur not in _BLOCKED_VOICES:
+            # Remove stale per-chat anchor from previous version if present.
+            if "cursor_reply_chat_id" in state:
+                state.pop("cursor_reply_chat_id")
+                _save_state(state)
+            _redis_touch_voice_context("cursor:reply", cur)
+            return cur
+
+        # Not set yet or blocked — pick distinct from all other slots.
+        occupied = {
+            state.get("voice", ""),
+            state.get("subagent_voice", ""),
+            state.get("thinking_voice", ""),
+        } - {""}
+        last_voice = cur
+        pool = [v for v in ADULT_POOL if v not in _BLOCKED_VOICES and v not in occupied and v != last_voice]
         if not pool:
-            pool = [v for v in ADULT_POOL if v not in _BLOCKED_VOICES] or ["en-US-EmmaMultilingualNeural"]
-
-        last = state.get("cursor_reply_voice", "")
-        if (
-            anchor
-            and state.get("cursor_reply_chat_id") == anchor
-            and last
-            and last not in _BLOCKED_VOICES
-        ):
-            _redis_touch_voice_context("cursor:reply", last)
-            return last
-
-        choices = [v for v in pool if v != last] or pool
-        new_voice = random.choice(choices)
-        state["cursor_reply_chat_id"] = anchor
+            pool = [v for v in ADULT_POOL if v not in _BLOCKED_VOICES and v != last_voice]
+        if not pool:
+            pool = [v for v in ADULT_POOL if v not in _BLOCKED_VOICES] or ["en-US-AvaMultilingualNeural"]
+        new_voice = random.choice(pool)
+        state.pop("cursor_reply_chat_id", None)
         state["cursor_reply_voice"] = new_voice
         _save_state(state)
         _redis_touch_voice_context("cursor:reply", new_voice)
@@ -326,6 +360,10 @@ def pick_voice(*, subagent: bool = False, cursor_reply: bool = False) -> str:
         # Subagent voice is GLOBAL — same adult voice across all chats until blocked or reset.
         cur = state.get("subagent_voice", "")
         if cur and cur not in _BLOCKED_VOICES:
+            # Remove stale per-chat anchor from previous version if present.
+            if "subagent_chat_id" in state:
+                state.pop("subagent_chat_id")
+                _save_state(state)
             _redis_touch_voice_context("cursor:subagent", cur)
             return cur
         # Not set yet, or blocked — pick a fresh adult voice.
@@ -335,6 +373,39 @@ def pick_voice(*, subagent: bool = False, cursor_reply: bool = False) -> str:
         state["subagent_voice"] = new_voice
         _save_state(state)
         _redis_touch_voice_context("cursor:subagent", new_voice)
+        return new_voice
+
+    if thinking:
+        # Thinking voice is GLOBAL sticky — same internal-monologue voice across all chats.
+        # Excluded from pool: ALL other active slots so no collision with main, subagent, or
+        # cursor-reply regardless of when each was picked.
+        cur = state.get("thinking_voice", "")
+        if cur and cur not in _BLOCKED_VOICES:
+            # Remove stale per-chat anchor from previous version if still present.
+            if "thinking_chat_id" in state:
+                state.pop("thinking_chat_id")
+                _save_state(state)
+            _redis_touch_voice_context("cursor:thinking", cur)
+            return cur
+        # Not set yet, or blocked — pick a fresh voice distinct from every other slot.
+        occupied = {
+            state.get("voice", ""),
+            state.get("subagent_voice", ""),
+            state.get("cursor_reply_voice", ""),
+        } - {""}
+        last_voice = cur
+        pool = [v for v in ADULT_POOL if v not in _BLOCKED_VOICES and v not in occupied and v != last_voice]
+        if not pool:
+            # Fallback: relax to only exclude blocked + last used
+            pool = [v for v in ADULT_POOL if v not in _BLOCKED_VOICES and v != last_voice]
+        if not pool:
+            pool = [v for v in ADULT_POOL if v not in _BLOCKED_VOICES] or ["en-US-AndrewMultilingualNeural"]
+        new_voice = random.choice(pool)
+        state["thinking_voice"] = new_voice
+        # Remove stale per-chat anchor from previous version if present.
+        state.pop("thinking_chat_id", None)
+        _save_state(state)
+        _redis_touch_voice_context("cursor:thinking", new_voice)
         return new_voice
 
     # ── Main chat ─────────────────────────────────────────────────────────────
@@ -356,7 +427,7 @@ def pick_voice(*, subagent: bool = False, cursor_reply: bool = False) -> str:
     state["voice"]   = new_voice
     _save_state(state)
     _redis_touch_voice_context("cursor:main", new_voice)
-    _speak_welcome(new_voice)
+    _speak_welcome(new_voice, chat_id=chat_id)
     return new_voice
 
 
@@ -368,7 +439,8 @@ def check_voices() -> None:
         "Session voice assignments:",
         f"  main       : {state.get('voice', '(not set)'):<42} chat: {chat_id[:12] + '...' if len(chat_id) > 12 else chat_id or '(none)'}",
         f"  subagent   : {state.get('subagent_voice', '(not set)'):<42} (global sticky)",
-        f"  cursor-reply: {state.get('cursor_reply_voice', '(not set)'):<42} chat: {(state.get('cursor_reply_chat_id') or '(none)')[:12]}...",
+        f"  cursor-reply: {state.get('cursor_reply_voice', '(not set)'):<42} (global sticky)",
+        f"  thinking   : {state.get('thinking_voice', '(not set)'):<42} (global sticky)",
     ]
     # Redis voice context (if available)
     try:
@@ -379,7 +451,7 @@ def check_voices() -> None:
         )
         import redis as _redis
         r = _redis.Redis.from_url(url, decode_responses=True)
-        for ctx in ("cursor:main", "cursor:subagent", "cursor:reply"):
+        for ctx in ("cursor:main", "cursor:subagent", "cursor:reply", "cursor:thinking"):
             data = r.hgetall(f"friday:voice:context:{ctx}")
             if data:
                 lines.append(f"  redis {ctx}: voice={data.get('voice','?')} last_used={data.get('last_used','?')} status={data.get('status','?')}")
@@ -405,6 +477,11 @@ if __name__ == "__main__":
         help="Pick third voice for cursor-reply-watch TTS (distinct from main and subagent when possible).",
     )
     ap.add_argument(
+        "--thinking",
+        action="store_true",
+        help="Pick per-chat thinking voice from adult pool (distinct from main + subagent).",
+    )
+    ap.add_argument(
         "--check",
         action="store_true",
         help="Display current session voice assignments per session type (no pick).",
@@ -413,7 +490,8 @@ if __name__ == "__main__":
     if args.check:
         check_voices()
         sys.exit(0)
-    if args.subagent and args.cursor_reply:
-        print("pick-session-voice: use only one of --subagent or --cursor-reply", file=sys.stderr)
+    flags = [args.subagent, args.cursor_reply, args.thinking]
+    if sum(flags) > 1:
+        print("pick-session-voice: use only one of --subagent, --cursor-reply, or --thinking", file=sys.stderr)
         sys.exit(2)
-    print(pick_voice(subagent=args.subagent, cursor_reply=args.cursor_reply), flush=True)
+    print(pick_voice(subagent=args.subagent, cursor_reply=args.cursor_reply, thinking=args.thinking), flush=True)

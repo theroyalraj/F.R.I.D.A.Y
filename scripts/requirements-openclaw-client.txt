@@ -1,0 +1,10 @@
+# OpenClaw client stack: npm run start:client-stack (remote PC_AGENT_URL).
+# Install from repo root: pip install -r scripts/requirements-openclaw-client.txt
+-r requirements-cursor-reply-watch.txt
+redis>=5.0.0
+SpeechRecognition>=3.10.0
+sounddevice>=0.4.0
+numpy>=1.24.0
+requests>=2.28.0
+edge-tts>=6.1.0
+aiohttp>=3.9.0

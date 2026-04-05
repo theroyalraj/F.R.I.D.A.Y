@@ -55,6 +55,7 @@ _sg_scripts = root / "skill-gateway" / "scripts"
 if str(_sg_scripts) not in sys.path:
     sys.path.insert(0, str(_sg_scripts))
 
+from tts_lock_env import tts_lock_ttl_sec  # noqa: E402
 from friday_speaker import speaker  # noqa: E402
 
 logging.basicConfig(
@@ -66,6 +67,7 @@ log = logging.getLogger("friday-notify-followup")
 
 USER_DISPLAY = (os.environ.get("FRIDAY_USER_NAME", "Raj") or "Raj").strip() or "Raj"
 AGENT_URL = os.environ.get("PC_AGENT_URL", "http://127.0.0.1:3847").rstrip("/")
+PC_AGENT_SECRET = (os.environ.get("PC_AGENT_SECRET") or "").strip()
 LANGUAGE = os.environ.get("LISTEN_LANGUAGE", "en-US")
 LISTEN_SEC = float(os.environ.get("FRIDAY_NOTIFY_LISTEN_SEC", "10").split("#")[0].strip() or "10")
 MIC_INDEX_RAW = os.environ.get("LISTEN_DEVICE_INDEX")
@@ -115,7 +117,7 @@ def _wait_for_tts_clear(timeout: float = 30.0) -> None:
     while TTS_ACTIVE_FILE.exists():
         try:
             age = time.time() - TTS_ACTIVE_FILE.stat().st_mtime
-            if age > 120:
+            if age > tts_lock_ttl_sec():
                 TTS_ACTIVE_FILE.unlink(missing_ok=True)
                 break
         except OSError:
@@ -215,13 +217,20 @@ def record_after_prompt(mic_idx: int | None) -> np.ndarray | None:
     return np.concatenate(chunks)
 
 
+def _agent_voice_headers() -> dict:
+    h = {"ngrok-skip-browser-warning": "1"}
+    if PC_AGENT_SECRET:
+        h["Authorization"] = f"Bearer {PC_AGENT_SECRET}"
+    return h
+
+
 def send_command(text: str) -> str:
     try:
         r = req_lib.post(
             f"{AGENT_URL}/voice/command",
             json={"text": text, "userId": "friday-notify-followup", "source": "voice"},
             timeout=120,
-            headers={"ngrok-skip-browser-warning": "1"},
+            headers=_agent_voice_headers(),
         )
         r.raise_for_status()
         j = r.json()

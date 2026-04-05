@@ -23,12 +23,12 @@ export function stripModelCliFlags(parts) {
   return out;
 }
 
-/** Extra `--model` args when not already in CLAUDE_CLI_ARGS. Default haiku = faster / cheaper. */
+/** Extra `--model` args when not already in CLAUDE_CLI_ARGS. Default sonnet when unset. */
 function modelCliArgs(extra) {
   if (cliArgsHasModelFlag(extra)) return [];
   const raw = process.env.CLAUDE_MODEL;
   if (raw && String(raw).trim().toLowerCase() === 'inherit') return [];
-  const name = raw && String(raw).trim() ? String(raw).trim() : 'haiku';
+  const name = raw && String(raw).trim() ? String(raw).trim() : 'sonnet';
   return ['--model', name];
 }
 
@@ -36,7 +36,9 @@ function modelCliArgs(extra) {
  * Non-interactive Claude Code CLI. Adjust CLAUDE_BIN / CLAUDE_CLI_ARGS / CLAUDE_MODEL.
  * @param {object} [options]
  * @param {string} [options.claudeModel] — per-request model (from UI); strips conflicting `--model` from CLAUDE_CLI_ARGS for this run only.
- * @param {'alexa'} [options.replyChannel] — extra instructions when the reply is consumed as speech (Alexa).
+ * @param {'alexa'|'voice'} [options.replyChannel] — extra instructions when the reply is consumed as speech.
+ * @param {string} [options.speakStyleExtra] — appended global mood / custom prompt (from Redis speak style).
+ * @param {string} [options.companyContext] — org company profile block for voice/mission/vision.
  */
 export function runClaude(prompt, timeoutMs, options = {}) {
   const bin = process.env.CLAUDE_BIN || 'claude';
@@ -61,6 +63,11 @@ export function runClaude(prompt, timeoutMs, options = {}) {
     `You are on Raj's side, always. You think like a senior engineer who is also a brilliant friend — you give the real answer, not the safe one.`,
     `Work mainly in this folder when it matters: ${workspace}.`,
     ``,
+  ];
+  if (options.companyContext && String(options.companyContext).trim()) {
+    lines.push(String(options.companyContext).trim(), '');
+  }
+  lines.push(
     `VOICE AND TONE:`,
     `• Natural, direct, human. Contractions always ("you've", "it's", "that's").`,
     `• Never open with "Certainly", "Of course", "Great question", "Happy to help", or "Sure".`,
@@ -72,7 +79,7 @@ export function runClaude(prompt, timeoutMs, options = {}) {
     `• No markdown headings, no bullet dumps unless Raj explicitly asked for a list.`,
     `• If you're reasoning through something, walk it plainly: what you checked, what you think, what to try next.`,
     `• If depth is needed, stay conversational — smart friend explaining, not docs page dumping.`,
-  ];
+  );
   if (options.replyChannel === 'alexa' || options.replyChannel === 'voice') {
     lines.push(
       ``,
@@ -82,6 +89,9 @@ export function runClaude(prompt, timeoutMs, options = {}) {
       `• Numbers spelled out. Code described in words, not written.`,
       `• Punchy closer if it fits: "That's the one." / "You're sorted." / "Simple as that." / "Done."`,
     );
+  }
+  if (options.speakStyleExtra && String(options.speakStyleExtra).trim()) {
+    lines.push('', String(options.speakStyleExtra).trim(), '');
   }
   lines.push('User request:', String(prompt));
   const wrapped = lines.join('\n');

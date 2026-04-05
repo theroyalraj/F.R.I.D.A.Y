@@ -24,6 +24,23 @@ Your skill endpoint must follow [Host a Custom Skill as a Web Service](https://d
 - **Claude Code** installed and working in a terminal (`claude` on PATH). The pc-agent defaults to **`--model haiku`** for faster replies; override with **`CLAUDE_MODEL`** (e.g. `sonnet`) or put **`--model …`** in **`CLAUDE_CLI_ARGS`**. Set **`CLAUDE_MODEL=inherit`** to skip injecting a model flag.
 - (Optional) **Google Cloud** OAuth for Gmail/Sheets in N8N; **Evolution API** for WhatsApp (`docker compose --profile whatsapp up -d`).
 
+## 2a) Optional: no N8N / embedded SQLite (macOS app style)
+
+- Set **`OPENCLAW_DIRECT_INTAKE=true`** on **skill-gateway** — Alexa and `/openclaw/trigger` call **pc-agent** `/task` directly, then POST **`/internal/last-result`** (same as the sample N8N workflow). Still set **`PC_AGENT_SECRET`** and **`N8N_WEBHOOK_SECRET`** to the **same** value for internal routes.
+- Set **`OPENCLAW_SQLITE_PATH`** on **pc-agent** (e.g. `~/.openclaw/openclaw.db`) to use embedded **SQLite** for perception + `openclaw_settings` instead of Docker Postgres.
+- Optional: **`~/.openclaw/config.json`** is merged into **`process.env`** after `.env` (wizard / portable installs).
+
+### OpenClaw Postgres (`openclaw-postgres`, port **5433**)
+
+- **`npm run restart:local`** (safe default: no port kills) brings up **`openclaw-postgres`** with **n8n** and **redis-insight** (Redis itself stays under your control per script policy). Use **`npm run restart:force`** when you need to replace listeners on **3847**/**3848**.
+- Set **`OPENCLAW_DATABASE_URL`** (e.g. `postgresql://openclaw:openclaw@127.0.0.1:5433/openclaw`) for **perception**, **runtime settings**, **todos / reminders**, and **action tracker** tables.
+- Init scripts under **`docker/postgres/init/`** run on **first** container create. If your volume already existed, apply new SQL manually, e.g.  
+  `Get-Content docker/postgres/init/03-action-tracker.sql | docker compose exec -T openclaw-postgres psql -U openclaw -d openclaw`
+- **Conversation learning** (optional): tables **`conversation_session`** and **`learning_feedback`** in **`docker/postgres/init/08-learning-feedback.sql`**. On an existing volume:  
+  `Get-Content docker/postgres/init/08-learning-feedback.sql | docker compose exec -T openclaw-postgres psql -U openclaw -d openclaw`  
+  Set **`OPENCLAW_LEARNING_ENABLED=true`** in `.env`. pc-agent auto-applies the same script at startup if the tables are missing (when **`OPENCLAW_DATABASE_URL`** points at Postgres). Task responses include **`generationLogId`** when learning is enabled (for feedback correlation). Submit scores with **`POST /learning/feedback`** (same **`Authorization: Bearer`** as **`/task`**: user JWT or **`PC_AGENT_SECRET`**). Inspect a row: **`GET /learning/generation/:id`**. Export JSONL for offline training: `pip install -r scripts/requirements-learning-export.txt` then **`python scripts/export-learning-dataset.py --format sft --out training.jsonl`**. Send **`clientSessionId`** (or **`conversationSessionId`**) on **`/task`** / **`/voice/command`** bodies to group turns into **`conversation_session`**.
+- **Action tracker**: `pip install -r scripts/requirements-action-tracker.txt`, then **`npm run start:action-tracker`** or enable **`FRIDAY_TRACKER_ENABLED`** with **`npm run start:all`** (starts after the agent). Uses **`ANTHROPIC_API_KEY`**, Gmail + Evolution env vars, and **`WHATSAPP_NOTIFY_NUMBER`** for optional text summaries. On each poll it **speaks a check-in** asking if you want today’s plan, **listens** for yes or no (mic + Google STT; timeout or failure defaults to **yes**), then reads pending **action items** and open **todos** from Postgres (or says you are clear). Tune **`FRIDAY_TRACKER_LISTEN_SEC`** and optional **`FRIDAY_TRACKER_CHECKIN_PROMPT`** in `.env`. Same mic env as listen notify: **`LISTEN_DEVICE_INDEX`**, **`LISTEN_ENERGY_THRESHOLD`**, etc.
+
 ## 2) Configure environment
 
 ```powershell
@@ -277,12 +294,31 @@ Register a **webhook** on that instance so Evolution POSTs incoming-message even
 
 If you set **`WHATSAPP_WEBHOOK_SECRET`**, configure Evolution (or a reverse proxy) to send header **`X-Openclaw-WhatsApp-Secret`** with that value on each POST, or leave the secret empty for local-only testing.
 
+### 9.6a WhatsApp group → Jira (skill-gateway)
+
+**skill-gateway** can turn **allowlisted group** messages into **Jira issues** using Claude for triage and Evolution `sendText` for an in-thread confirmation. It runs on the existing route **`POST /webhook/evolution`** when the event is **`MESSAGES_UPSERT`** (same handler as call notifications).
+
+**Delivering events to the gateway:** Many setups point Evolution’s webhook only at N8N. The Jira pipeline must receive the same payloads. Pick one:
+
+1. **Mirror from N8N (recommended):** Right after the **Webhook** node in [`n8n/workflows/whatsapp-evolution-intake.json`](../n8n/workflows/whatsapp-evolution-intake.json), add an **HTTP Request** node: **POST** `http://host.docker.internal:3848/webhook/evolution`, **Body** = raw JSON from the Evolution webhook (same object N8N received), headers **`Content-Type: application/json`** and, if used, **`X-Openclaw-WhatsApp-Secret`** matching **`WHATSAPP_WEBHOOK_SECRET`**. Run this path in parallel with your existing parse/PCAgent flow (do not replace the N8N URL Evolution already calls unless you also forward to N8N from the gateway).
+2. **Direct to gateway only:** Point Evolution at **`http://host.docker.internal:3848/webhook/evolution`** — you then lose stock **`whatsapp-intake`** unless you add forwarding (not included).
+
+**Configuration (`.env`):** enable **`WHATSAPP_JIRA_ENABLED=true`**, set **`WHATSAPP_JIRA_GROUPS`** (comma-separated group JIDs such as `120363…@g.us` from Evolution “fetch groups” / logs), **`WHATSAPP_JIRA_PROJECT`**, **`JIRA_BASE_URL`**, **`JIRA_EMAIL`**, **`JIRA_API_TOKEN`**, and **`ANTHROPIC_API_KEY`**. Optional: **`WHATSAPP_JIRA_TRIGGER`** (e.g. `/ticket`) so only lines with that prefix become tickets; **`WHATSAPP_JIRA_USERS`** JSON map of name → Jira **accountId**; **`WHATSAPP_JIRA_DRY_RUN=true`** to classify without creating issues. See commented block in `.env`.
+
+**Smoke test:** `npm run test:whatsapp-jira` (expects **skill-gateway** listening on **3848**).
+
 ### 9.7 End-to-end check
 
 1. **pc-agent** running on the host (`node pc-agent/src/server.js` or your usual command).  
 2. Send a **text** WhatsApp message to the linked number. N8N should run **ParseEvolution → PCAgent → FanoutWhatsApp → SendWhatsApp** (one send per entry in `WHATSAPP_ALWAYS_REPLY_NUMBERS`, or one to the sender if unset); you get a reply with **`summary`** from Claude.  
-3. **Groups** are ignored by the sample workflow (only 1:1 chats).  
+3. **Groups:** the stock N8N workflow targets 1:1 chats. **Group → Jira** uses **`WHATSAPP_JIRA_*`** on **`/webhook/evolution`** (see §9.6a).  
 4. Do **not** expose N8N or Evolution to the public internet without TLS, auth, and rate limits.
+
+### 9.7a Friday Listen — Mail and WhatsApp rail
+
+After you sign in, the dashboard at **`http://127.0.0.1:3847/friday/listen`** shows a **right-hand rail**: **Mail** (unread + recent from Gmail via **`GET /integrations/gmail`**) above **WhatsApp** (Evolution connection status, recent inbound messages, and compose). Outbound sends use **`POST /integrations/whatsapp/send`** on pc-agent; the **recipient must be in** **`WHATSAPP_ALLOWED_NUMBERS`** when that list is non-empty, and **`EVOLUTION_API_KEY`** must be a real secret (not `change-me`). **Inbound handling is unchanged:** Evolution → N8N **`whatsapp-intake`** → **`POST /task`** — the rail is for monitoring and manual sends, not a replacement for the webhook.
+
+Gmail in the rail needs **`GMAIL_ADDRESS`** and **`GMAIL_APP_PWD`** in `.env` (same as [`scripts/gmail.py`](../scripts/gmail.py)). On **narrow** windows (&lt;1100px), tap the **envelope** icon in the top bar to open the rail over the chat.
 
 ### 9.8 Alexa vs WhatsApp
 
@@ -294,9 +330,22 @@ If you set **`WHATSAPP_WEBHOOK_SECRET`**, configure Evolution (or a reverse prox
 - Add N8N branches after **Normalize** (Alexa) or extend the WhatsApp flow: Gmail / Google Sheets nodes (OAuth in N8N).
 - Keep **long** work out of the Alexa request path; the gateway already ACKs fast.
 
+## 10b) Split-stack: home server + remote clients (ngrok)
+
+Run **Docker, Postgres, Redis, skill-gateway, and pc-agent** on one always-on machine. On laptops (macOS or Windows), run **only** the client stack so mic, **friday-speak**, Cursor reply TTS, and ambient talk to the house over HTTPS.
+
+- **Home:** `npm run start:server-stack` (or `OPENCLAW_START_MODE=server` with `npm run start:all`). Keep `OPENCLAW_SKILL_GATEWAY_URL=http://127.0.0.1:3848` on the server. Tunnel pc-agent: `npm run tunnel:friday` → `ngrok http 3847`. Optionally tunnel the gateway: `npm run tunnel:ngrok` → `ngrok http 3848`.
+- **Remote:** Copy `.env` secrets (`PC_AGENT_SECRET`, etc.) from the server; set `PC_AGENT_URL` and `FRIDAY_PC_AGENT_URL` to the **public** pc-agent base (no trailing slash). Set `OPENCLAW_START_MODE=client` or run `npm run start:client-stack`. Turn off server-only daemons on the laptop (e.g. `FRIDAY_EMAIL_WATCH=false` if Gmail watch runs on the server).
+- **Redis:** For shared TTS locks and ambient coherence, use the **same** `OPENCLAW_REDIS_URL` on server and clients (Tailscale/VPN IP, or managed Redis). Plain `127.0.0.1` on a remote machine is **local-only** and will diverge from the house.
+- **Bootstrap:** [`scripts/openclaw-client-bootstrap.sh`](../scripts/openclaw-client-bootstrap.sh) (host raw URL on a GitHub Gist) clones or pulls the repo, runs `npm ci`, `pip install -r scripts/requirements-openclaw-client.txt`, upserts client `.env` keys, optionally speaks a **celebration** after a successful `/voice/ping` (at most once per 30 minutes). Set `OPENCLAW_REPO_URL` or pass `--repo`.
+- **macOS:** Listen UI opens via `open`. Offline TTS uses **`say`** with optional `FRIDAY_MACOS_SAY_VOICE` and `FRIDAY_MACOS_SAY_RATE`. List voices: `scripts/list-macos-voices.sh` or `python scripts/pick-macos-say-voice.py --list`. Optional Notification Center bridge: `FRIDAY_MAC_NOTIFY_WATCH=true` (subscribes to `/voice/stream` and forwards `win_notify` SSE events).
+- **Smoke:** `npm run smoke:ngrok-split -- https://YOUR.ngrok-free.app` checks health and voice ping (pass ngrok URL as first argument or set `PC_AGENT_TEST_URL`).
+
 ## 11) Security checklist
 
-- Do **not** expose N8N (5678) or pc-agent (3847) to the internet.
+- Do **not** expose N8N (5678) or Postgres **5433** to the internet without auth.
+- **pc-agent on 3847** is powerful: if you use **ngrok** on 3847, treat the URL as a secret, prefer **ngrok OAuth** or IP allowlists, and keep `PC_AGENT_SECRET` long and unguessable.
+- Prefer **Tailscale or VPN** for `OPENCLAW_REDIS_URL` instead of exposing Redis on a public port.
 - Rotate `N8N_WEBHOOK_SECRET` and `PC_AGENT_SECRET` if leaked.
 - Review allowlisted apps in `pc-agent/src/open.js` before widening.
 

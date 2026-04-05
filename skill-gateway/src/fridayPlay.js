@@ -7,7 +7,8 @@
  * Env vars:
  *   FRIDAY_PLAY_ENABLED=false  — set to disable
  *   FRIDAY_TTS_DEVICE          — audio device substring (default: Echo Dot)
- *   FRIDAY_PLAY_SECONDS        — how many seconds to play (default: 45)
+ *   FRIDAY_PLAY_SECONDS        — default seconds when opts.fridayPlaySeconds omitted (default: 45)
+ *   Autoplay gate: Redis openclaw:music:autoplay + temp file + FRIDAY_AUTOPLAY (see lib/musicAutoplayPrefs.js)
  */
 
 import { spawn } from 'node:child_process';
@@ -15,6 +16,8 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pythonChildExecutable } from './winPython.js';
+import { stopAllFridayAudioSync } from './stopAllFridayAudio.js';
+import { readMusicAutoplayEnabledSync } from '../../lib/musicAutoplayPrefs.js';
 
 const __dirname    = path.dirname(fileURLToPath(import.meta.url));
 const PLAY_SCRIPT  = path.resolve(__dirname, '../scripts/friday-play.py');
@@ -24,10 +27,9 @@ export function fridayPlayEnabled(env = process.env) {
   return existsSync(PLAY_SCRIPT);
 }
 
-/** Returns false when FRIDAY_AUTOPLAY=false/0/off/no — gates automatic (non-user-initiated) songs. */
+/** False when autoplay pref off — gates automatic (non-user-initiated) songs; uses Redis/file/env. */
 export function autoPlayEnabled(env = process.env) {
-  const v = (env.FRIDAY_AUTOPLAY ?? '').toLowerCase();
-  return !(v === 'false' || v === '0' || v === 'off' || v === 'no');
+  return readMusicAutoplayEnabledSync(env);
 }
 
 /**
@@ -37,7 +39,7 @@ export function autoPlayEnabled(env = process.env) {
  * @param {{ onClose?: () => void }} [opts]  fired when friday-play.py exits (song finished or error)
  */
 export function playLocalSong(searchPhrase, log, opts = {}) {
-  const { onClose } = opts;
+  const { onClose, fridayPlaySeconds } = opts;
   let closeFired = false;
 
   const fireClose = () => {
@@ -63,11 +65,19 @@ export function playLocalSong(searchPhrase, log, opts = {}) {
     return;
   }
 
+  // Pre-empt any other friday-play / stuck player so boot song + scheduler cannot stack.
+  stopAllFridayAudioSync(log, { fullPanic: false });
+
+  const playSec =
+    fridayPlaySeconds != null && String(fridayPlaySeconds).trim() !== ''
+      ? String(fridayPlaySeconds).trim()
+      : (process.env.FRIDAY_PLAY_SECONDS || '45');
+
   const child = spawn(pythonChildExecutable(), [PLAY_SCRIPT, safePhrase], {
     env: {
       ...process.env,
       FRIDAY_TTS_DEVICE:    process.env.FRIDAY_TTS_DEVICE    || 'Echo Dot',
-      FRIDAY_PLAY_SECONDS:  process.env.FRIDAY_PLAY_SECONDS  || '45',
+      FRIDAY_PLAY_SECONDS:  playSec,
     },
     stdio:       ['ignore', 'ignore', 'pipe'],
     windowsHide: true,

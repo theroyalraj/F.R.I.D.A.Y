@@ -6,10 +6,10 @@
  * Env vars:
  *   FRIDAY_TTS_EDGE=false      — explicitly disable (enabled by default when script is present)
  *   FRIDAY_TTS_DISABLED=1      — disables all server-side TTS
- *   FRIDAY_EDGE_TTS_VOICE      — voice short-name (default: inherits FRIDAY_TTS_VOICE → en-US-EmmaMultilingualNeural)
+ *   FRIDAY_EDGE_TTS_VOICE      — voice short-name (default: inherits FRIDAY_TTS_VOICE → en-US-AvaMultilingualNeural)
  *
  * Good voices (see FRIDAY_TTS_VOICE_BLOCK — blocked ids are rejected by API and clamped at runtime):
- *   en-US-EmmaMultilingualNeural — repo default
+ *   en-US-AvaMultilingualNeural — repo default (Jarvis)
  *   en-US-GuyNeural       US male neural
  *   en-US-AriaNeural      US female neural
  *   en-IN-NeerjaExpressiveNeural  Indian English / Hinglish
@@ -79,9 +79,9 @@ export function edgeTtsVoice(env = process.env) {
   const blocked = getVoiceBlockSet(env);
   const envMain = env.FRIDAY_TTS_VOICE?.trim() || '';
   const fallback =
-    (envMain && !blocked.has(envMain) && envMain) || 'en-US-EmmaMultilingualNeural';
+    (envMain && !blocked.has(envMain) && envMain) || 'en-US-AvaMultilingualNeural';
   const edgeOverride = env.FRIDAY_EDGE_TTS_VOICE?.trim() || '';
-  const candidates = [_sessionVoice, edgeOverride, envMain, 'en-US-EmmaMultilingualNeural'].filter(Boolean);
+  const candidates = [_sessionVoice, edgeOverride, envMain, 'en-US-AvaMultilingualNeural'].filter(Boolean);
   let resolved = fallback;
   for (const c of candidates) {
     if (!blocked.has(c)) { resolved = c; break; }
@@ -112,7 +112,8 @@ export function filteredEdgeTtsCatalogue(env = process.env) {
 
 /** Curated Edge TTS voice catalogue with descriptions. */
 export const EDGE_TTS_VOICE_CATALOGUE = [
-  { voice: 'en-US-EmmaMultilingualNeural',      lang: 'en-US', gender: 'Female', desc: 'US female multilingual — natural flow (edge-tts maintainer pick)' },
+  { voice: 'en-US-AvaMultilingualNeural',       lang: 'en-US', gender: 'Female', desc: 'US female multilingual — Jarvis default' },
+  { voice: 'en-US-EmmaMultilingualNeural',      lang: 'en-US', gender: 'Female', desc: 'US female multilingual — natural flow' },
   { voice: 'en-GB-RyanNeural',                  lang: 'en-GB', gender: 'Male',   desc: 'British male — Jarvis / FRIDAY feel' },
   { voice: 'en-GB-ThomasNeural',                lang: 'en-GB', gender: 'Male',   desc: 'British male, deeper tone' },
   { voice: 'en-GB-LibbyNeural',                 lang: 'en-GB', gender: 'Female', desc: 'British female, natural' },
@@ -129,7 +130,57 @@ export const EDGE_TTS_VOICE_CATALOGUE = [
   { voice: 'en-AU-NatashaNeural',               lang: 'en-AU', gender: 'Female', desc: 'Australian female' },
   { voice: 'en-CA-LiamNeural',                  lang: 'en-CA', gender: 'Male',   desc: 'Canadian male' },
   { voice: 'en-CA-ClaraNeural',                 lang: 'en-CA', gender: 'Female', desc: 'Canadian female' },
+  { voice: 'ja-JP-NanamiNeural',                lang: 'ja-JP', gender: 'Female', desc: 'Japanese neural — Japanese-English colour on English text' },
+  { voice: 'ja-JP-KeitaNeural',                 lang: 'ja-JP', gender: 'Male',   desc: 'Japanese neural — Japanese-English colour on English text' },
+  { voice: 'ru-RU-DmitryNeural',                lang: 'ru-RU', gender: 'Male',   desc: 'Russian neural — Russian-English colour on English text' },
+  { voice: 'ru-RU-SvetlanaNeural',              lang: 'ru-RU', gender: 'Female', desc: 'Russian neural — Russian-English colour on English text' },
 ];
+
+const FAST_VOICE_SOURCES = new Set([
+  'ui',
+  'cursor-ui',
+  'voice',
+  'mic-daemon',
+  'friday-mic-daemon',
+  'whatsapp',
+]);
+
+/**
+ * Primary Edge voice for Haiku-tier replies (Japanese-English timbre on English).
+ * Occasionally swaps to alt voice for Russian-English colour (see FRIDAY_TTS_HAIKU_ALT_CHANCE).
+ */
+export function resolveHaikuTtsVoice(env = process.env) {
+  const blocked = getVoiceBlockSet(env);
+  const pick = (v) => {
+    const s = typeof v === 'string' ? v.trim() : '';
+    return s && !blocked.has(s) ? s : '';
+  };
+  const primary = pick(env.FRIDAY_TTS_HAIKU_VOICE) || pick('ja-JP-NanamiNeural');
+  const alt = pick(env.FRIDAY_TTS_HAIKU_ALT_VOICE) || pick('ru-RU-DmitryNeural');
+  const rawChance = parseFloat(String(env.FRIDAY_TTS_HAIKU_ALT_CHANCE ?? '0.2').trim());
+  const chance = Number.isFinite(rawChance) ? Math.min(1, Math.max(0, rawChance)) : 0.2;
+  if (alt && chance > 0 && Math.random() < chance) return alt;
+  if (primary) return primary;
+  if (alt) return alt;
+  return edgeTtsVoice(env);
+}
+
+/**
+ * Overlay replyVoice when the task ran on Claude Haiku (UI / voice fast path).
+ * @param {Record<string, string>} [extras]
+ * @param {{ modelKey?: string, resultModel?: string, claudeModel?: string | null | undefined, src?: string }} ctx
+ */
+export function mergeHaikuReplyVoice(extras = {}, ctx = {}) {
+  const src = String(ctx.src || '').toLowerCase();
+  if (!FAST_VOICE_SOURCES.has(src)) return { ...extras };
+  const cm = ctx.claudeModel != null ? String(ctx.claudeModel).toLowerCase().trim() : '';
+  const mk = ctx.modelKey != null ? String(ctx.modelKey).toLowerCase() : '';
+  const rm = ctx.resultModel != null ? String(ctx.resultModel) : '';
+  const haiku =
+    cm === 'haiku' || mk.includes('haiku') || /haiku/i.test(rm);
+  if (!haiku) return { ...extras };
+  return { ...extras, replyVoice: resolveHaikuTtsVoice() };
+}
 
 /**
  * Synthesize text to MP3 buffer via friday-speak.py --output.

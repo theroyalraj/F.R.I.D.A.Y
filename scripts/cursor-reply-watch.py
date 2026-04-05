@@ -2,6 +2,9 @@
 """
 cursor-reply-watch.py — tail Cursor agent JSONL transcripts and speak assistant prose only.
 
+Uses watchdog OS file notifications under CURSOR_TRANSCRIPTS_DIR (with a periodic rescan fallback)
+instead of polling. Requires: pip install -r scripts/requirements-cursor-reply-watch.txt
+
 Watches every agent-transcript UUID folder under CURSOR_TRANSCRIPTS_DIR. Main chat UUID is
 session-voice.json "chat_id"; any other UUID is treated as a Task subagent transcript.
 
@@ -10,7 +13,7 @@ Env (defaults on unless explicitly false/off/0/no):
   FRIDAY_CURSOR_SPEAK_SUBAGENT_REPLY — narrate subagent assistant text
   FRIDAY_CURSOR_SPEAK_THINKING — capture and speak extended-thinking content before Cursor
     redacts it (default: true). Thinking blocks appear briefly in the JSONL before being
-    replaced with [REDACTED]. This watcher catches them on the first poll pass and speaks
+    replaced with [REDACTED]. This watcher catches them on the first tail read and speaks
     them, preserving the reasoning as audio.
 
 When FRIDAY_CURSOR_NARRATION is on, the Cursor agent already speaks live (ack / status / done),
@@ -22,23 +25,50 @@ Thinking capture from JSONL defaults ON with narration (live agent thinking TTS 
 Set FRIDAY_CURSOR_SPEAK_THINKING_WITH_NARRATION=false to disable watcher thinking only.
 
 Optional:
-  FRIDAY_CURSOR_REPLY_VOICE — Edge voice id for main transcript TTS (see pick-session-voice --cursor-reply)
+  FRIDAY_CURSOR_REPLY_VOICE / FRIDAY_CURSOR_REPLY_RATE — override main Composer transcript TTS; else
+  .session-voice.json cursor_reply_voice; else Sentinel persona (OPENCLAW_SENTINEL_*).
   CURSOR_TRANSCRIPTS_DIR — override path to agent-transcripts
 
-Thinking TTS pacing (sentence-by-sentence, avoids one rushed blob):
-  FRIDAY_CURSOR_THINKING_TTS_RATE — Edge rate for thinking only (default -5% vs repo default +7.5%)
-  FRIDAY_CURSOR_THINKING_PAUSE_MIN / FRIDAY_CURSOR_THINKING_PAUSE_MAX — seconds between sentences (default 0.35–0.85)
-  FRIDAY_CURSOR_THINKING_OPENER_CHANCE — 0–1 chance to prefix first sentence with a soft "Hmm / So —" style lead-in (default 0.35)
-  FRIDAY_CURSOR_THINKING_MAX_CHUNK_CHARS — merge/split target width (default 300)
+Windows default output (pycaw): UI + Redis friday:voice:watcher:output_health expose ``muted`` and
+``audioDisabled`` (device disabled / unplugged / no default — not the same as mute).
+  FRIDAY_CURSOR_WATCHER_SKIP_IF_OUTPUT_DISABLED — default true: skip Sentinel TTS when output unusable
+  FRIDAY_CURSOR_WATCHER_SKIP_IF_MUTED — default false: also skip when the default device is muted
+
+Perf logging (compare with cursor-grpc-watch): when FRIDAY_CURSOR_GRPC_LOG is on (default), prints
+  [JSONL:t0] … [JSONL:t4_tts_fire] with perf_counter deltas from the first fs event for this debounce burst.
+
+Thinking TTS pacing (batched sentences + sized chunks; avoids a firehose of tiny clips):
+  FRIDAY_CURSOR_THINKING_TTS_RATE — optional fixed Edge rate for thinking (when unset, rate is adaptive).
+    Thinking playback is **non-priority** so FRIDAY_TTS_PRIORITY=1 speaks pre-empt it.
+  FRIDAY_CURSOR_THINKING_INCREMENTAL_SLOW — extra percentage points to slow mid-stream chunks (default 2)
+  FRIDAY_CURSOR_THINKING_PAUSE_MIN / FRIDAY_CURSOR_THINKING_PAUSE_MAX — base seconds between intra-batch chunks (defaults 0.07–0.16; scaled by block size)
+  FRIDAY_CURSOR_THINKING_OPENER_CHANCE — 0–1 chance to prefix first chunk with a soft lead-in (default 0.35)
+  FRIDAY_CURSOR_THINKING_OPENER_CONTEXT — auto (default) picks neutral vs code-roast vs calm-boundary openers from chunk text; neutral = reflective only
+  FRIDAY_CURSOR_THINKING_MAX_CHUNK_CHARS — merge/split target width (default 520)
+  FRIDAY_CURSOR_THINKING_MIN_BATCH_CHARS — incremental JSONL: accumulate at least this many chars before starting TTS (default 220)
+  FRIDAY_CURSOR_THINKING_MIN_CHUNK_MERGE_CHARS — merge adjacent pacing chunks smaller than this (default 90)
 
 JSONL thinking does not set FRIDAY_TTS_THINKING — that flag enables a separate singleton in friday-speak that
 drops audio when busy (e.g. live agent thinking narration). Watcher thinking only needs the global TTS lock.
 
 Incremental thinking (same line growing across JSONL updates):
   Thinking blocks may carry final/partial flags — we only speak immediately when final is true (or partial is explicitly false).
-  When flags are missing, we buffer and speak once after FRIDAY_CURSOR_THINKING_DEBOUNCE_SEC of no updates (default 0.85).
+  When flags are missing, we buffer and speak once after FRIDAY_CURSOR_THINKING_DEBOUNCE_SEC of no updates (default 0.65).
+
+Filesystem debounce (rapid JSONL writes):
+  FRIDAY_CURSOR_FILE_DEBOUNCE_SEC — coalesce events per file before tail read (default 0.035)
 
 Run:  python scripts/cursor-reply-watch.py
+
+Thinking smoke tests — python scripts/cursor-watcher-smoke-thinking.py
+  Default: same TTS pipeline as cursor-thinking-ocr.py (strip_to_prose + scrub + _speak_thinking_paced).
+  --jsonl: append synthetic type=thinking for this watcher; needs watcher running and chat_id in .session-voice.json.
+
+Voice-agent chat vs thinking (this script only):
+  Short user-facing chunks that Cursor sometimes emits inside JSONL *thinking* blocks — OpenClaw / Open Claw,
+  Done-dot completion lines, summary headers, “started working” — are spoken via the same async path as
+  normal assistant *chat* (Sentinel cursor-reply voice on main Composer, subagent voice on Task transcripts),
+  not the thinking pacing voice. Long reasoning stays on thinking TTS.
 """
 
 from __future__ import annotations
@@ -46,6 +76,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import queue
 import random
 import re
 import subprocess
@@ -53,6 +84,17 @@ import sys
 import threading
 import time
 from pathlib import Path
+
+try:
+    from watchdog.events import FileSystemEventHandler
+    from watchdog.observers import Observer
+except ImportError:
+    print(
+        "cursor-reply-watch: missing watchdog — install with:\n"
+        "  pip install -r scripts/requirements-cursor-reply-watch.txt",
+        flush=True,
+    )
+    raise SystemExit(1) from None
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _ENV_FILE = _REPO_ROOT / ".env"
@@ -67,20 +109,100 @@ if _ENV_FILE.exists():
         if k and k not in os.environ:
             os.environ[k] = v
 
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
 # Same default as skill-gateway/scripts/pick-session-voice.py — set CURSOR_TRANSCRIPTS_DIR in .env for other machines.
 _TRANSCRIPTS_ROOT = Path(os.environ.get(
     "CURSOR_TRANSCRIPTS_DIR",
     r"C:\Users\rajut\.cursor\projects\d-code-openclaw\agent-transcripts",
 )).resolve()
 _SESSION_VOICE = _REPO_ROOT / ".session-voice.json"
-_PICK_SCRIPT = _REPO_ROOT / "skill-gateway" / "scripts" / "pick-session-voice.py"
+_SKILL_SCRIPTS = _REPO_ROOT / "skill-gateway" / "scripts"
+if str(_SKILL_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SKILL_SCRIPTS))
+from thinking_openers import pick_thinking_opener
+
+_PICK_SCRIPT = _SKILL_SCRIPTS / "pick-session-voice.py"
 _SPEAK_SCRIPT = _REPO_ROOT / "skill-gateway" / "scripts" / "friday-speak.py"
 
+
+def _watcher_tts_gated() -> bool:
+    """Skip Sentinel TTS when default playback is disabled (and optionally muted). Updates Redis."""
+    try:
+        from friday_output_health import watcher_should_skip_tts
+
+        skip, reason = watcher_should_skip_tts()
+        if skip:
+            print(f"cursor-reply-watch: skip TTS — {reason}", flush=True)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+# Legacy poll tuning (unused when watchdog is active; kept for reference / tooling).
 POLL_SEC = 0.35
 POLL_ACTIVE_SEC = 0.15
-RESCAN_SEC = 10.0
+# Fallback directory rescan if an OS file event is missed (network drive, driver quirks).
+RESCAN_SEC = 30.0
 _ACTIVE_WINDOW_SEC = 5.0
 _SPOKEN_HASHES_MAX = 500
+
+# JSONL timing (same toggle as gRPC: FRIDAY_CURSOR_GRPC_LOG).
+_JSONL_FS_T0: dict[str, float] = {}
+_JSONL_WORK_META: dict[str, tuple[float, float]] = {}
+
+
+def _cursor_perf_log_enabled() -> bool:
+    raw = os.environ.get("FRIDAY_CURSOR_GRPC_LOG", "true").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def _jsonl_mark_fs_event(key: str) -> None:
+    if key not in _JSONL_FS_T0:
+        _JSONL_FS_T0[key] = time.perf_counter()
+        if _cursor_perf_log_enabled():
+            tail = key[-48:] if len(key) > 48 else key
+            print(f"[JSONL:t0] +0.0ms path={tail}", flush=True)
+
+# Monotonic counter: advances once per thinking block (per call to _speak_thinking_paced).
+# Ensures voice changes between spans/blocks, not between sentences within the same block.
+_thinking_pool_idx: int = 0
+
+_SENTINEL_VOICE: str | None = None
+_SENTINEL_RATE: str | None = None
+
+
+def _load_sentinel_persona() -> None:
+    global _SENTINEL_VOICE, _SENTINEL_RATE
+    try:
+        from openclaw_company import get_persona
+
+        s = get_persona("sentinel")
+        _SENTINEL_VOICE = (s.get("voice") or "").strip() or None
+        _SENTINEL_RATE = (s.get("rate") or "").strip() or None
+    except Exception:
+        _SENTINEL_VOICE, _SENTINEL_RATE = None, None
+
+
+_load_sentinel_persona()
+
+
+def _resolve_cursor_reply_voice() -> tuple[str | None, str | None]:
+    """Env FRIDAY_CURSOR_REPLY_VOICE → session cursor_reply_voice → Sentinel persona (company registry)."""
+    ev = os.environ.get("FRIDAY_CURSOR_REPLY_VOICE", "").strip()
+    if ev:
+        rr = os.environ.get("FRIDAY_CURSOR_REPLY_RATE", "").strip() or None
+        return ev, rr
+    try:
+        cv = (_load_session().get("cursor_reply_voice") or "").strip()
+        if cv:
+            return cv, None
+    except Exception:
+        pass
+    return _SENTINEL_VOICE, _SENTINEL_RATE
 
 
 def _env_bool(key: str, default: bool = True) -> bool:
@@ -244,6 +366,13 @@ _RE_REDACTED = re.compile(
     r"\bredacted\s*[:;.,!?…]+|\bredacted\b",
     re.IGNORECASE,
 )
+# Thinking blocks that are really user-facing “chat” → use reply TTS (Sentinel / subagent), not thinking pacing.
+_RE_VOICE_AGENT_CHAT = re.compile(
+    r"(?is)"
+    r"\bopenclaw\b|\bopen\s+claw(?:\s+labs)?\b|"
+    r"\bstarted\s+working\b|\bit(?:'s| is)\s+working\b|\bnow\s+working\b|"
+    r"(?:^|[\n\r])\s*summary\s*[:\.]|\bto\s+summarize\b"
+)
 # Inline env-var tokens (UPPER_SNAKE env vars, camelCase/snake_case identifiers adjacent to = or () )
 _RE_ENV_VAR_TOKEN = re.compile(r"\b[A-Z][A-Z0-9_]{3,}\b")
 # Code-heavy characters used to detect code-like lines
@@ -405,126 +534,63 @@ def strip_to_prose(raw: str) -> str:
     return s
 
 
-def _speak_main(text: str) -> None:
+def _speak_main(text: str, *, jsonl_perf_t0: float | None = None) -> None:
+    if _watcher_tts_gated():
+        return
     from friday_speaker import speaker
 
-    speaker.speak(
-        text,
-        session="cursor-reply",
-        bypass_cursor_defer=True,
-    )
+    if jsonl_perf_t0 is not None and _cursor_perf_log_enabled():
+        print(
+            f"[JSONL:t4_tts_fire] +{(time.perf_counter() - jsonl_perf_t0) * 1000.0:.1f}ms",
+            flush=True,
+        )
+    v, r = _resolve_cursor_reply_voice()
+    kw: dict = {
+        "session": "cursor-reply",
+        "priority": True,
+        "bypass_cursor_defer": True,
+    }
+    if v:
+        kw["voice"] = v
+        kw["use_session_sticky"] = False
+    if r:
+        kw["rate"] = r
+    # Pre-delay: let any simultaneous agent ack (PRIORITY=1 Shell call fired in the same
+    # Cursor turn) bump the TTS generation counter first.  The ack wins the generation race
+    # and this speak is naturally superseded — eliminating the back-to-back "two voices"
+    # overlap.  The delay runs in a background thread so the JSONL worker stays responsive.
+    # Configurable via FRIDAY_CURSOR_REPLY_PRE_SPEAK_DELAY_MS (default 200 ms, set to 0 to
+    # disable).
+    _pre_delay_raw = os.environ.get("FRIDAY_CURSOR_REPLY_PRE_SPEAK_DELAY_MS", "200").strip()
+    try:
+        _pre_delay = float(_pre_delay_raw) / 1000.0
+    except ValueError:
+        _pre_delay = 0.20
+
+    def _fire() -> None:
+        if _pre_delay > 0:
+            time.sleep(_pre_delay)
+        speaker.speak(text, **kw)
+
+    threading.Thread(target=_fire, daemon=True, name="cursor-reply-pre-delay").start()
 
 
-def _speak_subagent(text: str) -> None:
+def _speak_subagent(text: str, *, jsonl_perf_t0: float | None = None) -> None:
+    if _watcher_tts_gated():
+        return
     from friday_speaker import speaker
 
+    if jsonl_perf_t0 is not None and _cursor_perf_log_enabled():
+        print(
+            f"[JSONL:t4_tts_fire] +{(time.perf_counter() - jsonl_perf_t0) * 1000.0:.1f}ms",
+            flush=True,
+        )
     speaker.speak(
         text,
         session="subagent",
         priority=True,
         bypass_cursor_defer=True,
     )
-
-
-_THINKING_OPENERS = (
-    # Reflective / analytical
-    "Hmm. ",
-    "Interesting — ",
-    "Actually — ",
-    "Wait — ",
-    "Hang on — ",
-    "Hold on a second — ",
-    "That's a good question — ",
-    "Now that I look at this — ",
-    "Okay, this is nuanced — ",
-    "There's a subtlety here — ",
-    "This is worth unpacking — ",
-    "So here's what's happening — ",
-    "Let me reason through this — ",
-    "Okay, thinking this through — ",
-    "The thing to notice here is — ",
-    "This is more involved than it looks — ",
-    "Let me connect the dots here — ",
-    # Confident / knowledgeable
-    "Right. ",
-    "So — ",
-    "Now — ",
-    "Right, so — ",
-    "Okay, so — ",
-    "Here's the thing — ",
-    "The key insight is — ",
-    "What matters here is — ",
-    "From what I can tell — ",
-    "Based on what I'm seeing — ",
-    "If I'm reading this correctly — ",
-    "The way this works is — ",
-    "So the pattern here is — ",
-    "What's going on under the hood is — ",
-    # Curious / exploratory
-    "Let me think — ",
-    "Let me see — ",
-    "Let me check — ",
-    "Let me dig into this — ",
-    "Let me trace through this — ",
-    "Okay, pulling this apart — ",
-    "Let me walk through the logic — ",
-    "Bear with me on this one — ",
-    "I want to make sure I get this right — ",
-    "Okay, working through this step by step — ",
-    # Casual / human
-    "Okay — ",
-    "Alright — ",
-    "Right then — ",
-    "So look — ",
-    "Okay, here's my read — ",
-    "So basically — ",
-    "Yeah, so — ",
-    "Alright, so — ",
-    "Let me break this down — ",
-    "Okay, let me lay this out — ",
-    # Cheeky / roast
-    "Oh boy. ",
-    "Oh no. ",
-    "Wow, okay — ",
-    "Who wrote this? ",
-    "Yikes — ",
-    "Well that's creative — ",
-    "Brave choice — ",
-    "Oh, we're doing this are we — ",
-    "Someone was feeling adventurous — ",
-    "This is a cry for help — ",
-    "Bold strategy, let's see if it pays off — ",
-    "I have questions. Many questions — ",
-    "Tell me you didn't test this — ",
-    "I'm not mad, I'm just disappointed — ",
-    "Whoever did this owes me an explanation — ",
-    "This has big 'it works on my machine' energy — ",
-    "Ah yes, the classic 'fix it later' approach — ",
-    "I see someone chose violence today — ",
-    "Pain. Pure pain — ",
-    "This code has a certain chaotic energy — ",
-    # Meme / internet culture
-    "It's giving spaghetti code — ",
-    "First time? ",
-    "Skill issue detected — ",
-    "This ain't it, chief — ",
-    "We need to talk — ",
-    "So anyway, I started blasting — ",
-    "Confused screaming — ",
-    "Task failed successfully — ",
-    "Not gonna lie — ",
-    "Top ten anime betrayals — ",
-    "How do I even begin — ",
-    "Bro really said 'trust me' — ",
-    "You see what happened was — ",
-    "Ladies and gentlemen, we got him — ",
-    "Outstanding move — ",
-    "I'm going to pretend I didn't see that — ",
-    "Modern problems require modern solutions — ",
-    "That's rough, buddy — ",
-    "They don't know — ",
-    "Big brain time — ",
-)
 
 
 def _env_float(key: str, default: float) -> float:
@@ -535,6 +601,12 @@ def _env_float(key: str, default: float) -> float:
         return float(raw)
     except ValueError:
         return default
+
+
+def _file_event_debounce_sec() -> float:
+    """Coalesce rapid writes to the same JSONL before reading (ms-scale)."""
+    v = _env_float("FRIDAY_CURSOR_FILE_DEBOUNCE_SEC", 0.035)
+    return max(0.005, min(v, 1.0))
 
 
 def _wrap_oversized_chunk(chunk: str, lim: int) -> list[str]:
@@ -583,33 +655,132 @@ def _split_thinking_into_chunks(text: str, *, max_chunk_chars: int) -> list[str]
     return [c for c in chunks if c.strip()]
 
 
-def _speak_thinking_paced(full_text: str) -> None:
-    """Speak extended thinking one sentence-sized chunk at a time with pauses (human pacing)."""
-    from friday_speaker import speaker
+def _merge_tiny_chunks(
+    chunks: list[str], *, min_chars: int, max_chars: int
+) -> list[str]:
+    """Merge adjacent split fragments so pacing does not emit dozens of sub‑sentence blips."""
+    if not chunks:
+        return []
+    out: list[str] = []
+    buf = ""
+    for c in chunks:
+        c = c.strip()
+        if not c:
+            continue
+        cand = f"{buf} {c}".strip() if buf else c
+        if not buf:
+            buf = c
+        elif len(cand) <= max_chars and (len(buf) < min_chars or len(c) < min_chars):
+            buf = cand
+        else:
+            out.append(buf)
+            buf = c
+    if buf:
+        out.append(buf)
+    return out
 
-    max_chars = int(_env_float("FRIDAY_CURSOR_THINKING_MAX_CHUNK_CHARS", 300))
-    max_chars = max(80, min(max_chars, 1200))
+
+def _thinking_pause_scale(full_len: int) -> float:
+    """Shorter thinking → tighter gaps between paced chunks (scaled × PAUSE_MIN/MAX)."""
+    n = max(0, int(full_len))
+    if n < 400:
+        return 0.50
+    if n < 900:
+        return 0.70
+    if n < 1600:
+        return 0.88
+    return 1.0
+
+
+def _speak_thinking_paced(
+    full_text: str,
+    *,
+    incremental: bool = False,
+    rate_basis_len: int | None = None,
+) -> None:
+    """Speak extended thinking one sentence-sized chunk at a time with pauses (human pacing).
+
+    ``rate_basis_len`` — when speaking an early sentence of a long still-growing block,
+    pass the **current total** character length of the block so adaptive rate stays slow
+    enough; defaults to ``len(full_text)`` (this batch only).
+    """
+    if _watcher_tts_gated():
+        return
+    from friday_speaker import speaker, thinking_tts_rate_for_length
+
+    max_chars = int(_env_float("FRIDAY_CURSOR_THINKING_MAX_CHUNK_CHARS", 520))
+    max_chars = max(120, min(max_chars, 1600))
     chunks = _split_thinking_into_chunks(full_text, max_chunk_chars=max_chars)
+    min_merge = int(_env_float("FRIDAY_CURSOR_THINKING_MIN_CHUNK_MERGE_CHARS", 90))
+    min_merge = max(40, min(min_merge, max_chars))
+    chunks = _merge_tiny_chunks(chunks, min_chars=min_merge, max_chars=max_chars)
     if not chunks:
         return
 
-    thinking_rate = os.environ.get("FRIDAY_CURSOR_THINKING_TTS_RATE", "-5%").strip() or "-5%"
+    basis = rate_basis_len if rate_basis_len is not None else len(full_text)
+    basis = max(basis, len(full_text))
+
+    fixed = os.environ.get("FRIDAY_CURSOR_THINKING_TTS_RATE", "").strip() or None
+    thinking_rate = thinking_tts_rate_for_length(
+        basis, incremental=incremental, fixed_rate=fixed
+    )
+
+    # Dedicated thinking voice — env override → session file → None (falls back to subagent slot).
+    _thinking_voice_raw = os.environ.get("FRIDAY_TTS_THINKING_VOICE", "").strip()
+    if not _thinking_voice_raw:
+        try:
+            import json as _json_tv
+            _sv_tv = _json_tv.loads((_REPO_ROOT / ".session-voice.json").read_text(encoding="utf-8"))
+            _thinking_voice_raw = _sv_tv.get("thinking_voice", "").strip()
+        except Exception:
+            pass
+    _thinking_voice: str | None = _thinking_voice_raw if _thinking_voice_raw else None
+
+    # Per-block voice pool — merge dedicated thinking voice with FRIDAY_CURSOR_THINKING_VOICE_POOL
+    # so SAGE / FRIDAY_TTS_THINKING_VOICE participates in rotation, not replaced by pool-only ids.
+    global _thinking_pool_idx
+    _watcher_blocked = {v.strip() for v in os.environ.get("FRIDAY_TTS_VOICE_BLOCK", "").split(",") if v.strip()}
+    _watcher_blocked |= {"en-AU-WilliamNeural", "en-AU-WilliamMultilingualNeural", "en-GB-RyanNeural", "en-GB-ThomasNeural"}
+    _tv_pool_raw = os.environ.get("FRIDAY_CURSOR_THINKING_VOICE_POOL", "").strip()
+    _pool_extra = (
+        [v.strip() for v in _tv_pool_raw.split(",") if v.strip() and v.strip() not in _watcher_blocked]
+        if _tv_pool_raw
+        else []
+    )
+    _merged_pool: list[str] = []
+    if _thinking_voice and _thinking_voice not in _watcher_blocked:
+        _merged_pool.append(_thinking_voice)
+    for _pv in _pool_extra:
+        if _pv not in _merged_pool:
+            _merged_pool.append(_pv)
+    _thinking_pool = _merged_pool if len(_merged_pool) > 1 else []
+
+    # Pick ONE voice for this entire block, advance counter for the next block/span.
+    if _thinking_pool:
+        _block_voice: str | None = _thinking_pool[_thinking_pool_idx % len(_thinking_pool)]
+        _thinking_pool_idx += 1
+    else:
+        _block_voice = _thinking_voice
 
     # Tiny single blip: blocking + same rate as paced path (no FRIDAY_TTS_THINKING — avoids singleton skip).
     if len(chunks) == 1 and len(chunks[0]) < 160:
         speaker.speak_blocking(
             chunks[0].strip(),
             session="subagent",
-            priority=True,
+            voice=_block_voice,
+            priority=False,
             bypass_cursor_defer=True,
             rate=thinking_rate,
         )
         return
 
-    pause_lo = _env_float("FRIDAY_CURSOR_THINKING_PAUSE_MIN", 0.35)
-    pause_hi = _env_float("FRIDAY_CURSOR_THINKING_PAUSE_MAX", 0.85)
+    pause_lo = _env_float("FRIDAY_CURSOR_THINKING_PAUSE_MIN", 0.07)
+    pause_hi = _env_float("FRIDAY_CURSOR_THINKING_PAUSE_MAX", 0.16)
     if pause_hi < pause_lo:
         pause_lo, pause_hi = pause_hi, pause_lo
+    pmul = _thinking_pause_scale(basis)
+    pause_lo *= pmul
+    pause_hi *= pmul
     opener_chance = _env_float("FRIDAY_CURSOR_THINKING_OPENER_CHANCE", 0.35)
     if opener_chance > 1.0:
         opener_chance = min(opener_chance / 100.0, 1.0)
@@ -620,11 +791,13 @@ def _speak_thinking_paced(full_text: str) -> None:
             if not c:
                 continue
             if i == 0 and random.random() < opener_chance:
-                c = random.choice(_THINKING_OPENERS) + c
+                c = pick_thinking_opener(c) + c
+            # All chunks in this block use the same voice — voice only changes on a new block/span.
             speaker.speak_blocking(
                 c,
                 session="subagent",
-                priority=True,
+                voice=_block_voice,
+                priority=False,
                 bypass_cursor_defer=True,
                 rate=thinking_rate,
             )
@@ -632,7 +805,7 @@ def _speak_thinking_paced(full_text: str) -> None:
                 break
             gap = random.uniform(pause_lo, pause_hi)
             if c.rstrip().endswith("?"):
-                gap += random.uniform(0.12, 0.38)
+                gap += random.uniform(0.06, 0.18) * pmul
             time.sleep(gap)
 
     threading.Thread(target=run, daemon=True, name="cursor-thinking-tts").start()
@@ -693,21 +866,94 @@ def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
+def _is_voice_agent_chat_prose(s: str) -> bool:
+    """True if this thinking-derived prose should use chat/reply TTS, not thinking pacing."""
+    t = s.strip()
+    if len(t) < 8:
+        return False
+    tl = t.lower()
+    if tl.startswith("done."):
+        return len(t) <= 3500
+    if len(t) > 650:
+        return False
+    return bool(_RE_VOICE_AGENT_CHAT.search(t))
+
+
+class ThinkingFlushCtx:
+    """Arm thinking debounce timers that enqueue flush work (serialized worker, no lock in Timer)."""
+
+    __slots__ = ("work_q", "speak_main", "speak_sub")
+
+    def __init__(
+        self,
+        work_q: "queue.Queue",
+        speak_main: bool,
+        speak_sub: bool,
+    ) -> None:
+        self.work_q = work_q
+        self.speak_main = speak_main
+        self.speak_sub = speak_sub
+
+
+_RESCAN_WORK = "__rescan__"
+_FLUSH_THINK_WORK = "__flush_think__"
+
+
 def _thinking_debounce_sec() -> float:
-    v = _env_float("FRIDAY_CURSOR_THINKING_DEBOUNCE_SEC", 0.85)
+    v = _env_float("FRIDAY_CURSOR_THINKING_DEBOUNCE_SEC", 0.65)
     return max(0.15, min(v, 30.0))
 
 
-def _thinking_speak_once(thinking_prose: str, spoken_hashes: set) -> None:
+def _thinking_min_batch_chars() -> int:
+    """Incremental stream: wait until at least this many characters of prose before TTS."""
+    v = _env_float("FRIDAY_CURSOR_THINKING_MIN_BATCH_CHARS", 220)
+    return max(60, min(int(v), 4000))
+
+
+def _thinking_speak_once(
+    thinking_prose: str,
+    spoken_hashes: set,
+    *,
+    incremental: bool = False,
+    rate_basis_len: int | None = None,
+    is_main: bool = True,
+    speak_main: bool = True,
+    speak_sub: bool = True,
+) -> None:
     h = _content_hash(thinking_prose)
     if h in spoken_hashes:
         return
+    if _is_voice_agent_chat_prose(thinking_prose):
+        spoken_hashes.add(h)
+        whom = "main" if is_main else "subagent"
+        print(
+            f"cursor-reply-watch: [thinking→chat] {len(thinking_prose)} chars via {whom} reply voice "
+            f"(incremental={incremental})",
+            flush=True,
+        )
+        if is_main and speak_main:
+            _speak_main(thinking_prose)
+        elif (not is_main) and speak_sub:
+            _speak_subagent(thinking_prose)
+        else:
+            # Reply channel off under narration — fall back to thinking voice so it is still heard.
+            _speak_thinking_paced(
+                thinking_prose,
+                incremental=incremental,
+                rate_basis_len=rate_basis_len,
+            )
+        return
     spoken_hashes.add(h)
     print(
-        f"cursor-reply-watch: [thinking] speaking {len(thinking_prose)} chars (paced)",
+        f"cursor-reply-watch: [thinking] speaking {len(thinking_prose)} chars batched pacing "
+        f"(incremental={incremental})",
         flush=True,
     )
-    _speak_thinking_paced(thinking_prose)
+    _speak_thinking_paced(
+        thinking_prose,
+        incremental=incremental,
+        rate_basis_len=rate_basis_len,
+    )
 
 
 def _thinking_buffer_update(
@@ -716,6 +962,11 @@ def _thinking_buffer_update(
     *,
     now: float,
     spoken_hashes: set,
+    is_main: bool,
+    speak_main: bool,
+    speak_sub: bool,
+    path_str: str | None = None,
+    thinking_ctx: ThinkingFlushCtx | None = None,
 ) -> None:
     """Incremental streaming: speak NEW sentences as they arrive, not all at once.
 
@@ -728,9 +979,19 @@ def _thinking_buffer_update(
     spoken_len = st.get("thinking_spoken_len", 0)
 
     if prev and not thinking_prose.startswith(prev):
+        batch_prev = (st.pop("thinking_batch_buf", None) or "").strip()
         tail = prev[spoken_len:].strip()
-        if tail:
-            _thinking_speak_once(tail, spoken_hashes)
+        merged_prev = " ".join(x for x in (batch_prev, tail) if x).strip()
+        if merged_prev:
+            _thinking_speak_once(
+                merged_prev,
+                spoken_hashes,
+                incremental=True,
+                rate_basis_len=len(prev),
+                is_main=is_main,
+                speak_main=speak_main,
+                speak_sub=speak_sub,
+            )
         st["thinking_spoken_len"] = 0
         spoken_len = 0
 
@@ -739,32 +1000,79 @@ def _thinking_buffer_update(
     unseen = thinking_prose[spoken_len:].strip()
     if not unseen:
         st["thinking_debounce_at"] = now + _thinking_debounce_sec()
+        if path_str and thinking_ctx is not None:
+            _schedule_thinking_flush(path_str, st, thinking_ctx)
         return
 
     parts = re.split(r"(?<=[.!?…])\s+", unseen)
     if len(parts) <= 1:
         st["thinking_debounce_at"] = now + _thinking_debounce_sec()
+        if path_str and thinking_ctx is not None:
+            _schedule_thinking_flush(path_str, st, thinking_ctx)
         return
 
     ready = parts[:-1]
     ready_text = " ".join(ready).strip()
     if ready_text:
-        _thinking_speak_once(ready_text, spoken_hashes)
-        st["thinking_spoken_len"] = spoken_len + len(unseen) - len(parts[-1])
+        min_b = _thinking_min_batch_chars()
+        batch = (st.get("thinking_batch_buf") or "").strip()
+        batch = f"{batch} {ready_text}".strip() if batch else ready_text
+        new_spoken = spoken_len + len(unseen) - len(parts[-1])
+        st["thinking_spoken_len"] = new_spoken
+        if len(batch) >= min_b:
+            _thinking_speak_once(
+                batch,
+                spoken_hashes,
+                incremental=True,
+                rate_basis_len=len(thinking_prose),
+                is_main=is_main,
+                speak_main=speak_main,
+                speak_sub=speak_sub,
+            )
+            st["thinking_batch_buf"] = ""
+        else:
+            st["thinking_batch_buf"] = batch
 
     st["thinking_debounce_at"] = now + _thinking_debounce_sec()
+    if path_str and thinking_ctx is not None:
+        _schedule_thinking_flush(path_str, st, thinking_ctx)
+
+
+def _cancel_thinking_timer(st: dict) -> None:
+    t = st.pop("_thinking_timer", None)
+    if isinstance(t, threading.Timer):
+        t.cancel()
 
 
 def _thinking_clear_pending(st: dict) -> None:
+    _cancel_thinking_timer(st)
     st.pop("thinking_pending", None)
     st.pop("thinking_debounce_at", None)
     st.pop("thinking_spoken_len", None)
+    st.pop("thinking_batch_buf", None)
 
 
-def _flush_thinking_debounce(st: dict, now: float) -> None:
+def _flush_thinking_debounce(
+    st: dict,
+    now: float,
+    *,
+    speak_main: bool,
+    speak_sub: bool,
+) -> None:
     """If pending thinking has been idle long enough, speak remaining tail."""
+    is_main = bool(st.get("is_main", True))
     pend = (st.get("thinking_pending") or "").strip()
     if not pend:
+        batch = (st.pop("thinking_batch_buf", None) or "").strip()
+        if batch:
+            _thinking_speak_once(
+                batch,
+                st["spoken_hashes"],
+                rate_basis_len=len(batch),
+                is_main=is_main,
+                speak_main=speak_main,
+                speak_sub=speak_sub,
+            )
         _thinking_clear_pending(st)
         return
     dead = st.get("thinking_debounce_at")
@@ -772,10 +1080,320 @@ def _flush_thinking_debounce(st: dict, now: float) -> None:
         return
     spoken_hashes = st["spoken_hashes"]
     spoken_len = st.get("thinking_spoken_len", 0)
+    batch = (st.pop("thinking_batch_buf", None) or "").strip()
     tail = pend[spoken_len:].strip()
-    if tail:
-        _thinking_speak_once(tail, spoken_hashes)
+    merged = " ".join(x for x in (batch, tail) if x).strip()
+    if merged:
+        _thinking_speak_once(
+            merged,
+            spoken_hashes,
+            rate_basis_len=len(pend),
+            is_main=is_main,
+            speak_main=speak_main,
+            speak_sub=speak_sub,
+        )
     _thinking_clear_pending(st)
+
+
+def _schedule_thinking_flush(path_str: str, st: dict, ctx: ThinkingFlushCtx) -> None:
+    """Cancel any prior debounce timer and arm a new one for this state's thinking_debounce_at."""
+    _cancel_thinking_timer(st)
+    dead = st.get("thinking_debounce_at")
+    if dead is None:
+        return
+    delay = max(0.001, dead - time.monotonic())
+
+    def fire() -> None:
+        ctx.work_q.put((_FLUSH_THINK_WORK, path_str))
+
+    timer = threading.Timer(delay, fire)
+    timer.daemon = True
+    st["_thinking_timer"] = timer
+    timer.start()
+
+
+def _rescan_transcript_paths(state_map: dict[str, dict]) -> None:
+    known = {str(p.resolve()) for p in _list_transcript_files()}
+    for p in known:
+        if p not in state_map:
+            try:
+                off = Path(p).stat().st_size
+            except OSError:
+                off = 0
+            state_map[p] = {
+                "offset": off,
+                "carry": "",
+                "spoken_hashes": set(),
+                "last_activity": 0.0,
+            }
+    for old in list(state_map.keys()):
+        if old not in known:
+            st = state_map.pop(old, None)
+            if st is not None:
+                _cancel_thinking_timer(st)
+
+
+def _jsonl_under_root(path: Path) -> bool:
+    try:
+        path.resolve().relative_to(_TRANSCRIPTS_ROOT)
+    except ValueError:
+        return False
+    return path.suffix.lower() == ".jsonl"
+
+
+def _process_jsonl_path(
+    path_str: str,
+    state_map: dict[str, dict],
+    *,
+    now: float,
+    main_uuid: str,
+    speak_main: bool,
+    speak_sub: bool,
+    speak_thinking: bool,
+    thinking_ctx: ThinkingFlushCtx | None,
+) -> None:
+    st = state_map.get(path_str)
+    if st is None:
+        return
+    perf_anchor = st.pop("_jsonl_perf_t0", None)
+    p = Path(path_str)
+    try:
+        sz = p.stat().st_size
+    except OSError:
+        return
+    off = st["offset"]
+    if sz < off:
+        off = 0
+        st["carry"] = ""
+    st["offset"] = off
+    if sz == off:
+        return
+    st["last_activity"] = now
+    try:
+        with p.open("r", encoding="utf-8", errors="replace") as f:
+            f.seek(off)
+            chunk = f.read()
+        st["offset"] = sz
+    except OSError:
+        return
+
+    data = st["carry"] + chunk
+    lines = data.split("\n")
+    st["carry"] = lines.pop() if lines else ""
+    folder_uuid = p.parent.name
+    spoken_hashes: set = st["spoken_hashes"]
+
+    for line in lines:
+        if not line.strip():
+            continue
+
+        if not main_uuid:
+            continue
+
+        is_main = bool(folder_uuid == main_uuid)
+        is_sub = not is_main
+        st["is_main"] = is_main
+
+        if speak_thinking:
+            thinking_raw, stream_kind = _thinking_parse_line(line)
+            if thinking_raw:
+                thinking_prose = strip_to_prose(thinking_raw)
+                if thinking_prose:
+                    if stream_kind == "final":
+                        spoken_len = st.get("thinking_spoken_len", 0)
+                        tail = thinking_prose[spoken_len:].strip()
+                        batch = (st.pop("thinking_batch_buf", None) or "").strip()
+                        merged = " ".join(x for x in (batch, tail) if x).strip()
+                        _thinking_clear_pending(st)
+                        if merged:
+                            _thinking_speak_once(
+                                merged,
+                                spoken_hashes,
+                                rate_basis_len=len(thinking_prose),
+                                is_main=is_main,
+                                speak_main=speak_main,
+                                speak_sub=speak_sub,
+                            )
+                    else:
+                        _thinking_buffer_update(
+                            st,
+                            thinking_prose,
+                            now=now,
+                            spoken_hashes=spoken_hashes,
+                            is_main=is_main,
+                            speak_main=speak_main,
+                            speak_sub=speak_sub,
+                            path_str=path_str,
+                            thinking_ctx=thinking_ctx,
+                        )
+
+        raw_text = _assistant_text_from_line(line)
+        if not raw_text:
+            continue
+        prose = strip_to_prose(raw_text)
+        if not prose:
+            continue
+
+        h = _content_hash(prose)
+        if h in spoken_hashes:
+            continue
+        spoken_hashes.add(h)
+
+        if len(spoken_hashes) > _SPOKEN_HASHES_MAX:
+            to_remove = list(spoken_hashes)[:_SPOKEN_HASHES_MAX // 2]
+            for old_h in to_remove:
+                spoken_hashes.discard(old_h)
+
+        if is_main and speak_main:
+            if perf_anchor is not None and _cursor_perf_log_enabled():
+                print(
+                    f"[JSONL:t3_parsed] +{(time.perf_counter() - perf_anchor) * 1000.0:.1f}ms",
+                    flush=True,
+                )
+            _speak_main(prose, jsonl_perf_t0=perf_anchor)
+        elif is_sub and speak_sub:
+            if perf_anchor is not None and _cursor_perf_log_enabled():
+                print(
+                    f"[JSONL:t3_parsed] +{(time.perf_counter() - perf_anchor) * 1000.0:.1f}ms",
+                    flush=True,
+                )
+            _speak_subagent(prose, jsonl_perf_t0=perf_anchor)
+
+
+class _TranscriptEventHandler(FileSystemEventHandler):
+    """Debounced filesystem notifications → enqueue path work for the single consumer worker."""
+
+    def __init__(self, work_q: "queue.Queue") -> None:
+        super().__init__()
+        self._work_q = work_q
+        self._debounce_lock = threading.Lock()
+        self._path_timers: dict[str, threading.Timer] = {}
+
+    def close(self) -> None:
+        with self._debounce_lock:
+            for t in self._path_timers.values():
+                t.cancel()
+            self._path_timers.clear()
+
+    def on_created(self, event) -> None:  # noqa: ANN001
+        if event.is_directory:
+            self._work_q.put(_RESCAN_WORK)
+            return
+        self._queue_path(event.src_path)
+
+    def on_modified(self, event) -> None:  # noqa: ANN001
+        if event.is_directory:
+            return
+        self._queue_path(event.src_path)
+
+    def _queue_path(self, src_path: str) -> None:
+        path = Path(src_path)
+        if not _jsonl_under_root(path):
+            return
+        try:
+            key = str(path.resolve())
+        except OSError:
+            return
+        debounce = _file_event_debounce_sec()
+        _jsonl_mark_fs_event(key)
+        with self._debounce_lock:
+            old = self._path_timers.pop(key, None)
+            if old is not None:
+                old.cancel()
+
+            def run() -> None:
+                with self._debounce_lock:
+                    self._path_timers.pop(key, None)
+                t0 = _JSONL_FS_T0.pop(key, None)
+                t1 = time.perf_counter()
+                if t0 is not None and _cursor_perf_log_enabled():
+                    print(f"[JSONL:t1_debounce] +{(t1 - t0) * 1000.0:.1f}ms", flush=True)
+                if t0 is not None:
+                    _JSONL_WORK_META[key] = (t0, t1)
+                self._work_q.put(key)
+
+            t = threading.Timer(debounce, run)
+            t.daemon = True
+            self._path_timers[key] = t
+            t.start()
+
+
+def _periodic_rescan_enqueue(work_q: "queue.Queue", stop: threading.Event) -> None:
+    while not stop.wait(timeout=RESCAN_SEC):
+        work_q.put(_RESCAN_WORK)
+
+
+def _transcript_worker_loop(
+    work_q: "queue.Queue",
+    state_map: dict[str, dict],
+    *,
+    speak_main: bool,
+    speak_sub: bool,
+    speak_thinking: bool,
+    warned_no_chat: list[bool],
+) -> None:
+    """Single consumer: all JSONL reads / TTS / rescan / thinking flushes run here (no lock needed)."""
+    while True:
+        item = work_q.get()
+        try:
+            if item is None:
+                return
+            if item == _RESCAN_WORK:
+                _rescan_transcript_paths(state_map)
+                continue
+            if isinstance(item, tuple) and len(item) == 2 and item[0] == _FLUSH_THINK_WORK:
+                path_str = item[1]
+                st = state_map.get(path_str)
+                if st is not None:
+                    st.pop("_thinking_timer", None)
+                    _flush_thinking_debounce(
+                        st,
+                        time.monotonic(),
+                        speak_main=speak_main,
+                        speak_sub=speak_sub,
+                    )
+                continue
+            if isinstance(item, str):
+                key = item
+                meta = _JSONL_WORK_META.pop(key, None)
+                t2 = time.perf_counter()
+                if meta and _cursor_perf_log_enabled():
+                    t0, _t1_enq = meta
+                    print(f"[JSONL:t2_dequeue] +{(t2 - t0) * 1000.0:.1f}ms", flush=True)
+                if key not in state_map:
+                    _rescan_transcript_paths(state_map)
+                    if key not in state_map:
+                        continue
+                st_hit = state_map.get(key)
+                if st_hit is not None and meta is not None:
+                    st_hit["_jsonl_perf_t0"] = meta[0]
+                session = _load_session()
+                main_uuid = (session.get("chat_id") or "").strip()
+                if not main_uuid and not warned_no_chat[0]:
+                    warned_no_chat[0] = True
+                    print(
+                        "cursor-reply-watch: .session-voice.json has no chat_id yet — open main Composer chat once "
+                        "so pick-session-voice can run, or paste chat_id from agent-transcripts.",
+                        flush=True,
+                    )
+                thinking_ctx = (
+                    ThinkingFlushCtx(work_q, speak_main, speak_sub)
+                    if speak_thinking
+                    else None
+                )
+                now = time.monotonic()
+                _process_jsonl_path(
+                    key,
+                    state_map,
+                    now=now,
+                    main_uuid=main_uuid,
+                    speak_main=speak_main,
+                    speak_sub=speak_sub,
+                    speak_thinking=speak_thinking,
+                    thinking_ctx=thinking_ctx,
+                )
+        finally:
+            work_q.task_done()
 
 
 def _merge_new_paths(state_map: dict[str, dict], *, seek_end: bool) -> None:
@@ -835,143 +1453,66 @@ def main() -> None:
     _maybe_seed_chat_id_if_single_transcript()
 
     state_map: dict[str, dict] = {}
-    last_rescan = 0.0
-    warned_no_chat = False
+    warned_no_chat: list[bool] = [False]
 
     _merge_new_paths(state_map, seek_end=True)
 
     print(
-        f"cursor-reply-watch: root={_TRANSCRIPTS_ROOT} main={speak_main} subagent={speak_sub} thinking={speak_thinking}",
+        f"cursor-reply-watch: root={_TRANSCRIPTS_ROOT} main={speak_main} subagent={speak_sub} "
+        f"thinking={speak_thinking} mode=watchdog rescan_sec={RESCAN_SEC}",
         flush=True,
     )
 
-    while True:
-        now = time.monotonic()
-        if now - last_rescan >= RESCAN_SEC:
-            last_rescan = now
-            known = {str(p.resolve()) for p in _list_transcript_files()}
-            for p in known:
-                if p not in state_map:
-                    try:
-                        off = Path(p).stat().st_size
-                    except OSError:
-                        off = 0
-                    state_map[p] = {
-                        "offset": off,
-                        "carry": "",
-                        "spoken_hashes": set(),
-                        "last_activity": 0.0,
-                    }
-            for old in list(state_map.keys()):
-                if old not in known:
-                    del state_map[old]
+    if not _TRANSCRIPTS_ROOT.is_dir():
+        print(
+            f"cursor-reply-watch: transcript root missing — {_TRANSCRIPTS_ROOT}",
+            flush=True,
+        )
 
-        session = _load_session()
-        main_uuid = (session.get("chat_id") or "").strip()
-        if not main_uuid and not warned_no_chat:
-            warned_no_chat = True
-            print(
-                "cursor-reply-watch: .session-voice.json has no chat_id yet — open main Composer chat once "
-                "so pick-session-voice can run, or paste chat_id from agent-transcripts.",
-                flush=True,
-            )
+    work_q: queue.Queue = queue.Queue()
+    stop_side = threading.Event()
 
-        any_recently_active = False
-        for path_str, st in list(state_map.items()):
-            p = Path(path_str)
-            try:
-                sz = p.stat().st_size
-            except OSError:
-                continue
-            off = st["offset"]
-            if sz < off:
-                off = 0
-                st["carry"] = ""
-            if sz != off:
-                st["last_activity"] = now
-                any_recently_active = True
-                try:
-                    with p.open("r", encoding="utf-8", errors="replace") as f:
-                        f.seek(off)
-                        chunk = f.read()
-                    st["offset"] = sz
-                except OSError:
-                    continue
+    worker_thread = threading.Thread(
+        target=_transcript_worker_loop,
+        args=(work_q, state_map),
+        kwargs={
+            "speak_main": speak_main,
+            "speak_sub": speak_sub,
+            "speak_thinking": speak_thinking,
+            "warned_no_chat": warned_no_chat,
+        },
+        name="cursor-reply-worker",
+        daemon=True,
+    )
+    worker_thread.start()
 
-                data = st["carry"] + chunk
-                lines = data.split("\n")
-                st["carry"] = lines.pop() if lines else ""
-                folder_uuid = p.parent.name
-                spoken_hashes: set = st["spoken_hashes"]
+    handler = _TranscriptEventHandler(work_q)
+    observer = Observer()
+    observer.schedule(handler, str(_TRANSCRIPTS_ROOT), recursive=True)
+    observer.start()
 
-                for line in lines:
-                    if not line.strip():
-                        continue
+    rescan_thread = threading.Thread(
+        target=_periodic_rescan_enqueue,
+        args=(work_q, stop_side),
+        name="cursor-reply-rescan",
+        daemon=True,
+    )
+    rescan_thread.start()
 
-                    if not main_uuid:
-                        continue
-
-                    is_main = bool(folder_uuid == main_uuid)
-                    is_sub = not is_main
-
-                    # --- thinking capture (runs even when reply TTS is off) ---
-                    if speak_thinking:
-                        thinking_raw, stream_kind = _thinking_parse_line(line)
-                        if thinking_raw:
-                            thinking_prose = strip_to_prose(thinking_raw)
-                            if thinking_prose:
-                                if stream_kind == "final":
-                                    spoken_len = st.get("thinking_spoken_len", 0)
-                                    tail = thinking_prose[spoken_len:].strip()
-                                    _thinking_clear_pending(st)
-                                    if tail:
-                                        _thinking_speak_once(
-                                            tail, spoken_hashes
-                                        )
-                                else:
-                                    _thinking_buffer_update(
-                                        st,
-                                        thinking_prose,
-                                        now=now,
-                                        spoken_hashes=spoken_hashes,
-                                    )
-
-                    # --- regular reply TTS ---
-                    raw_text = _assistant_text_from_line(line)
-                    if not raw_text:
-                        continue
-                    prose = strip_to_prose(raw_text)
-                    if not prose:
-                        continue
-
-                    h = _content_hash(prose)
-                    if h in spoken_hashes:
-                        continue
-                    spoken_hashes.add(h)
-
-                    if len(spoken_hashes) > _SPOKEN_HASHES_MAX:
-                        to_remove = list(spoken_hashes)[:_SPOKEN_HASHES_MAX // 2]
-                        for old_h in to_remove:
-                            spoken_hashes.discard(old_h)
-
-                    if is_main and speak_main:
-                        _speak_main(prose)
-                    elif is_sub and speak_sub:
-                        _speak_subagent(prose)
-
-        if speak_thinking:
-            now_flush = time.monotonic()
-            for st in state_map.values():
-                _flush_thinking_debounce(st, now_flush)
-
-        # Adaptive polling: faster when transcripts are actively being written
-        if any_recently_active or any(
-            now - st.get("last_activity", 0) < _ACTIVE_WINDOW_SEC
-            for st in state_map.values()
-        ):
-            time.sleep(POLL_ACTIVE_SEC)
-        else:
-            time.sleep(POLL_SEC)
+    try:
+        while True:
+            time.sleep(86400.0)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop_side.set()
+        handler.close()
+        observer.stop()
+        observer.join(timeout=5.0)
+        for st in state_map.values():
+            _cancel_thinking_timer(st)
+        work_q.put(None)
+        worker_thread.join(timeout=10.0)
 
 
 if __name__ == "__main__":

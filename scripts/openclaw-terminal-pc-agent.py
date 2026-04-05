@@ -108,7 +108,7 @@ def _run_one(
         r = requests.post(url, headers=headers, json=body, timeout=600)
     except requests.exceptions.ConnectionError:
         print(
-            f"Cannot reach pc-agent at {base}. Is it running (npm run restart:local)?",
+            f"Cannot reach pc-agent at {base}. Is it running? Try npm run restart:local (safe) or npm run restart:force if ports are stuck.",
             file=sys.stderr,
         )
         return 1

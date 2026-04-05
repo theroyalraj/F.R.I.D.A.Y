@@ -8,7 +8,7 @@ Usage:
   python friday-speak.py --stdout "Text"                    # pipe MP3 bytes to stdout
 
 Env vars (all optional):
-  FRIDAY_TTS_VOICE   edge-tts voice name  (default: en-US-EmmaMultilingualNeural)
+  FRIDAY_TTS_VOICE   edge-tts voice name  (default: en-US-AvaMultilingualNeural)
   FRIDAY_TTS_DEVICE  audio device substring (default: "" = Windows default device)
                      set to "Echo Dot", "WH-1000XM3", etc. to lock a specific output
   FRIDAY_TTS_RATE    speed               (default: +7.5% ≈ 1.075× vs baseline)
@@ -17,15 +17,22 @@ Env vars (all optional):
   FRIDAY_TTS_CACHE   MP3 cache dir       (default: %TEMP%/friday-tts-cache)
                      set to "" to disable cache
   FRIDAY_TTS_SESSION  when set to "subagent", session voice is read from
-                     subagent_voice in .session-voice.json (Task subagents)
+                     subagent_voice in .session-voice.json (Task subagents).
+                     When set to an OpenClaw persona key (e.g. riya, nova), voice and rate
+                     come from scripts/openclaw_company.py (+ OPENCLAW_<NAME>_VOICE / _RATE).
   FRIDAY_TTS_VOICE_BLOCK  comma-separated Edge voice ids never spoken — overrides
                      sticky session / env if they point at a blocked voice
   FRIDAY_TTS_USE_SESSION_STICKY_VOICE  set false so FRIDAY_TTS_VOICE from this
                      process env wins over .session-voice.json (e.g. ambient alt voice)
-  FRIDAY_TTS_PRIORITY  when true (1/true/on): voice-daemon / urgent playback —
-                     stops competing friday-player + ambient TTS, clears the TTS
-                     lock, then speaks immediately; if ambient was mid-line, replays
-                     it afterward with a short apology (friday-listen sets this).
+  FRIDAY_TTS_PRIORITY  Hard preempt: 1/true/on/high/hard — stops competing
+                     friday-player + ambient TTS, clears the TTS lock, then speaks;
+                     if ambient was mid-line, optional replay afterward.
+                     Cooperative (same tier, no pre-empting each other): 2/cooperative/
+                     soft/queue — still bypasses Cursor defer when combined with
+                     FRIDAY_TTS_BYPASS_CURSOR_DEFER, but waits in line for other TTS
+                     instead of killing it (ECHO silence nudges + task summary digest).
+  FRIDAY_TTS_LOCK_TTL_SEC  Redis + friday-tts-active lock TTL seconds (default 600;
+                     clamped 60–3600). Must match waiter stale thresholds in scripts/tts_lock_env.py.
   FRIDAY_TTS_INTERRUPT_MUSIC  set to ui (or true/yes/on) to allow fading/stopping
                      friday-play background music. Default: other TTS does not cut music
                      (Redis friday:music:active + local PID/session guard).
@@ -34,14 +41,29 @@ Env vars (all optional):
                      mode in the IDE is not doubled with Jarvis TTS.
   FRIDAY_TTS_BYPASS_CURSOR_DEFER  When true, play anyway (startup greetings, Cursor
                      agent narration, etc.). Set by fridaySpeak.js for gateway boot.
+  FRIDAY_SPEAK_STYLE_FROM_REDIS  When true (default), merge rate/pitch deltas from Redis
+                     key friday:speak_style (mood toggles from the Listen UI). Sync with
+                     pc-agent speakStyle.js speakStyleDeliveryDeltas.
+  FRIDAY_TTS_THINKING_RATE  optional fixed Edge rate when FRIDAY_TTS_THINKING is on;
+                     when unset, rate scales with utterance length (faster short, slower long).
+  FRIDAY_CURSOR_THINKING_OPENER_CONTEXT  auto | neutral — thinking lead-in lines (see thinking_openers.py).
   FRIDAY_TTS_MAX_PLAYBACK_SEC  Hard cap on ffplay seconds per utterance for every session
                      when set (0 or false = no limit). When unset: no cap for normal TTS;
                      for FRIDAY_TTS_SESSION=cursor-reply or subagent (long transcript reads),
                      caps at FRIDAY_TTS_QUERY_MAX_PLAYBACK_SEC (default 60). On cap: kill
                      player only — no spoken line (avoid mixer volume tricks that garble later plays).
+  FRIDAY_TTS_CHUNK_MIN_CHARS  When total text is at least this many chars and splits into 2+
+                     sentences, speak sentence-by-sentence (same voice) so first audio starts
+                     sooner instead of one full MP3 download. Default 300; set 0 to disable.
+  FRIDAY_TTS_CHUNK_MAX_CHARS  Max merged sentence length per chunk (default 380; clamped).
+  FRIDAY_TTS_EMIT_EVENT  When true (default), POST tts_speak / tts_done to pc-agent for the
+                     Friday web UI. Set false when the parent already broadcasts (e.g. speak-async).
+  FRIDAY_PC_AGENT_URL  Base URL for /voice/event (default http://127.0.0.1:3847). Uses PC_AGENT_SECRET
+                     Bearer auth when set.
+  FRIDAY_TTS_AUDIT  When true (default), LPUSH JSON lines to Redis friday:tts:audit and emit tts_audit SSE.
 
 Good voices (respect FRIDAY_TTS_VOICE_BLOCK in .env — blocked ids are never used):
-  en-US-EmmaMultilingualNeural  US female multilingual — repo default when env unset
+  en-US-AvaMultilingualNeural  US female multilingual — repo default when env unset
   en-US-GuyNeural               US male neural
   en-IN-NeerjaExpressiveNeural  Indian English / Hinglish
   hi-IN-SwaraNeural             Hindi female
@@ -58,6 +80,7 @@ import atexit
 import asyncio
 import hashlib
 import io
+import json
 import os
 import random
 import unicodedata
@@ -71,6 +94,11 @@ import time
 import platform
 import warnings
 from pathlib import Path
+
+_REPO_SCRIPTS = Path(__file__).resolve().parent.parent.parent / "scripts"
+if str(_REPO_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_REPO_SCRIPTS))
+from friday_speaker import thinking_tts_rate_for_length
 
 # Python 3.14 Windows: ProactorEventLoop breaks aiohttp SSL/WebSocket (WinError 64
 # on speech.platform.bing.com). SelectorEventLoop restores stable edge-tts.
@@ -94,9 +122,9 @@ def _ipv4_tcp_init(self, *args, **kwargs):
     _orig_tcp_init(self, *args, **kwargs)
 aiohttp.TCPConnector.__init__ = _ipv4_tcp_init
 
-from friday_win_audio import find_output_device_id as _find_device_id
-from friday_win_audio import get_default_output_id as _get_default_output_id
-from friday_win_audio import set_default_endpoint as _set_default_endpoint
+from friday_platform_audio import find_output_device_id as _find_device_id
+from friday_platform_audio import get_default_output_id as _get_default_output_id
+from friday_platform_audio import set_default_endpoint as _set_default_endpoint
 from friday_music_lock import friday_play_music_hold_active, may_interrupt_music_from_tts
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -112,55 +140,17 @@ if _ENV_FILE.exists():
         if k and k not in os.environ:
             os.environ[k] = v
 
-# ── Thinking openers (prepended to FRIDAY_TTS_THINKING speaks) ────────────────
-_THINKING_OPENERS = (
-    "Hmm. ", "Interesting — ", "Actually — ", "Wait — ", "Hang on — ",
-    "Hold on a second — ", "That's a good question — ",
-    "Now that I look at this — ", "Okay, this is nuanced — ",
-    "There's a subtlety here — ", "This is worth unpacking — ",
-    "So here's what's happening — ", "Let me reason through this — ",
-    "Okay, thinking this through — ", "The thing to notice here is — ",
-    "This is more involved than it looks — ", "Let me connect the dots here — ",
-    "Right. ", "So — ", "Now — ", "Right, so — ", "Okay, so — ",
-    "Here's the thing — ", "The key insight is — ", "What matters here is — ",
-    "From what I can tell — ", "Based on what I'm seeing — ",
-    "If I'm reading this correctly — ", "The way this works is — ",
-    "So the pattern here is — ", "What's going on under the hood is — ",
-    "Let me think — ", "Let me see — ", "Let me check — ",
-    "Let me dig into this — ", "Let me trace through this — ",
-    "Okay, pulling this apart — ", "Let me walk through the logic — ",
-    "Bear with me on this one — ",
-    "I want to make sure I get this right — ",
-    "Okay, working through this step by step — ",
-    "Okay — ", "Alright — ", "Right then — ", "So look — ",
-    "Okay, here's my read — ", "So basically — ", "Yeah, so — ",
-    "Alright, so — ", "Let me break this down — ",
-    "Okay, let me lay this out — ",
-    "Oh boy. ", "Oh no. ", "Wow, okay — ", "Who wrote this? ",
-    "Yikes — ", "Well that's creative — ", "Brave choice — ",
-    "Oh, we're doing this are we — ",
-    "Someone was feeling adventurous — ", "This is a cry for help — ",
-    "Bold strategy, let's see if it pays off — ",
-    "I have questions. Many questions — ",
-    "Tell me you didn't test this — ",
-    "I'm not mad, I'm just disappointed — ",
-    "Whoever did this owes me an explanation — ",
-    "This has big 'it works on my machine' energy — ",
-    "Ah yes, the classic 'fix it later' approach — ",
-    "I see someone chose violence today — ",
-    "Pain. Pure pain — ", "This code has a certain chaotic energy — ",
-    "It's giving spaghetti code — ", "First time? ",
-    "Skill issue detected — ", "This ain't it, chief — ",
-    "We need to talk — ", "So anyway, I started blasting — ",
-    "Confused screaming — ", "Task failed successfully — ",
-    "Not gonna lie — ", "Top ten anime betrayals — ",
-    "How do I even begin — ", "Bro really said 'trust me' — ",
-    "You see what happened was — ",
-    "Ladies and gentlemen, we got him — ", "Outstanding move — ",
-    "I'm going to pretend I didn't see that — ",
-    "Modern problems require modern solutions — ",
-    "That's rough, buddy — ", "They don't know — ", "Big brain time — ",
-)
+_scripts_dir = _REPO_ROOT / "scripts"
+if str(_scripts_dir) not in sys.path:
+    sys.path.insert(0, str(_scripts_dir))
+from tts_lock_env import tts_lock_ttl_sec as _tts_lock_ttl_sec  # noqa: E402
+
+# ── Thinking openers (contextual pools in thinking_openers.py) ─────────────────
+try:
+    from thinking_openers import pick_thinking_opener as _pick_thinking_opener
+except ImportError:
+    def _pick_thinking_opener(_text: str) -> str:
+        return random.choice(("Hmm. ", "Okay — ", "So — ", "Right. "))
 
 # ── Arg parsing ───────────────────────────────────────────────────────────────
 _args  = sys.argv[1:]
@@ -179,7 +169,7 @@ TEXT   = " ".join(_args).strip()
 # Normalise immediately — every downstream path (cache key, edge-tts, SAPI) gets clean text.
 # The function is defined later in this file; we call it after full module load below.
 _RAW_TEXT = TEXT
-VOICE  = os.environ.get("FRIDAY_TTS_VOICE",  "en-US-EmmaMultilingualNeural")
+VOICE  = os.environ.get("FRIDAY_TTS_VOICE",  "en-US-AvaMultilingualNeural")
 
 # Session-sticky voice: .session-voice.json overrides the env default above
 # unless FRIDAY_TTS_USE_SESSION_STICKY_VOICE is false (ambient alternate voice).
@@ -236,15 +226,37 @@ _blocked_tts |= {
     "en-GB-ThomasNeural",
 }
 if VOICE in _blocked_tts:
-    _pref = os.environ.get("FRIDAY_TTS_VOICE", "en-US-EmmaMultilingualNeural").strip() or "en-US-EmmaMultilingualNeural"
+    _pref = os.environ.get("FRIDAY_TTS_VOICE", "en-US-AvaMultilingualNeural").strip() or "en-US-AvaMultilingualNeural"
     if _pref not in _blocked_tts:
         VOICE = _pref
     else:
-        VOICE = "en-US-EmmaMultilingualNeural"
+        VOICE = "en-US-AvaMultilingualNeural"
 
 RATE   = os.environ.get("FRIDAY_TTS_RATE",   "+7.5%")
 PITCH  = os.environ.get("FRIDAY_TTS_PITCH",  "+2Hz")
 VOLUME = os.environ.get("FRIDAY_TTS_VOLUME", "+0%")
+
+# Org-chart persona: FRIDAY_TTS_SESSION=riya|jarvis|… applies registry voice + rate (after env defaults).
+try:
+    from openclaw_company import PERSONAS, get_persona
+
+    if _SESSION_KIND and _SESSION_KIND in PERSONAS:
+        _p = get_persona(_SESSION_KIND)
+        _pv = (_p.get("voice") or "").strip()
+        if _pv:
+            if _pv not in _blocked_tts:
+                VOICE = _pv
+            else:
+                _pref2 = os.environ.get("FRIDAY_TTS_VOICE", "en-US-AvaMultilingualNeural").strip() or "en-US-AvaMultilingualNeural"
+                VOICE = _pref2 if _pref2 not in _blocked_tts else "en-US-AvaMultilingualNeural"
+        _pr = (_p.get("rate") or "").strip()
+        if _pr:
+            RATE = _pr
+except Exception:
+    pass
+
+# Populated in speak() when FRIDAY_CURSOR_THINKING_VOICE_POOL is set and _is_thinking is True.
+_thinking_voice_pool: list[str] = []
 DEVICE = os.environ.get("FRIDAY_TTS_DEVICE", "").strip()
 
 _cache_env = os.environ.get("FRIDAY_TTS_CACHE", "").strip()
@@ -322,6 +334,25 @@ def _current_tts_generation() -> int:
         return int(TTS_GENERATION_FILE.read_text().strip()) if TTS_GENERATION_FILE.exists() else 0
     except (OSError, ValueError):
         return 0
+
+
+def _playback_superseded(my_gen: int) -> bool:
+    """True if a newer speak bumped the global generation — do not start overlapping audio.
+
+    Priority pre-empt clears the file lock and kills friday-player, but another process
+    can already be inside _speak_inner (e.g. mid Edge download).  Without this check it
+    would still call _play_ffplay and talk over the newer utterance.
+    """
+    if OUTPUT or STDOUT:
+        return False
+    cur = _current_tts_generation()
+    if cur > my_gen:
+        print(
+            f"[friday-speak] superseded before playback (gen {my_gen} < {cur}) — skipping audio",
+            flush=True,
+        )
+        return True
+    return False
 
 
 # ── Human-speech normaliser ────────────────────────────────────────────────────
@@ -569,6 +600,24 @@ async def _fetch_mp3_network(retries: int = 2) -> bytes:
     raise last_err
 
 
+def _split_thinking_sentences(text: str, max_chars: int = 320) -> list[str]:
+    """Split thinking text at sentence boundaries, merge short fragments, cap chunk size."""
+    raw = [s.strip() for s in re.split(r'(?<=[.!?…])\s+', text) if s.strip()]
+    if not raw:
+        return [text] if text.strip() else []
+    chunks: list[str] = []
+    cur = ""
+    for s in raw:
+        if cur and len(cur) + 1 + len(s) > max_chars:
+            chunks.append(cur)
+            cur = s
+        else:
+            cur = (cur + " " + s).strip() if cur else s
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
 # ── Windows mixer volume guard ─────────────────────────────────────────────────
 def _fix_ffplay_volume(pid: int, target: float = 1.0, timeout: float = 2.0) -> None:
     """
@@ -612,16 +661,41 @@ def _sapi_voice_setup_ps() -> str:
     return "$s.SelectVoiceByHints([System.Speech.Synthesis.VoiceGender]::Female); "
 
 
-def _sapi_speak_short(message: str) -> None:
-    """Brief Windows SAPI line (no Edge) — avoids network loop when capping playback."""
+def _darwin_say_cmd_prefix() -> list[str]:
+    """macOS say(1): optional FRIDAY_MACOS_SAY_VOICE and FRIDAY_MACOS_SAY_RATE (words per minute, roughly 90–200)."""
+    cmd: list[str] = ["say"]
+    voice = os.environ.get("FRIDAY_MACOS_SAY_VOICE", "").strip()
+    if voice:
+        cmd.extend(["-v", voice])
+    rate = os.environ.get("FRIDAY_MACOS_SAY_RATE", "").strip()
+    if rate:
+        try:
+            wpm = int(rate)
+            if 1 <= wpm <= 500:
+                cmd.extend(["-r", str(wpm)])
+        except ValueError:
+            pass
+    return cmd
+
+
+def _offline_speak_short(message: str) -> None:
+    """Brief offline TTS: Windows SAPI or macOS `say` (Edge timeout / cap paths)."""
     try:
         safe = (message or "").replace("'", " ").replace('"', " ")[:200]
         if not safe.strip():
             return
+        sysname = platform.system()
+        if sysname == "Darwin":
+            cmd = _darwin_say_cmd_prefix()
+            cmd.append(safe)
+            print(f"[friday-speak] say short: {safe[:80]!r}...", flush=True)
+            subprocess.run(cmd, timeout=15, capture_output=True)
+            _write_last_spoken_ts()
+            return
         print(f"[friday-speak] SAPI short: {safe[:80]!r}...", flush=True)
         voice_ps = _sapi_voice_setup_ps()
         _kwargs: dict = {"timeout": 15, "capture_output": True}
-        if platform.system() == "Windows":
+        if sysname == "Windows":
             _kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         subprocess.run(
             ["powershell", "-NoProfile", "-Command",
@@ -633,7 +707,7 @@ def _sapi_speak_short(message: str) -> None:
         )
         _write_last_spoken_ts()
     except Exception as exc:
-        print(f"friday-speak: SAPI short failed — {exc}", file=sys.stderr)
+        print(f"friday-speak: offline short speak failed — {exc}", file=sys.stderr)
 
 
 # ── Playback duration cap (wall-clock ffplay time per utterance) ───────────────
@@ -676,7 +750,9 @@ def _stop_playback_after_cap(proc: subprocess.Popen) -> None:
 
 
 # ── ffplay (plays from bytes via temp file) ────────────────────────────────────
-def _play_ffplay(mp3_data: bytes) -> None:
+def _play_ffplay(mp3_data: bytes, my_gen: int | None = None) -> None:
+    if my_gen is not None and _playback_superseded(my_gen):
+        return
     with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
         f.write(mp3_data)
         tmp = f.name
@@ -689,11 +765,14 @@ def _play_ffplay(mp3_data: bytes) -> None:
     if platform.system() == "Windows":
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
 
+    play_t0 = time.monotonic()
     try:
         proc = subprocess.Popen(
             ["friday-player", "-nodisp", "-autoexit", "-loglevel", "quiet", tmp],
             **kwargs,
         )
+        _emit_tts_speak_if_needed()
+        _audit_playback_segment_start(proc.pid, my_gen)
         threading.Thread(target=_fix_ffplay_volume, args=(proc.pid,), daemon=True).start()
         max_pb = _get_max_playback_sec()
         if max_pb > 0:
@@ -702,11 +781,17 @@ def _play_ffplay(mp3_data: bytes) -> None:
             except subprocess.TimeoutExpired:
                 print("[friday-speak] playback timed out — stopping player (silent)", flush=True)
                 _stop_playback_after_cap(proc)
+                _audit_playback_segment_end(
+                    my_gen, play_t0, proc.poll(), timed_out_cap=True
+                )
                 return
         else:
             proc.wait()
-        if proc.returncode not in (0, None):
-            raise subprocess.CalledProcessError(proc.returncode, "ffplay")
+        rc = proc.returncode
+        if rc not in (0, None):
+            _audit_playback_segment_end(my_gen, play_t0, rc, timed_out_cap=False)
+            raise subprocess.CalledProcessError(rc, "ffplay")
+        _audit_playback_segment_end(my_gen, play_t0, rc, timed_out_cap=False)
         _write_last_spoken_ts()
     except subprocess.CalledProcessError as e:
         print(f"friday-speak: ffplay error {e.returncode}", file=sys.stderr)
@@ -719,7 +804,7 @@ def _play_ffplay(mp3_data: bytes) -> None:
 
 
 # ── Streaming playback (cache-miss fast path) ──────────────────────────────────
-async def _stream_and_play(switch_done: threading.Event) -> None:
+async def _stream_and_play(switch_done: threading.Event, my_gen: int) -> None:
     """
     Stream edge-tts audio chunks directly to ffplay stdin while simultaneously
     building the cache entry on disk.
@@ -752,6 +837,14 @@ async def _stream_and_play(switch_done: threading.Event) -> None:
     # Wait for BT device switch without blocking the event loop
     await loop.run_in_executor(None, lambda: switch_done.wait(2.0))
 
+    if _playback_superseded(my_gen):
+        producer.cancel()
+        try:
+            await producer
+        except asyncio.CancelledError:
+            pass
+        return
+
     kwargs: dict = {
         "stdin":  subprocess.PIPE,
         "stdout": subprocess.DEVNULL,
@@ -764,6 +857,8 @@ async def _stream_and_play(switch_done: threading.Event) -> None:
         ["friday-player", "-nodisp", "-autoexit", "-loglevel", "quiet", "-"],
         **kwargs,
     )
+    _emit_tts_speak_if_needed()
+    _audit_playback_segment_start(proc.pid, my_gen)
     threading.Thread(target=_fix_ffplay_volume, args=(proc.pid,), daemon=True).start()
     play_start = time.monotonic()
     max_pb = _get_max_playback_sec()
@@ -812,6 +907,7 @@ async def _stream_and_play(switch_done: threading.Event) -> None:
             pass
         print("[friday-speak] streaming cut off — playback budget exceeded (silent)", flush=True)
         _stop_playback_after_cap(proc)
+        _audit_playback_segment_end(my_gen, play_start, proc.poll(), timed_out_cap=True)
         return
 
     await producer
@@ -819,6 +915,7 @@ async def _stream_and_play(switch_done: threading.Event) -> None:
     rem_fin = _remaining_play()
     if max_pb > 0 and rem_fin is not None and rem_fin <= 0:
         _stop_playback_after_cap(proc)
+        _audit_playback_segment_end(my_gen, play_start, proc.poll(), timed_out_cap=True)
         return
 
     try:
@@ -829,8 +926,11 @@ async def _stream_and_play(switch_done: threading.Event) -> None:
     except subprocess.TimeoutExpired:
         print("[friday-speak] streaming playback timed out after stdin closed (silent)", flush=True)
         _stop_playback_after_cap(proc)
+        _audit_playback_segment_end(my_gen, play_start, proc.poll(), timed_out_cap=True)
         return
 
+    _s_rc = proc.returncode
+    _audit_playback_segment_end(my_gen, play_start, _s_rc, timed_out_cap=False)
     _write_last_spoken_ts()
 
     if produce_exc:
@@ -842,28 +942,43 @@ async def _stream_and_play(switch_done: threading.Event) -> None:
         print(f"[friday-speak] cached {len(audio_data)} bytes for next time", flush=True)
 
 
-# ── Music fade-out ─────────────────────────────────────────────────────────────
-def _fade_and_stop_music(fade_sec: float = 1.5, steps: int = 20) -> None:
-    """
-    Fade out ONLY the startup song (friday-play.py's ffplay process) before TTS speaks.
-    Targets the specific PID from friday-play.pid so TTS voices are never accidentally faded.
-    Skipped while friday-play holds music unless FRIDAY_TTS_INTERRUPT_MUSIC=ui.
-    """
-    if friday_play_music_hold_active() and not may_interrupt_music_from_tts():
-        print(
-            "[friday-speak] music hold active — skip fade (set FRIDAY_TTS_INTERRUPT_MUSIC=ui to duck)",
-            flush=True,
-        )
-        return
+# ── Music ducking ──────────────────────────────────────────────────────────────
+_MUSIC_PRE_DUCK_VOL: float | None = None
+
+
+def _music_duck_level() -> float:
+    """Target mixer volume for music while TTS speaks (0.0–1.0). Default 0.05 (5%)."""
+    raw = os.environ.get("FRIDAY_MUSIC_DUCK_LEVEL", "0.05").split("#")[0].strip()
+    try:
+        return max(0.0, min(1.0, float(raw)))
+    except ValueError:
+        return 0.05
+
+
+def _music_normal_level() -> float:
+    """Normal mixer volume for music (prefs / env 0–100 → 0.0–1.0)."""
+    from music_volume_prefs import read_music_play_volume_percent
+
+    pct = read_music_play_volume_percent()
+    return max(0.0, min(1.0, pct / 100.0))
+
+
+def _get_music_pid() -> int | None:
+    """Read the music player PID from friday-play.pid (if music is active)."""
     pid_file = Path(tempfile.gettempdir()) / "friday-play.pid"
     if not pid_file.exists():
-        return
-
+        return None
     try:
-        song_pid = int(pid_file.read_text().strip())
+        return int(pid_file.read_text().strip())
     except Exception:
-        return
+        return None
 
+
+def _set_music_mixer_volume(song_pid: int, target: float, fade_sec: float = 0.3, steps: int = 8) -> float | None:
+    """
+    Smoothly set the Windows audio mixer volume for a music PID.
+    Returns the previous volume (for restore), or None if not applicable.
+    """
     try:
         from pycaw.utils import AudioUtilities
 
@@ -872,24 +987,88 @@ def _fade_and_stop_music(fade_sec: float = 1.5, steps: int = 20) -> None:
             s for s in sessions
             if s.Process and s.Process.pid == song_pid and s.SimpleAudioVolume
         ]
+        if not music_sessions:
+            return None
 
-        if music_sessions:
-            step_time = fade_sec / steps
-            for i in range(steps + 1):
-                vol = 1.0 - (i / steps)
-                for s in music_sessions:
-                    try:
-                        s.SimpleAudioVolume.SetMasterVolume(vol, None)
-                    except Exception:
-                        pass
-                if i < steps:
-                    time.sleep(step_time)
-            print(f"[friday-speak] song faded out (PID {song_pid})", flush=True)
+        prev = music_sessions[0].SimpleAudioVolume.GetMasterVolume()
+        if abs(prev - target) < 0.02:
+            return prev
+
+        step_time = fade_sec / max(1, steps)
+        for i in range(steps + 1):
+            t = i / steps
+            vol = prev + (target - prev) * t
+            for s in music_sessions:
+                try:
+                    s.SimpleAudioVolume.SetMasterVolume(max(0.0, min(1.0, vol)), None)
+                except Exception:
+                    pass
+            if i < steps:
+                time.sleep(step_time)
+        return prev
     except ImportError:
-        pass
+        return None
     except Exception as exc:
-        print(f"[friday-speak] fade-out skipped ({exc.__class__.__name__}: {exc})", file=sys.stderr, flush=True)
+        print(f"[friday-speak] mixer set skipped ({exc.__class__.__name__}: {exc})", file=sys.stderr, flush=True)
+        return None
 
+
+def _duck_music() -> None:
+    """
+    Lower music volume before TTS speaks. Does NOT kill the music player.
+    If no music is playing or the hold is active, does nothing.
+    Stores the pre-duck volume so _restore_music_volume can bring it back.
+    """
+    global _MUSIC_PRE_DUCK_VOL
+    if friday_play_music_hold_active() and not may_interrupt_music_from_tts():
+        print(
+            "[friday-speak] music hold active — skip duck (set FRIDAY_TTS_INTERRUPT_MUSIC=ui to duck)",
+            flush=True,
+        )
+        return
+    song_pid = _get_music_pid()
+    if song_pid is None:
+        return
+    duck = _music_duck_level()
+    prev = _set_music_mixer_volume(song_pid, duck, fade_sec=0.4, steps=10)
+    if prev is not None:
+        _MUSIC_PRE_DUCK_VOL = prev
+        print(f"[friday-speak] ducked music {prev:.0%} → {duck:.0%} (PID {song_pid})", flush=True)
+
+
+def _restore_music_volume() -> None:
+    """Restore music volume to the normal level after TTS finishes."""
+    global _MUSIC_PRE_DUCK_VOL
+    song_pid = _get_music_pid()
+    if song_pid is None:
+        _MUSIC_PRE_DUCK_VOL = None
+        return
+    target = _music_normal_level()
+    if _MUSIC_PRE_DUCK_VOL is not None:
+        target = max(target, _MUSIC_PRE_DUCK_VOL)
+    prev = _set_music_mixer_volume(song_pid, target, fade_sec=0.5, steps=10)
+    if prev is not None:
+        print(f"[friday-speak] restored music {prev:.0%} → {target:.0%} (PID {song_pid})", flush=True)
+    _MUSIC_PRE_DUCK_VOL = None
+
+
+def _fade_and_stop_music(fade_sec: float = 1.5, steps: int = 20) -> None:
+    """
+    Fade out and kill the startup song (friday-play.py's ffplay process).
+    Used by priority pre-empt when we need the music completely gone.
+    For normal TTS, use _duck_music / _restore_music_volume instead.
+    """
+    if friday_play_music_hold_active() and not may_interrupt_music_from_tts():
+        return
+    pid_file = Path(tempfile.gettempdir()) / "friday-play.pid"
+    if not pid_file.exists():
+        return
+    try:
+        song_pid = int(pid_file.read_text().strip())
+    except Exception:
+        return
+    _set_music_mixer_volume(song_pid, 0.0, fade_sec=fade_sec, steps=steps)
+    print(f"[friday-speak] song faded out (PID {song_pid})", flush=True)
     try:
         os.kill(song_pid, _signal.SIGTERM)
         pid_file.unlink(missing_ok=True)
@@ -898,7 +1077,7 @@ def _fade_and_stop_music(fade_sec: float = 1.5, steps: int = 20) -> None:
 
 
 def _kill_friday_player_processes() -> None:
-    """Stop any in-flight TTS playback from friday-speak (friday-player.exe)."""
+    """Stop any in-flight TTS playback from friday-speak (friday-player / ffplay)."""
     if platform.system() == "Windows":
         try:
             subprocess.run(
@@ -911,12 +1090,23 @@ def _kill_friday_player_processes() -> None:
         except Exception:
             pass
         return
+    # macOS/Linux: friday-player is often a renamed ffplay
+    for sig in ("friday-player", "ffplay"):
+        try:
+            subprocess.run(
+                ["pkill", "-f", sig],
+                capture_output=True,
+                stdin=subprocess.DEVNULL,
+                timeout=8,
+            )
+        except Exception:
+            pass
     try:
         import psutil  # type: ignore
 
         for p in psutil.process_iter(["name"]):
             n = (p.info.get("name") or "").lower()
-            if n in ("friday-player", "friday-player.exe"):
+            if n in ("friday-player", "friday-player.exe", "ffplay"):
                 try:
                     p.kill()
                 except Exception:
@@ -955,10 +1145,259 @@ def _get_redis_client():
     return _redis_c
 
 
+# ── UI / SSE + TTS audit (POST /voice/event, Redis friday:tts:audit) ───────────
+_TTS_AUDIT_REDIS_KEY = "friday:tts:audit"
+_TTS_AUDIT_MAX = 50
+_tts_ui_posted_event = False
+
+
+def _reset_tts_ui_state() -> None:
+    global _tts_ui_posted_event
+    _tts_ui_posted_event = False
+
+
+def _emit_ui_events_enabled() -> bool:
+    raw = os.environ.get("FRIDAY_TTS_EMIT_EVENT", "1").strip().lower()
+    return raw not in ("0", "false", "off", "no", "none")
+
+
+def _tts_audit_enabled() -> bool:
+    raw = os.environ.get("FRIDAY_TTS_AUDIT", "1").strip().lower()
+    return raw not in ("0", "false", "off", "no", "none")
+
+
+def _pc_agent_base_url() -> str:
+    return (os.environ.get("FRIDAY_PC_AGENT_URL", "http://127.0.0.1:3847").strip().rstrip("/") or "http://127.0.0.1:3847")
+
+
+def _post_voice_event_async(payload: dict) -> None:
+    """Fire-and-forget POST to pc-agent /voice/event (never blocks playback)."""
+
+    def _send() -> None:
+        try:
+            from urllib.request import Request, urlopen
+
+            body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            headers = {
+                "Content-Type": "application/json",
+                "ngrok-skip-browser-warning": "69420",
+            }
+            secret = (os.environ.get("PC_AGENT_SECRET") or "").strip()
+            if secret:
+                headers["Authorization"] = f"Bearer {secret}"
+            req = Request(
+                f"{_pc_agent_base_url()}/voice/event",
+                data=body,
+                headers=headers,
+                method="POST",
+            )
+            urlopen(req, timeout=1.5)
+        except Exception:
+            pass
+
+    threading.Thread(target=_send, daemon=True).start()
+
+
+def _push_tts_audit_record(entry: dict) -> None:
+    if not _tts_audit_enabled():
+        return
+    try:
+        line = json.dumps(entry, separators=(",", ":"))
+    except Exception:
+        return
+    r = _get_redis_client()
+    if r is not None:
+        try:
+            r.lpush(_TTS_AUDIT_REDIS_KEY, line)
+            r.ltrim(_TTS_AUDIT_REDIS_KEY, 0, _TTS_AUDIT_MAX - 1)
+        except Exception:
+            pass
+    _post_voice_event_async({"type": "tts_audit", **entry})
+
+
+def _tts_session_label() -> str:
+    return _SESSION_KIND or "main"
+
+
+def _tts_priority_flag() -> bool:
+    p = os.environ.get("FRIDAY_TTS_PRIORITY", "").strip().lower()
+    return p in ("1", "true", "yes", "on", "high", "hard")
+
+
+def _emit_tts_speak_if_needed() -> None:
+    """Single tts_speak per process — shows full TEXT in Friday web UI."""
+    global _tts_ui_posted_event
+    if _tts_ui_posted_event:
+        return
+    if not _emit_ui_events_enabled():
+        return
+    _tts_ui_posted_event = True
+    preview = TEXT if len(TEXT) <= 500 else TEXT[:497] + "…"
+    extra_ui: dict = {}
+    ch = os.environ.get("FRIDAY_TTS_SPEAK_CHANNEL", "").strip()
+    if ch:
+        extra_ui["channel"] = ch[:32]
+    pk = os.environ.get("FRIDAY_TTS_SPEAK_PERSONA", "").strip().lower()
+    if pk:
+        extra_ui["personaKey"] = pk[:24]
+    _post_voice_event_async(
+        {
+            "type": "tts_speak",
+            "text": preview,
+            "voice": VOICE,
+            "session": _tts_session_label(),
+            **extra_ui,
+        }
+    )
+
+
+def _emit_tts_done_if_needed() -> None:
+    global _tts_ui_posted_event
+    if not _tts_ui_posted_event:
+        return
+    if _emit_ui_events_enabled():
+        _post_voice_event_async({"type": "tts_done", "session": _tts_session_label()})
+    _tts_ui_posted_event = False
+
+
+def _audit_playback_segment_start(proc_pid: int | None, my_gen: int | None) -> None:
+    preview = TEXT if len(TEXT) <= 120 else TEXT[:117] + "…"
+    _push_tts_audit_record(
+        {
+            "state": "speak_start",
+            "ts": int(time.time() * 1000),
+            "session": _tts_session_label(),
+            "priority": _tts_priority_flag(),
+            "voice": VOICE,
+            "text_preview": preview,
+            "pid": proc_pid,
+            "gen": my_gen,
+        }
+    )
+
+
+def _audit_playback_segment_end(
+    my_gen: int | None,
+    t0_mono: float,
+    returncode: int | None,
+    *,
+    timed_out_cap: bool = False,
+) -> None:
+    dur_ms = int(max(0.0, (time.monotonic() - t0_mono) * 1000))
+    interrupted = timed_out_cap or (returncode not in (0, None))
+    reason = None
+    if timed_out_cap:
+        reason = "playback_cap"
+    elif interrupted:
+        if my_gen is not None and _playback_superseded(my_gen):
+            reason = "priority_kill"
+        else:
+            reason = "player_exit"
+    if interrupted:
+        _push_tts_audit_record(
+            {
+                "state": "speak_interrupted",
+                "ts": int(time.time() * 1000),
+                "session": _tts_session_label(),
+                "duration_ms": dur_ms,
+                "reason": reason or "unknown",
+                "returncode": returncode,
+                "gen": my_gen,
+            }
+        )
+    else:
+        _push_tts_audit_record(
+            {
+                "state": "speak_done",
+                "ts": int(time.time() * 1000),
+                "session": _tts_session_label(),
+                "duration_ms": dur_ms,
+                "was_interrupted": False,
+                "gen": my_gen,
+            }
+        )
+
+
+_SPEAK_STYLE_REDIS_KEY = "friday:speak_style"
+
+
+def _apply_speak_style_rate_pitch_from_redis() -> None:
+    """Adjust module-level RATE/PITCH from Redis speak style (sync with pc-agent speakStyle.js)."""
+    global RATE, PITCH
+    raw = os.environ.get("FRIDAY_SPEAK_STYLE_FROM_REDIS", "true").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return
+    r = _get_redis_client()
+    if r is None:
+        return
+    try:
+        blob = r.get(_SPEAK_STYLE_REDIS_KEY)
+        if not blob:
+            return
+        import json as _json_ss
+
+        st = _json_ss.loads(blob)
+    except Exception:
+        return
+    rate_pct = 0.0
+    pitch_hz = 0.0
+    if st.get("funny"):
+        rate_pct += 3
+        pitch_hz += 2
+    if st.get("snarky"):
+        rate_pct += 4
+        pitch_hz += 3
+    if st.get("bored"):
+        rate_pct -= 10
+        pitch_hz -= 3
+    if st.get("dry"):
+        rate_pct -= 3
+        pitch_hz -= 2
+    if st.get("warm"):
+        rate_pct -= 2
+        pitch_hz += 1
+    rate_pct = max(-18, min(18, rate_pct))
+    pitch_hz = max(-8, min(12, pitch_hz))
+    if rate_pct == 0 and pitch_hz == 0:
+        return
+
+    def _parse_pct(s: str) -> float:
+        s = (s or "").strip()
+        m = re.match(r"^([+-]?\d+(?:\.\d+)?)\s*%$", s)
+        return float(m.group(1)) if m else 7.5
+
+    def _parse_hz(s: str) -> float:
+        s = (s or "").strip()
+        m = re.match(r"^([+-]?\d+(?:\.\d+)?)\s*Hz$", s, re.IGNORECASE)
+        return float(m.group(1)) if m else 2.0
+
+    def _fmt_pct(n: float) -> str:
+        # Edge TTS rejects values like "+10.0%" — use integer percent when whole.
+        s = "" if n < 0 else "+"
+        r = round(n, 1)
+        if abs(r - int(r)) < 1e-9:
+            return f"{s}{int(r)}%"
+        body = f"{r:.1f}".rstrip("0").rstrip(".")
+        return f"{s}{body}%"
+
+    def _fmt_hz(n: float) -> str:
+        s = "" if n < 0 else "+"
+        r = round(n, 1)
+        if abs(r - int(r)) < 1e-9:
+            return f"{s}{int(r)}Hz"
+        body = f"{r:.1f}".rstrip("0").rstrip(".")
+        return f"{s}{body}Hz"
+
+    base_r = _parse_pct(RATE)
+    base_p = _parse_hz(PITCH)
+    RATE = _fmt_pct(max(-50, min(50, base_r + rate_pct)))
+    PITCH = _fmt_hz(max(-20, min(20, base_p + pitch_hz)))
+
+
 # ── Redis distributed TTS lock ───────────────────────────────────────────────
 _REDIS_TTS_LOCK_KEY = "friday:tts:lock"
-_REDIS_TTS_LOCK_TTL = 120  # 2 min auto-expire — covers long TTS + network retries
-_TTS_ACTIVE_LOCK_TTL = 120.0  # file lock matches Redis TTL
+_REDIS_TTS_LOCK_TTL = _tts_lock_ttl_sec()  # env FRIDAY_TTS_LOCK_TTL_SEC — matches waiter stale threshold
+_TTS_ACTIVE_LOCK_TTL = float(_REDIS_TTS_LOCK_TTL)
 _own_redis_token: str | None = None
 
 def _acquire_redis_tts_lock(priority: bool = False, timeout: float = 60.0) -> bool:
@@ -1004,6 +1443,7 @@ def _release_redis_tts_lock() -> None:
 
 # ── Edge TTS rate-limit guard ────────────────────────────────────────────────
 _REDIS_TTS_LAST_KEY = "friday:tts:last_call"
+_REDIS_TTS_ACTIVITY_KEY = "friday:tts:last_activity"  # long TTL — idle watchers (e.g. ECHO) use this
 _MIN_TTS_GAP_SEC = 0.15
 
 def _rate_limit_ok() -> bool:
@@ -1025,6 +1465,51 @@ def _stamp_tts_call() -> None:
         return
     try:
         r.set(_REDIS_TTS_LAST_KEY, str(time.time()), ex=300)
+    except Exception:
+        pass
+
+
+def _stamp_tts_activity_long() -> None:
+    """Wall-clock of last spoken output — survives short last_call TTL for silence / idle daemons."""
+    r = _get_redis_client()
+    if r is None:
+        return
+    try:
+        r.set(_REDIS_TTS_ACTIVITY_KEY, str(time.time()), ex=604800)  # 7 days
+    except Exception:
+        pass
+
+
+def _stamp_voice_context() -> None:
+    """Keep friday:voice:context:{session} last_used + status fresh on every TTS.
+
+    Key naming mirrors pick-session-voice.py:
+      FRIDAY_TTS_SESSION=""          → cursor:main
+      FRIDAY_TTS_SESSION="subagent"  → cursor:subagent
+      FRIDAY_TTS_SESSION="cursor-reply" → cursor:reply
+      FRIDAY_TTS_SESSION="<persona>" → <persona>  (e.g. "nova", "dexter", "echo")
+
+    Persona sessions (set by friday_speak_env_for_persona) get their own key so
+    they never overwrite cursor:main with notification activity.
+    """
+    r = _get_redis_client()
+    if r is None:
+        return
+    try:
+        _CURSOR_SESSION_MAP = {
+            "":             "cursor:main",
+            "subagent":     "cursor:subagent",
+            "cursor-reply": "cursor:reply",
+            "thinking":     "cursor:thinking",
+        }
+        ctx = _CURSOR_SESSION_MAP.get(_SESSION_KIND, _SESSION_KIND) or "cursor:main"
+        key = f"friday:voice:context:{ctx}"
+        now = __import__("datetime").datetime.utcnow().isoformat() + "Z"
+        existing_voice = r.hget(key, "voice")
+        if existing_voice and existing_voice == VOICE:
+            r.hset(key, mapping={"last_used": now, "status": "active"})
+        elif VOICE:
+            r.hset(key, mapping={"voice": VOICE, "set_at": now, "last_used": now, "status": "active"})
     except Exception:
         pass
 
@@ -1152,10 +1637,20 @@ atexit.register(_release_thinking_singleton)
 
 
 def _read_preempted_ambient_line() -> str | None:
-    """If ambient was speaking, grab its line for an apology replay; clear the file."""
+    """If ambient was speaking, grab its line for an apology replay; clear the file.
+
+    Staleness guard: if the file is older than FRIDAY_AMBIENT_PREEMPT_STALE_SEC (default 30)
+    the process that wrote it is no longer speaking — discard silently rather than
+    replaying an 'old said thing' from a previous ambient cycle.
+    """
     if not AMBIENT_SPEAKING_FILE.exists():
         return None
     try:
+        _stale_sec = float(os.environ.get("FRIDAY_AMBIENT_PREEMPT_STALE_SEC", "30") or "30")
+        mtime = AMBIENT_SPEAKING_FILE.stat().st_mtime
+        if time.time() - mtime > max(5.0, _stale_sec):
+            AMBIENT_SPEAKING_FILE.unlink(missing_ok=True)
+            return None
         raw = AMBIENT_SPEAKING_FILE.read_text(encoding="utf-8").strip()
         if raw:
             AMBIENT_SPEAKING_FILE.unlink(missing_ok=True)
@@ -1173,6 +1668,11 @@ def _preempt_for_priority_tts() -> str | None:
     replay = _read_preempted_ambient_line()
     _fade_and_stop_music()
     _kill_friday_player_processes()
+    # Brief pause so the OS audio buffer fully drains before the new speak starts.
+    # Without this, the last ~100 ms of the killed audio can bleed into the new TTS.
+    _drain_ms = float(os.environ.get("FRIDAY_TTS_PREEMPT_DRAIN_MS", "120") or "120")
+    if _drain_ms > 0:
+        time.sleep(_drain_ms / 1000.0)
     try:
         TTS_ACTIVE_FILE.unlink(missing_ok=True)
     except OSError:
@@ -1208,24 +1708,36 @@ def _play_priority_followup(ambient_line: str) -> None:
 
 # ── SAPI fallback ──────────────────────────────────────────────────────────────
 def _sapi_speak() -> None:
+    """Offline fallback when Edge TTS network fails: Windows SAPI or macOS `say`."""
     try:
         safe = TEXT.replace("'", " ").replace('"', " ")[:400]
+        sysname = platform.system()
+        if sysname == "Darwin":
+            cmd = _darwin_say_cmd_prefix()
+            cmd.append(safe)
+            print(f"[friday-speak] say fallback (Edge offline): text={safe[:60]!r}...", flush=True)
+            subprocess.run(cmd, timeout=120, capture_output=False)
+            _write_last_spoken_ts()
+            return
         win_voice = os.environ.get("FRIDAY_WIN_TTS_VOICE", "").strip()
         gend = os.environ.get("FRIDAY_WIN_TTS_GENDER", "").strip().lower() or "(default female hint)"
         who = win_voice if win_voice else gend
         print(f"[friday-speak] SAPI fallback (Edge offline): voice={who!r} text={safe[:60]!r}...", flush=True)
         voice_ps = _sapi_voice_setup_ps()
+        _kwargs: dict = {"timeout": 30}
+        if sysname == "Windows":
+            _kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         subprocess.run(
             ["powershell", "-NoProfile", "-Command",
              "Add-Type -AssemblyName System.Speech; "
              "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
              + voice_ps
              + f"$s.Speak('{safe}')"],
-            timeout=30,
+            **_kwargs,
         )
         _write_last_spoken_ts()
     except Exception as sapi_err:
-        print(f"friday-speak: SAPI also failed — {sapi_err}", file=sys.stderr)
+        print(f"friday-speak: offline TTS also failed — {sapi_err}", file=sys.stderr)
 
 
 def _read_tts_lock_info() -> tuple:
@@ -1277,7 +1789,7 @@ def _pid_alive(pid: int) -> bool:
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 async def speak():
-    global TEXT
+    global TEXT, RATE
     TEXT = normalize_for_speech(_RAW_TEXT)
     _raw_stripped = (_RAW_TEXT or "").strip()
     if not TEXT or not TEXT.strip():
@@ -1294,11 +1806,20 @@ async def speak():
 
     # For playback (not --output/--stdout) signal to ambient that TTS is active.
     is_playback = not (OUTPUT or STDOUT)
-    _priority = os.environ.get("FRIDAY_TTS_PRIORITY", "").strip().lower() in (
+    _prio_raw = os.environ.get("FRIDAY_TTS_PRIORITY", "").strip().lower()
+    _priority_preempt = _prio_raw in (
         "1",
         "true",
         "yes",
         "on",
+        "high",
+        "hard",
+    )
+    _priority_bypass_cursor = _priority_preempt or _prio_raw in (
+        "2",
+        "cooperative",
+        "soft",
+        "queue",
     )
     _is_thinking = os.environ.get("FRIDAY_TTS_THINKING", "").strip().lower() in (
         "1", "true", "yes", "on",
@@ -1313,11 +1834,57 @@ async def speak():
         if _opener_chance > 1.0:
             _opener_chance = min(_opener_chance / 100.0, 1.0)
         if random.random() < _opener_chance:
-            _opener = random.choice(_THINKING_OPENERS)
+            _opener = _pick_thinking_opener(TEXT)
             TEXT = _opener + TEXT
             print(f"[friday-speak] thinking opener: {_opener.strip()}", flush=True)
+        _think_fixed = os.environ.get("FRIDAY_TTS_THINKING_RATE", "").strip() or None
+        RATE = thinking_tts_rate_for_length(len(TEXT), incremental=False, fixed_rate=_think_fixed)
+        print(f"[friday-speak] thinking rate {RATE} for {len(TEXT)} chars", flush=True)
+        # Resolve thinking voice: env override → session file → keep current.
+        _think_voice = os.environ.get("FRIDAY_TTS_THINKING_VOICE", "").strip()
+        if not _think_voice:
+            try:
+                import json as _json_tv
+                _sv_tv = _json_tv.loads(_SESSION_VOICE_FILE.read_text(encoding="utf-8"))
+                _think_voice = _sv_tv.get("thinking_voice", "").strip()
+            except Exception:
+                pass
+        if _think_voice and _think_voice not in _blocked_tts:
+            global VOICE  # must declare global — local assignment would shadow the module-level var
+            VOICE = _think_voice
+            print(f"[friday-speak] thinking voice: {VOICE}", flush=True)
+        elif not _think_voice and _PICK_SCRIPT.exists():
+            # No thinking voice in session yet — spawn picker in background (no-welcome).
+            try:
+                import subprocess as _sp_tv
+                _sp_tv.Popen(
+                    [sys.executable, str(_PICK_SCRIPT), "--thinking"],
+                    cwd=str(_SESSION_VOICE_FILE.parent),
+                    stdout=_sp_tv.DEVNULL,
+                    stderr=_sp_tv.DEVNULL,
+                    env={**os.environ, "FRIDAY_PICK_SESSION_NO_WELCOME": "true"},
+                    **({} if sys.platform != "win32" else {"creationflags": 0x08000000}),
+                )
+            except Exception:
+                pass
+
+        # Per-span voice rotation pool — merge dedicated thinking voice (SAGE / env / session)
+        # with FRIDAY_CURSOR_THINKING_VOICE_POOL so rotation includes the persona voice, not only extras.
+        global _thinking_voice_pool
+        _tv_pool_raw = os.environ.get("FRIDAY_CURSOR_THINKING_VOICE_POOL", "").strip()
+        _pool_cands = [v.strip() for v in _tv_pool_raw.split(",") if v.strip()] if _tv_pool_raw else []
+        _merged_pool: list[str] = []
+        if VOICE and str(VOICE).strip() and VOICE not in _blocked_tts:
+            _merged_pool.append(VOICE)
+        for _pv in _pool_cands:
+            if _pv and _pv not in _blocked_tts and _pv not in _merged_pool:
+                _merged_pool.append(_pv)
+        _thinking_voice_pool = _merged_pool if len(_merged_pool) > 1 else []
+        if _thinking_voice_pool:
+            print(f"[friday-speak] thinking voice pool ({len(_thinking_voice_pool)}): {', '.join(_thinking_voice_pool)}", flush=True)
 
     preempted_replay: str | None = None
+    _my_gen = 0
     if is_playback:
         # Cursor / IDE voice: do not play TTS over the same session as dictation.
         _bypass = os.environ.get("FRIDAY_TTS_BYPASS_CURSOR_DEFER", "").strip().lower() in (
@@ -1327,9 +1894,9 @@ async def speak():
         _ds = os.environ.get("FRIDAY_DEFER_SPEAK_WHEN_CURSOR", "true").strip().lower()
         if (
             not _bypass
-            and not _priority
+            and not _priority_bypass_cursor
             and _ds not in ("0", "false", "no", "off")
-            and platform.system() == "Windows"
+            and platform.system() in ("Windows", "Darwin")
         ):
             _scripts_dir = Path(__file__).resolve().parent.parent.parent / "scripts"
             if str(_scripts_dir) not in sys.path:
@@ -1351,17 +1918,19 @@ async def speak():
                 print("[friday-speak] thinking singleton busy — skipping (another thinking speak is active)", flush=True)
                 sys.exit(0)
 
-        if _priority:
+        # Bump generation before pre-empt so in-flight older speaks see stale gen immediately,
+        # and waiters in the file-lock loop exit without overlapping playback.
+        _my_gen = _bump_tts_generation()
+        if _priority_preempt:
             preempted_replay = _preempt_for_priority_tts()
 
-        # ── Generation singleton: newer speak supersedes any queued older one ──
-        _my_gen = _bump_tts_generation()
-
         # ── Redis distributed lock — serialises ALL callers system-wide ──
-        if not _acquire_redis_tts_lock(priority=_priority, timeout=60.0):
+        if not _acquire_redis_tts_lock(priority=_priority_preempt, timeout=60.0):
             print("[friday-speak] timed out waiting for Redis TTS lock — skipping", flush=True)
             sys.exit(0)
         _stamp_tts_call()
+        _stamp_tts_activity_long()
+        _stamp_voice_context()
 
         # ── Global serialisation: wait for any other speak instance to finish ──
         # Uses O_CREAT|O_EXCL for atomic lock acquisition on NTFS — eliminates
@@ -1406,7 +1975,7 @@ async def speak():
             except OSError:
                 pass
 
-            if _priority:
+            if _priority_preempt:
                 # Another friday-speak still starting — pre-empt again and retry.
                 _preempt_for_priority_tts()
                 await asyncio.sleep(0.08)
@@ -1428,21 +1997,36 @@ async def speak():
 
             await asyncio.sleep(0.10)
 
+    if is_playback:
+        _reset_tts_ui_state()
+
     try:
-        await _speak_inner()
+        await _speak_inner(_my_gen)
     finally:
+        if is_playback:
+            _emit_tts_done_if_needed()
         if is_playback:
             _release_own_tts_lock()
             if _is_thinking:
                 _release_thinking_singleton()
 
-    if is_playback and _priority and preempted_replay:
+    # Replay the interrupted ambient line only when explicitly opted in.
+    # Default is OFF because the "Sorry — I repeated myself" message is the primary
+    # cause of hearing two distinct voices back-to-back after a priority preemption.
+    _replay_enabled = os.environ.get("FRIDAY_AMBIENT_REPLAY_PREEMPTED", "false").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+    if is_playback and _priority_preempt and preempted_replay and _replay_enabled:
         _play_priority_followup(preempted_replay)
 
 
-async def _speak_inner():
+async def _speak_inner(my_gen: int) -> None:
+    global TEXT, VOICE, RATE, PITCH
     # Kick off device-switch lookup in a background thread while we start the
     # TTS request — BT switch and stream overlap instead of running sequentially.
+    if not (OUTPUT or STDOUT) and _playback_superseded(my_gen):
+        return
+    _apply_speak_style_rate_pitch_from_redis()
     use_device = DEVICE and DEVICE.lower() not in ("", "default", "none")
     device_result: list = [None]   # [(target_id, target_name, original_id) | None | False]
     switch_done  = threading.Event()
@@ -1500,6 +2084,111 @@ async def _speak_inner():
             sys.stdout.buffer.flush()
         return
 
+    # ── Thinking pool mode: one voice per span, rotate between spans ───────────
+    # Voice changes between calls (different spans/threads), not between sentences.
+    # Redis INCR tracks which pool slot to use across separate subprocess calls.
+    if _thinking_voice_pool and not OUTPUT and not STDOUT:
+        _pool_orig_text = TEXT
+        _pool_orig_voice = VOICE
+        # Pick one voice for this entire span using a persistent cross-call counter.
+        _span_voice = _thinking_voice_pool[0]
+        try:
+            _rv = _get_redis_client()
+            if _rv is not None:
+                _span_idx = int(_rv.incr("friday:tts:thinking_pool_idx")) - 1
+                _span_voice = _thinking_voice_pool[_span_idx % len(_thinking_voice_pool)]
+            else:
+                _span_voice = random.choice(_thinking_voice_pool)
+        except Exception:
+            _span_voice = random.choice(_thinking_voice_pool)
+        print(f"[friday-speak] thinking pool span voice: {_span_voice}", flush=True)
+        _max_pc = int(os.environ.get("FRIDAY_CURSOR_THINKING_MAX_CHUNK_CHARS", "320"))
+        _sentences = _split_thinking_sentences(TEXT, max_chars=max(80, min(_max_pc, 1200)))
+        _duck_music()
+        switch_done.wait(timeout=10)
+        for _si, _sent in enumerate(_sentences):
+            if _playback_superseded(my_gen):
+                break
+            TEXT = _sent
+            VOICE = _span_voice  # same voice for every sentence in this span
+            _mp3_cached = _load_cache()
+            if _mp3_cached:
+                print(f"[friday-speak] pool [{_si + 1}/{len(_sentences)}] cache hit voice={VOICE}", flush=True)
+                _play_with_device(_mp3_cached, device_result, use_device, my_gen)
+            else:
+                try:
+                    _mp3 = await _fetch_mp3_network(retries=2)
+                    _save_cache(_mp3)
+                    _play_with_device(_mp3, device_result, use_device, my_gen)
+                    print(f"[friday-speak] pool [{_si + 1}/{len(_sentences)}] via {VOICE}", flush=True)
+                except Exception as _pool_exc:
+                    print(f"[friday-speak] pool sentence {_si + 1} failed: {_pool_exc}", file=sys.stderr, flush=True)
+            if _si < len(_sentences) - 1 and not _playback_superseded(my_gen):
+                await asyncio.sleep(random.uniform(0.18, 0.42))
+        TEXT = _pool_orig_text
+        VOICE = _pool_orig_voice
+        _restore_music_volume()
+        _restore_device(device_result)
+        return
+
+    # ── Long normal speaks: sentence chunks (same voice) — faster first audio ──
+    # Thinking-pool mode above already chunks; here we handle Cursor completions / long
+    # narrations without FRIDAY_CURSOR_THINKING_VOICE_POOL (one giant edge-tts job is slow).
+    _chunk_min_raw = os.environ.get("FRIDAY_TTS_CHUNK_MIN_CHARS", "300").strip()
+    try:
+        _chunk_min = int(_chunk_min_raw) if _chunk_min_raw else 0
+    except ValueError:
+        _chunk_min = 300
+    try:
+        _chunk_max_pc = int(os.environ.get("FRIDAY_TTS_CHUNK_MAX_CHARS", "380").strip() or "380")
+    except ValueError:
+        _chunk_max_pc = 380
+    _chunk_max_pc = max(120, min(_chunk_max_pc, 1200))
+
+    if _chunk_min > 0 and len(TEXT) >= _chunk_min and not OUTPUT and not STDOUT:
+        _chunk_parts = _split_thinking_sentences(TEXT, max_chars=_chunk_max_pc)
+        if len(_chunk_parts) > 1:
+            _orig_text_chunks = TEXT
+            print(
+                f"[friday-speak] sentence chunks: {len(_chunk_parts)} parts "
+                f"(min_chars={_chunk_min}, max_chunk={_chunk_max_pc})",
+                flush=True,
+            )
+            _duck_music()
+            switch_done.wait(timeout=10)
+            for _ci, _part in enumerate(_chunk_parts):
+                if _playback_superseded(my_gen):
+                    break
+                TEXT = _part
+                _mp3_cached = _load_cache()
+                if _mp3_cached:
+                    print(
+                        f"[friday-speak] chunk [{_ci + 1}/{len(_chunk_parts)}] cache hit",
+                        flush=True,
+                    )
+                    _play_with_device(_mp3_cached, device_result, use_device, my_gen)
+                else:
+                    try:
+                        _mp3 = await _fetch_mp3_network(retries=2)
+                        _save_cache(_mp3)
+                        _play_with_device(_mp3, device_result, use_device, my_gen)
+                        print(
+                            f"[friday-speak] chunk [{_ci + 1}/{len(_chunk_parts)}] via {VOICE}",
+                            flush=True,
+                        )
+                    except Exception as _chunk_exc:
+                        print(
+                            f"[friday-speak] chunk {_ci + 1} failed: {_chunk_exc}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                if _ci < len(_chunk_parts) - 1 and not _playback_superseded(my_gen):
+                    await asyncio.sleep(random.uniform(0.12, 0.28))
+            TEXT = _orig_text_chunks
+            _restore_music_volume()
+            _restore_device(device_result)
+            return
+
     # ── Playback mode ─────────────────────────────────────────────────────────
     cached = _load_cache()
 
@@ -1507,8 +2196,11 @@ async def _speak_inner():
         # Fast path: cache hit — wait for device, play from bytes
         print(f"[friday-speak] cache hit ({len(cached)} bytes)", flush=True)
         switch_done.wait(timeout=10)
-        _fade_and_stop_music()
-        _play_with_device(cached, device_result, use_device)
+        if _playback_superseded(my_gen):
+            return
+        _duck_music()
+        _play_with_device(cached, device_result, use_device, my_gen)
+        _restore_music_volume()
         return
 
     # Cache miss — download full MP3 then play from file (clean audio, no pipe stutter).
@@ -1516,11 +2208,11 @@ async def _speak_inner():
     _use_stream = os.environ.get("FRIDAY_TTS_STREAM", "false").strip().lower() in (
         "1", "true", "yes", "on",
     )
-    _fade_and_stop_music()
+    _duck_music()
 
     if _use_stream:
         try:
-            await _stream_and_play(switch_done)
+            await _stream_and_play(switch_done, my_gen)
             print(f"[friday-speak] streamed via {VOICE}", flush=True)
         except Exception as exc:
             print(f"[friday-speak] stream failed ({exc.__class__.__name__}) — falling back to full download…", file=sys.stderr, flush=True)
@@ -1529,24 +2221,38 @@ async def _speak_inner():
     if not _use_stream:
         try:
             mp3_data = await _fetch_mp3_network(retries=2)
+            if _playback_superseded(my_gen):
+                _save_cache(mp3_data)
+                switch_done.wait(timeout=10)
+                _restore_device(device_result)
+                _restore_music_volume()
+                return
             _save_cache(mp3_data)
             switch_done.wait(timeout=10)
-            _play_with_device(mp3_data, device_result, use_device)
+            _play_with_device(mp3_data, device_result, use_device, my_gen)
             print(f"[friday-speak] played via {VOICE} (full download)", flush=True)
         except Exception as dl_exc:
             print(f"friday-speak: edge-tts download failed — {dl_exc}", file=sys.stderr, flush=True)
+            if platform.system() == "Darwin":
+                hint = "macOS: FRIDAY_MACOS_SAY_VOICE and optional FRIDAY_MACOS_SAY_RATE for the built-in say command."
+            elif platform.system() == "Windows":
+                hint = "Set FRIDAY_WIN_TTS_VOICE (e.g. Microsoft Zira Desktop) or FRIDAY_WIN_TTS_GENDER."
+            else:
+                hint = "Configure offline speech or restore network access to Edge TTS."
             print(
                 "[friday-speak] Cannot reach Microsoft Edge TTS (speech.platform.bing.com). "
-                "Check network, VPN, firewall, or DNS — falling back to Windows SAPI. "
-                "Set FRIDAY_WIN_TTS_VOICE (e.g. Microsoft Zira Desktop) or FRIDAY_WIN_TTS_GENDER.",
+                f"Check network, VPN, firewall, or DNS — falling back to offline TTS. {hint}",
                 file=sys.stderr,
                 flush=True,
             )
             switch_done.wait(timeout=2)
             _restore_device(device_result)
-            _sapi_speak()
+            _restore_music_volume()
+            if not _playback_superseded(my_gen):
+                _sapi_speak()
             sys.exit(1)
 
+    _restore_music_volume()
     _restore_device(device_result)
 
 
@@ -1564,18 +2270,18 @@ def _restore_device(device_result: list) -> None:
                 pass
 
 
-def _play_with_device(mp3_data: bytes, device_result: list, use_device: bool) -> None:
+def _play_with_device(mp3_data: bytes, device_result: list, use_device: bool, my_gen: int) -> None:
     """Play mp3_data respecting the device switch that already happened."""
     info = device_result[0]
 
     if use_device and info is not False:
         if info is None:
             print(f"[friday-speak] device switch timed out — using default", file=sys.stderr, flush=True)
-            _play_ffplay(mp3_data)
+            _play_ffplay(mp3_data, my_gen)
             return
         target_id, target_name, original_id = info
         try:
-            _play_ffplay(mp3_data)
+            _play_ffplay(mp3_data, my_gen)
             print(f"[friday-speak] played via {VOICE} on {target_name}", flush=True)
         finally:
             if original_id:
@@ -1587,7 +2293,7 @@ def _play_with_device(mp3_data: bytes, device_result: list, use_device: bool) ->
         return
 
     print(f"[friday-speak] playing via {VOICE} on default audio device", flush=True)
-    _play_ffplay(mp3_data)
+    _play_ffplay(mp3_data, my_gen)
 
 
 asyncio.run(speak())
