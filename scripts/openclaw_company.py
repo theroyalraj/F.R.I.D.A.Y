@@ -5,7 +5,7 @@ openclaw_company.py — OpenClaw Labs org chart: names, titles, Edge voices, TTS
 Each long-running daemon imports get_persona(role) and applies voice/rate to subprocess env
 or friday_speaker kwargs. Env overrides: OPENCLAW_<ROLE>_VOICE, OPENCLAW_<ROLE>_RATE
 
-Roles: jarvis, argus, nova, sage, dexter, maestro, harper, sentinel, atlas
+Roles: jarvis, argus, nova, sage, dexter, maestro, harper, sentinel, atlas, echo
 """
 from __future__ import annotations
 
@@ -80,6 +80,13 @@ PERSONAS: dict[str, dict[str, str]] = {
         "voice": "",  # ears only — inherits Jarvis for spoken replies
         "rate": "",
         "personality": "Listen path only; does not speak independently.",
+    },
+    "echo": {
+        "name": "Echo",
+        "title": "Director of Presence",
+        "voice": "en-US-MichelleNeural",
+        "rate": "",
+        "personality": "Warm check-ins when the room has been quiet; invites interaction without nagging.",
     },
 }
 

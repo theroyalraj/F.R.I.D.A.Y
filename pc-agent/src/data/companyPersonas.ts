@@ -49,6 +49,12 @@ export const COMPANY_PERSONAS = {
     voice: 'en-IE-ConnorNeural',
     personality: 'Understated relay; reads Composer output when enabled.',
   },
+  echo: {
+    name: 'Echo',
+    title: 'Director of Presence',
+    voice: 'en-US-MichelleNeural',
+    personality: 'Warm check-ins when the room has been quiet; invites interaction without nagging.',
+  },
 } as const;
 
 export type CompanyPersonaKey = keyof typeof COMPANY_PERSONAS;
@@ -91,6 +97,7 @@ export const SPEAKING_PERSONA_ORDER: CompanyPersonaKey[] = [
   'maestro',
   'harper',
   'sentinel',
+  'echo',
 ];
 
 export interface ChatBubblePersona {

@@ -5,6 +5,7 @@ import { useSSEStream } from '../hooks/useSSEStream';
 import { useUptime } from '../hooks/useUptime';
 import ToastContainer from './Toast';
 import SpeakStylePanel from './SpeakStylePanel';
+import SpeakConfirmModal from './SpeakConfirmModal';
 import VoiceSiriOverlay from './VoiceSiriOverlay';
 import { IntegrationsRail } from './IntegrationsRail';
 import { PersonaRosterModal } from './PersonaRosterModal';
@@ -124,6 +125,23 @@ const FridayListenApp: React.FC = () => {
     roleCount: number;
     err?: string;
   } | null>(null);
+  const [speakStyle, setSpeakStyle] = useState<{
+    funny: boolean;
+    snarky: boolean;
+    bored: boolean;
+    dry: boolean;
+    warm: boolean;
+    customPrompt: string;
+  }>({
+    funny: false,
+    snarky: false,
+    bored: false,
+    dry: false,
+    warm: false,
+    customPrompt: '',
+  });
+  const [speakConfirmOpen, setSpeakConfirmOpen] = useState(false);
+  const [pendingSpeakText, setPendingSpeakText] = useState('');
 
   const clearCelebrationOffer = useCallback(() => {
     if (celebrationAskTimerRef.current) {
@@ -176,6 +194,13 @@ const FridayListenApp: React.FC = () => {
     if (!personaCatalog) return;
     setActivePersonaKey(inferPersonaKeyFromVoice(currentVoice, personaCatalog));
   }, [personaCatalog, currentVoice, setActivePersonaKey]);
+
+  // Fetch speak style config
+  useEffect(() => {
+    fetch('/voice/speak-style', { headers: authHeaders() }).then(r => r.json())
+      .then(d => { if (d.ok && d.style) setSpeakStyle(d.style); })
+      .catch(() => {});
+  }, [authHeaders]);
 
   // OpenClaw stack status (proxies skill-gateway) — visible by default on Listen
   useEffect(() => {
@@ -267,26 +292,37 @@ const FridayListenApp: React.FC = () => {
 
     addBubble({ type: 'user', text: raw, ts: Date.now(), persona: USER_BUBBLE_PERSONA });
 
-    // If @speak — just speak the text directly
+    // If @speak — ask for confirmation (respect focus mode)
     if (mentions.includes('speak')) {
-      fetch('/voice/speak-async', {
-        method: 'POST', headers: { ...authHeaders() as Record<string, string> },
-        body: JSON.stringify({ text }),
-      }).then(() => {
-        addBubble({
-          type: 'friday',
-          text: `\uD83D\uDD0A Speaking: "${text}"`,
-          ts: Date.now(),
-          persona: getReplyPersona(),
-        });
-      }).catch(() => {});
       setSending(false);
-      setConnectionStatus('speaking');
-      setTimeout(() => setConnectionStatus('listening'), 3000);
+      setPendingSpeakText(text);
+      setSpeakConfirmOpen(true);
       return;
     }
 
+    // OLD: If @speak — just speak directly
+    /* if (mentions.includes('speak')) {
+      setConnectionStatus('speaking');
+      fetch('/voice/speak-async', {
+        method: 'POST', headers: { ...authHeaders() as Record<string, string> },
+        body: JSON.stringify({ text }),
+      })
+        .then(() => {
+          addBubble({
+            type: 'friday',
+            text: `\uD83D\uDD0A Speaking: "${text}"`,
+            ts: Date.now(),
+            persona: getReplyPersona(),
+          });
+        })
+        .catch(() => setConnectionStatus('listening'));
+      setSending(false);
+      inputRef.current?.focus();
+      return;
+    } */
+
     setConnectionStatus('processing');
+    let pendingJarvisSpeak = false;
     try {
       const res = await fetch('/voice/command', {
         method: 'POST', headers: { ...authHeaders() as Record<string, string> },
@@ -302,13 +338,18 @@ const FridayListenApp: React.FC = () => {
       if (data.summary) {
         addBubble({ type: 'friday', text: data.summary, ts: Date.now(), persona: getReplyPersona() });
         if (data.speakAsync !== false) {
+          pendingJarvisSpeak = true;
+          setConnectionStatus('speaking');
           fetch('/voice/speak-async', {
             method: 'POST', headers: { ...authHeaders() as Record<string, string> },
             body: JSON.stringify({ text: data.summary }),
-          }).catch(() => {});
+          }).catch(() => setConnectionStatus('listening'));
         }
       } else if (data.error) {
         addBubble({ type: 'error', text: data.error, ts: Date.now(), persona: getReplyPersona() });
+      }
+      if (data.deferredOpenRouter) {
+        pendingJarvisSpeak = true;
       }
       if (data.ok && data.celebration?.song && data.celebration?.askText) {
         const cel = data.celebration as CelebrationPayload;
@@ -330,7 +371,9 @@ const FridayListenApp: React.FC = () => {
       addBubble({ type: 'error', text: String(err), ts: Date.now(), persona: getReplyPersona() });
     } finally {
       setSending(false);
-      setConnectionStatus('listening');
+      if (!pendingJarvisSpeak) {
+        setConnectionStatus('listening');
+      }
       inputRef.current?.focus();
     }
   }, [inputText, sending, addBubble, setConnectionStatus, authHeaders, getReplyPersona, clearCelebrationOffer, claudeModel]);
@@ -414,6 +457,29 @@ const FridayListenApp: React.FC = () => {
     showToast(m ? 'Muted' : 'Listening', 'info');
     if (!m) setConnectionStatus('listening');
   };
+
+  const handleSpeakConfirm = useCallback(() => {
+    setSpeakConfirmOpen(false);
+    setConnectionStatus('speaking');
+    fetch('/voice/speak-async', {
+      method: 'POST',
+      headers: { ...authHeaders() as Record<string, string> },
+      body: JSON.stringify({ text: pendingSpeakText }),
+    })
+      .then(() => {
+        addBubble({
+          type: 'friday',
+          text: `🔊 Speaking: "${pendingSpeakText}"`,
+          ts: Date.now(),
+          persona: getReplyPersona(),
+        });
+      })
+      .catch(() => setConnectionStatus('listening'))
+      .finally(() => {
+        setSending(false);
+        inputRef.current?.focus();
+      });
+  }, [pendingSpeakText, authHeaders, setConnectionStatus, addBubble, getReplyPersona]);
 
   const applyVoice = useCallback((v: string, toast: string) => {
     setCurrentVoice(v);
@@ -849,6 +915,21 @@ const FridayListenApp: React.FC = () => {
         theme={theme}
         onSaved={refreshPersonaOverrides}
       />
+
+      <SpeakConfirmModal
+        isOpen={speakConfirmOpen}
+        text={pendingSpeakText}
+        voiceIcon={vm(currentVoice).icon}
+        voiceName={vm(currentVoice).shortName}
+        speakStyle={speakStyle}
+        onConfirm={handleSpeakConfirm}
+        onCancel={() => {
+          setSpeakConfirmOpen(false);
+          setSending(false);
+          inputRef.current?.focus();
+        }}
+      />
+
       <ToastContainer />
     </div>
   );

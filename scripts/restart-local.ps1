@@ -101,6 +101,7 @@ if ($ForceKill) {
   Stop-OpenClawPythonDaemon 'argus' '*argus.py*'
   Stop-OpenClawPythonDaemon 'friday-listen' '*friday-listen*'
   Stop-OpenClawPythonDaemon 'friday-ambient' '*friday-ambient*'
+  Stop-OpenClawPythonDaemon 'friday-silence-watch' '*friday-silence-watch*'
   Stop-OpenClawPythonDaemon 'cursor-reply-watch' '*cursor-reply-watch*'
   Stop-OpenClawPythonDaemon 'cursor-thinking-ocr' '*cursor-thinking-ocr*'
   Stop-OpenClawPythonDaemon 'friday-music-scheduler' '*friday-music-scheduler*'

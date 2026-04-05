@@ -560,6 +560,64 @@
       font-size: 0.58rem; font-weight: 700; padding: 0 0.3rem;
       margin-left: 0.4rem; vertical-align: middle;
     }
+
+    /* Sticky notes (pinned important todos) */
+    .friday-todos-block { width: 100%; max-width: 30rem; display: flex; flex-direction: column; gap: 0.65rem; }
+    .sticky-notes-strip { display: flex; flex-wrap: wrap; gap: 0.5rem; justify-content: flex-start; }
+    .sticky-note {
+      max-width: 14.5rem;
+      padding: 0.55rem 0.72rem 0.5rem;
+      border-radius: 3px;
+      background: linear-gradient(155deg, #fff9c4 0%, #ffe082 92%);
+      box-shadow: 3px 3px 0 rgba(0,0,0,0.1), 0 6px 18px rgba(0,0,0,0.08);
+      border: 1px solid rgba(180, 150, 40, 0.38);
+      transform: rotate(-1.1deg);
+      color: #2e2800;
+    }
+    body.light .sticky-note {
+      background: linear-gradient(155deg, #fffde7 0%, #ffecb3 92%);
+      color: #1f1a00;
+    }
+    .sticky-note:nth-child(2n) { transform: rotate(0.9deg); }
+    .sticky-note:nth-child(3n) { transform: rotate(-0.5deg); }
+    .sticky-pin-label {
+      font-size: 0.52rem; letter-spacing: 0.16em; text-transform: uppercase;
+      color: rgba(0,0,0,0.42); margin-bottom: 0.18rem; font-weight: 600;
+    }
+    .sticky-note-title { font-weight: 700; font-size: 0.84rem; line-height: 1.35; }
+    .sticky-note-detail {
+      font-size: 0.71rem; opacity: 0.9; margin-top: 0.32rem;
+      max-height: 4.2em; line-height: 1.35; overflow: hidden;
+    }
+    .sticky-note-actions { margin-top: 0.42rem; display: flex; gap: 0.35rem; flex-wrap: wrap; }
+    .sticky-mini-btn {
+      border-radius: 7px; border: 1px solid rgba(0,0,0,0.14);
+      background: rgba(255,255,255,0.45); color: #2e2800;
+      padding: 0.22rem 0.45rem; font-size: 0.65rem; cursor: pointer; font-family: inherit; font-weight: 600;
+    }
+    .sticky-mini-btn:hover { background: rgba(255,255,255,0.75); }
+
+    .todo-quick-row { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
+    .todo-quick-row .glass-select { flex: 1; min-width: 11rem; border-radius: 9px; }
+    .todo-quick-btn {
+      border-radius: 8px; border: 1px solid var(--stroke);
+      background: rgba(56,217,255,0.10); color: var(--cyan);
+      padding: 0.38rem 0.55rem; font-size: 0.72rem; cursor: pointer; font-family: inherit; font-weight: 600;
+    }
+    .todo-quick-btn:hover { background: rgba(56,217,255,0.2); }
+    .todo-quick-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+    .todo-opt-row {
+      display: flex; flex-wrap: wrap; gap: 0.75rem; font-size: 0.72rem;
+      color: var(--muted); align-items: center; margin-top: 0.12rem;
+    }
+    .todo-opt-row label { display: flex; align-items: center; gap: 0.38rem; cursor: pointer; user-select: none; }
+    .todo-icon-btn {
+      flex-shrink: 0; background: none; border: none; cursor: pointer;
+      font-size: 0.95rem; padding: 0 0.12rem; opacity: 0.55; line-height: 1;
+    }
+    .todo-icon-btn:hover { opacity: 1; }
+    .todo-icon-btn.on { opacity: 1; }
+    .todo-row-actions { display: flex; flex-direction: column; align-items: flex-end; gap: 0.15rem; flex-shrink: 0; }
   </style>
 </head>
 <body>
@@ -594,6 +652,14 @@
       if (t && String(t).trim()) return { Authorization: `Bearer ${String(t).trim()}` };
     } catch {}
     return {};
+  }
+  /** User JWT (Listen login) scopes todos per org; else agent secret; else anonymous legacy bucket. */
+  function todoAuthHeaders() {
+    try {
+      const j = typeof localStorage !== 'undefined' && localStorage.getItem('openclaw.jwt');
+      if (j && String(j).trim()) return { Authorization: `Bearer ${String(j).trim()}` };
+    } catch {}
+    return voiceAuthHeaders();
   }
   const VOICE_HEADERS = () => ({ ...THEADERS, ...voiceAuthHeaders() });
   const SR      = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -795,7 +861,7 @@
   }
 
   /* ══════════════════════════════════════════════════════════
-     TodosPanel — manages todos + reminders from /todos API
+     TodosPanel — todos + reminders; sticky pins; quick dropdown; quiet remind
   ══════════════════════════════════════════════════════════ */
   function TodosPanel() {
     const [open, setOpen]         = useState(false);
@@ -803,12 +869,17 @@
     const [reminders, setReminders] = useState([]);
     const [newTitle, setNewTitle] = useState('');
     const [loading, setLoading]   = useState(false);
+    const [addPinned, setAddPinned] = useState(false);
+    const [addSilent, setAddSilent] = useState(false);
+    const [quickId, setQuickId]   = useState('');
+
+    const hdr = () => ({ ...THEADERS, ...todoAuthHeaders() });
 
     async function loadAll() {
       try {
         const [tr, rr] = await Promise.all([
-          fetch(API('/todos?done=all'), { headers: THEADERS }),
-          fetch(API('/todos/reminders'), { headers: THEADERS }),
+          fetch(API('/todos?done=all'), { headers: hdr() }),
+          fetch(API('/todos/reminders'), { headers: hdr() }),
         ]);
         const td = await tr.json(); if (td.ok) setTodos(td.todos);
         const rd = await rr.json(); if (rd.ok) setReminders(rd.reminders);
@@ -817,9 +888,7 @@
 
     useEffect(() => {
       loadAll();
-      // Poll every 30s for live updates (SSE todo events come through broadcastEvent)
       const iv = setInterval(loadAll, 30_000);
-      // Also listen on the SSE stream for instant UI updates
       let es;
       try {
         es = new EventSource(API('/voice/stream'));
@@ -835,50 +904,69 @@
       return () => { clearInterval(iv); try { es?.close(); } catch {} };
     }, []);
 
+    async function patchTodo(id, body) {
+      try {
+        const r = await fetch(API('/todos/' + id), {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json', ...hdr() },
+          body: JSON.stringify(body),
+        });
+        const d = await r.json();
+        if (d.ok) setTodos(prev => prev.map(t => t.id === id ? d.todo : t));
+      } catch {}
+    }
+
     async function addTodo() {
       const t = newTitle.trim(); if (!t) return;
       setNewTitle(''); setLoading(true);
       try {
         const r = await fetch(API('/todos'), {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...THEADERS },
-          body: JSON.stringify({ title: t, source: 'manual' }),
+          headers: { 'Content-Type': 'application/json', ...hdr() },
+          body: JSON.stringify({
+            title: t,
+            source: 'manual',
+            pinned: addPinned,
+            silentRemind: addSilent,
+          }),
         });
         const d = await r.json();
         if (d.ok) setTodos(prev => [d.todo, ...prev]);
       } catch {}
+      setAddPinned(false);
+      setAddSilent(false);
       setLoading(false);
     }
 
     async function toggleDone(todo) {
-      try {
-        const r = await fetch(API('/todos/' + todo.id), {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json', ...THEADERS },
-          body: JSON.stringify({ done: !todo.done }),
-        });
-        const d = await r.json();
-        if (d.ok) setTodos(prev => prev.map(t => t.id === todo.id ? d.todo : t));
-      } catch {}
+      await patchTodo(todo.id, { done: !todo.done });
     }
 
     async function deleteTodo(id) {
       try {
-        await fetch(API('/todos/' + id), { method: 'DELETE', headers: THEADERS });
+        await fetch(API('/todos/' + id), { method: 'DELETE', headers: hdr() });
         setTodos(prev => prev.filter(t => t.id !== id));
+        setQuickId(q => (q === id ? '' : q));
       } catch {}
     }
 
     async function deleteReminder(id) {
       try {
-        await fetch(API('/todos/reminders/' + id), { method: 'DELETE', headers: THEADERS });
+        await fetch(API('/todos/reminders/' + id), { method: 'DELETE', headers: hdr() });
         setReminders(prev => prev.filter(r => r.id !== id));
       } catch {}
     }
 
     const pendingTodos = todos.filter(t => !t.done);
     const doneTodos    = todos.filter(t => t.done);
+    const pinnedLive   = pendingTodos.filter(t => t.pinned);
     const badgeCount   = pendingTodos.length + reminders.length;
+    const selectedTodo   = quickId ? todos.find(x => x.id === quickId) : null;
+
+    function trunc(s, n) {
+      if (!s || s.length <= n) return s || '';
+      return s.slice(0, n - 1) + '…';
+    }
 
     function prioClass(p) {
       if (p === 'high')   return 'todo-priority prio-high';
@@ -897,81 +985,119 @@
     }
 
     return html`
-      <div className="todos-panel">
-        <button type="button" className="settings-toggle-btn" onClick=${() => setOpen(o => !o)}>
-          <span>
-            Todos &amp; Reminders
-            ${badgeCount > 0 ? html`<span className="todos-badge">${badgeCount}</span>` : null}
-          </span>
-          <span className=${'settings-arrow' + (open ? ' open' : '')}>▾</span>
-        </button>
-        <div className=${'todos-body' + (open ? ' open' : '')}>
-          <div className="todos-inner">
+      <div className="friday-todos-block">
+        ${pinnedLive.length > 0 ? html`
+          <div className="sticky-notes-strip" aria-label="Pinned notes">
+            ${pinnedLive.map(t => html`
+              <div key=${t.id} className="sticky-note">
+                <div className="sticky-pin-label">Sticky note</div>
+                <div className="sticky-note-title">${t.title}</div>
+                ${t.detail ? html`<div className="sticky-note-detail">${t.detail}</div>` : null}
+                <div className="sticky-note-actions">
+                  <button type="button" className="sticky-mini-btn" onClick=${() => patchTodo(t.id, { done: true })}>Mark done</button>
+                  <button type="button" className="sticky-mini-btn" onClick=${() => patchTodo(t.id, { pinned: false })}>Unpin</button>
+                </div>
+              </div>
+            `)}
+          </div>
+        ` : null}
 
-            <!-- Quick add -->
-            <div className="todo-add-row">
-              <input
-                type="text"
-                className="todo-input"
-                placeholder="Add a todo…"
-                value=${newTitle}
-                onChange=${e => setNewTitle(e.target.value)}
-                onKeyDown=${e => { if (e.key === 'Enter') addTodo(); }}
-              />
-              <button className="todo-add-btn" disabled=${loading} onClick=${addTodo}>+ Add</button>
+        <div className="todos-panel">
+          <button type="button" className="settings-toggle-btn" onClick=${() => setOpen(o => !o)}>
+            <span>
+              Todos &amp; Reminders
+              ${badgeCount > 0 ? html`<span className="todos-badge">${badgeCount}</span>` : null}
+            </span>
+            <span className=${'settings-arrow' + (open ? ' open' : '')}>▾</span>
+          </button>
+          <div className=${'todos-body' + (open ? ' open' : '')}>
+            <div className="todos-inner">
+
+              <div className="todo-add-row">
+                <input
+                  type="text"
+                  className="todo-input"
+                  placeholder="Add a todo…"
+                  value=${newTitle}
+                  onChange=${e => setNewTitle(e.target.value)}
+                  onKeyDown=${e => { if (e.key === 'Enter') addTodo(); }}
+                />
+                <button className="todo-add-btn" disabled=${loading} onClick=${addTodo}>+ Add</button>
+              </div>
+              <div className="todo-opt-row">
+                <label><input type="checkbox" checked=${addPinned} onChange=${e => setAddPinned(e.target.checked)} /> Pin as sticky (important)</label>
+                <label title="Excluded from spoken todo remind (POST /todos/remind)"><input type="checkbox" checked=${addSilent} onChange=${e => setAddSilent(e.target.checked)} /> Do not speak on remind</label>
+              </div>
+
+              <p className="todo-section-label">Quick actions</p>
+              <div className="todo-quick-row">
+                <select className="glass-select sq" value=${quickId} onChange=${e => setQuickId(e.target.value)}>
+                  <option value="">Pick a pending task…</option>
+                  ${pendingTodos.map(t => html`
+                    <option key=${t.id} value=${t.id}>${trunc(t.title, 72)}</option>
+                  `)}
+                </select>
+                <button type="button" className="todo-quick-btn" disabled=${!quickId} onClick=${() => selectedTodo && patchTodo(selectedTodo.id, { done: true })}>Done</button>
+                <button type="button" className="todo-quick-btn" disabled=${!quickId} onClick=${() => selectedTodo && patchTodo(selectedTodo.id, { pinned: !selectedTodo.pinned })}>${selectedTodo?.pinned ? 'Unpin' : 'Pin'}</button>
+                <button type="button" className="todo-quick-btn" disabled=${!quickId} onClick=${() => selectedTodo && patchTodo(selectedTodo.id, { silentRemind: !selectedTodo.silentRemind })}>${selectedTodo?.silentRemind ? 'Include in remind' : 'Quiet on remind'}</button>
+              </div>
+
+              ${reminders.length > 0 ? html`
+                <p className="todo-section-label">⏰ Reminders</p>
+                <ul className="todo-list">
+                  ${reminders.map(r => html`
+                    <li key=${r.id} className="reminder-item">
+                      <span className="reminder-icon">🔔</span>
+                      <div className="reminder-body">
+                        <div className="reminder-title">${r.title}</div>
+                        ${fmtDue(r) ? html`<div className="reminder-due">${fmtDue(r)}</div>` : null}
+                      </div>
+                      <button className="reminder-del" title="Dismiss" onClick=${() => deleteReminder(r.id)}>✕</button>
+                    </li>
+                  `)}
+                </ul>
+              ` : null}
+
+              <p className="todo-section-label">📋 To Do${pendingTodos.length ? ` (${pendingTodos.length})` : ''}</p>
+              ${pendingTodos.length === 0
+                ? html`<p className="todos-empty">All clear — no pending todos.</p>`
+                : html`<ul className="todo-list">
+                  ${pendingTodos.map(t => html`
+                    <li key=${t.id} className="todo-item">
+                      <input type="checkbox" className="todo-check" checked=${t.done} onChange=${() => toggleDone(t)} />
+                      <div className="todo-text">
+                        <div>${t.title}</div>
+                        ${t.detail ? html`<div className="todo-detail">${t.detail}</div>` : null}
+                        ${t.source && t.source !== 'manual' ? html`<div className="todo-source">${t.source}</div>` : null}
+                        ${t.silentRemind ? html`<div className="todo-source">Quiet on spoken remind</div>` : null}
+                      </div>
+                      <div className="todo-row-actions">
+                        <span className=${prioClass(t.priority)}>${t.priority}</span>
+                        <div>
+                          <button type="button" className=${'todo-icon-btn' + (t.pinned ? ' on' : '')} title=${t.pinned ? 'Unpin sticky' : 'Pin as sticky'} onClick=${() => patchTodo(t.id, { pinned: !t.pinned })}>📌</button>
+                          <button type="button" className=${'todo-icon-btn' + (t.silentRemind ? ' on' : '')} title=${t.silentRemind ? 'Include in spoken remind' : 'Skip on spoken remind'} onClick=${() => patchTodo(t.id, { silentRemind: !t.silentRemind })}>🔇</button>
+                        </div>
+                      </div>
+                      <button className="todo-del" title="Delete" onClick=${() => deleteTodo(t.id)}>✕</button>
+                    </li>
+                  `)}
+                </ul>`
+              }
+
+              ${doneTodos.length > 0 ? html`
+                <p className="todo-section-label">✓ Done (${doneTodos.length})</p>
+                <ul className="todo-list">
+                  ${doneTodos.map(t => html`
+                    <li key=${t.id} className=${'todo-item done'}>
+                      <input type="checkbox" className="todo-check" checked=${true} onChange=${() => toggleDone(t)} />
+                      <div className="todo-text"><div>${t.title}</div></div>
+                      <button className="todo-del" title="Delete" onClick=${() => deleteTodo(t.id)}>✕</button>
+                    </li>
+                  `)}
+                </ul>
+              ` : null}
+
             </div>
-
-            <!-- Reminders -->
-            ${reminders.length > 0 ? html`
-              <p className="todo-section-label">⏰ Reminders</p>
-              <ul className="todo-list">
-                ${reminders.map(r => html`
-                  <li key=${r.id} className="reminder-item">
-                    <span className="reminder-icon">🔔</span>
-                    <div className="reminder-body">
-                      <div className="reminder-title">${r.title}</div>
-                      ${fmtDue(r) ? html`<div className="reminder-due">${fmtDue(r)}</div>` : null}
-                    </div>
-                    <button className="reminder-del" title="Dismiss" onClick=${() => deleteReminder(r.id)}>✕</button>
-                  </li>
-                `)}
-              </ul>
-            ` : null}
-
-            <!-- Pending todos -->
-            <p className="todo-section-label">📋 To Do${pendingTodos.length ? ` (${pendingTodos.length})` : ''}</p>
-            ${pendingTodos.length === 0
-              ? html`<p className="todos-empty">All clear — no pending todos.</p>`
-              : html`<ul className="todo-list">
-                ${pendingTodos.map(t => html`
-                  <li key=${t.id} className="todo-item">
-                    <input type="checkbox" className="todo-check" checked=${t.done} onChange=${() => toggleDone(t)} />
-                    <div className="todo-text">
-                      <div>${t.title}</div>
-                      ${t.detail ? html`<div className="todo-detail">${t.detail}</div>` : null}
-                      ${t.source && t.source !== 'manual' ? html`<div className="todo-source">${t.source}</div>` : null}
-                    </div>
-                    <span className=${prioClass(t.priority)}>${t.priority}</span>
-                    <button className="todo-del" title="Delete" onClick=${() => deleteTodo(t.id)}>✕</button>
-                  </li>
-                `)}
-              </ul>`
-            }
-
-            <!-- Done todos (collapsed) -->
-            ${doneTodos.length > 0 ? html`
-              <p className="todo-section-label">✓ Done (${doneTodos.length})</p>
-              <ul className="todo-list">
-                ${doneTodos.map(t => html`
-                  <li key=${t.id} className=${'todo-item done'}>
-                    <input type="checkbox" className="todo-check" checked=${true} onChange=${() => toggleDone(t)} />
-                    <div className="todo-text"><div>${t.title}</div></div>
-                    <button className="todo-del" title="Delete" onClick=${() => deleteTodo(t.id)}>✕</button>
-                  </li>
-                `)}
-              </ul>
-            ` : null}
-
           </div>
         </div>
       </div>
@@ -1309,6 +1435,17 @@
         es.onmessage = (e) => {
           try {
             const ev = JSON.parse(e.data);
+            if (ev.type === 'speak' && sessRef.current) {
+              setOrb('speaking');
+              if (ev.text) {
+                const s = String(ev.text);
+                setHint(s.length > 140 ? s.slice(0, 140) + '…' : s);
+              }
+            } else if (ev.type === 'listening' && sessRef.current && !busyRef.current) {
+              setOrb('listening');
+              setHint('Speak when ready.');
+              startListenTurn();
+            }
             if (!openRouterPendingRef.current) return;
             if (ev.type === 'reply' && ev.text) {
               openRouterPendingRef.current = false;

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAuth, isCompanyProfileEmpty } from '../contexts/AuthContext';
 import { useVoiceApp } from '../contexts/VoiceAppContext';
 import LoginPage from './LoginPage';
@@ -14,6 +14,18 @@ const AuthGuard: React.FC<Props> = ({ children }) => {
   const { token, loading, role, company, isAdmin } = useAuth();
   const { theme } = useVoiceApp();
   const [authScreen, setAuthScreen] = useState<'login' | 'signup'>('login');
+
+  // Auto-login for dev (env var or localStorage flag)
+  useEffect(() => {
+    if (!token && !loading && typeof window !== 'undefined') {
+      const devToken = localStorage.getItem('friday.devAutoLogin');
+      const isDevEnv = process.env.NODE_ENV === 'development' || window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost';
+      if (isDevEnv && devToken) {
+        localStorage.setItem('openclaw.jwt', devToken);
+        window.location.reload();
+      }
+    }
+  }, [token, loading]);
 
   if (loading) {
     return (

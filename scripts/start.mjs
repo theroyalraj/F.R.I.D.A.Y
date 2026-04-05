@@ -97,6 +97,11 @@ function readArgusFromDotEnv() {
   return envBool('FRIDAY_ARGUS_ENABLED', true);
 }
 
+/** ECHO — silence watcher: speaks a check-in after FRIDAY_SILENCE_IDLE_SEC without TTS. */
+function readSilenceWatchFromDotEnv() {
+  return envBool('FRIDAY_SILENCE_WATCH', true);
+}
+
 /** Cursor JSONL → TTS: on if reply and/or thinking toggle is on, unless live narration suppresses it. */
 function readCursorReplyWatchFromDotEnv() {
   function enabled(key) {
@@ -174,6 +179,7 @@ const C = {
   sage:     '\x1b[94m',   // bright blue — SAGE (thinking OCR)
   argus:    '\x1b[93m',   // bright yellow — ARGUS pending-accept watcher
   ambient:  '\x1b[96m',   // bright cyan
+  echo:     '\x1b[92m',   // bright green — ECHO silence / presence watcher
   music:    '\x1b[93m',   // bright yellow
   warn:     '\x1b[33m',
   reset:    '\x1b[0m',
@@ -429,6 +435,12 @@ ${C.reset}\n`);
     if (readArgusFromDotEnv() && existsSync(argusScript)) {
       log('argus', 'ARGUS (pending-accept watcher) will start in 1.5 s...');
       await start('argus', 'python', ['scripts/argus.py'], { delayMs: 1500 });
+    }
+
+    const silenceScript = path.join(ROOT, 'scripts', 'friday-silence-watch.py');
+    if (readSilenceWatchFromDotEnv() && existsSync(silenceScript)) {
+      log('echo', 'ECHO silence watcher will start in five seconds...');
+      await start('echo', 'python', ['scripts/friday-silence-watch.py'], { delayMs: 5000 });
     }
 
     const ambientOn =

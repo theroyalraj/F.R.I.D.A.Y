@@ -74,6 +74,13 @@ export const VOICE_AGENT_PERSONA_DEFAULTS = {
     rate: '',
     personality: 'Listen path only; does not speak independently.',
   },
+  echo: {
+    name: 'Echo',
+    title: 'Director of Presence',
+    voice: 'en-US-MichelleNeural',
+    rate: '',
+    personality: 'Warm check-ins when the room has been quiet; invites interaction without nagging.',
+  },
 };
 
 function _redisUrl() {

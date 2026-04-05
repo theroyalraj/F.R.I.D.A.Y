@@ -63,7 +63,7 @@
 /* ── Top Bar ───────────────────────────────────────────────── */
 .top-bar {
   position: relative;
-  z-index: 20;
+  z-index: 60;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -75,7 +75,7 @@
 /* OpenClaw stack + persona registry strip (Listen default) */
 .openclaw-status-bar {
   position: relative;
-  z-index: 19;
+  z-index: 55;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -237,6 +237,74 @@
 .orb-listening .orb-circle { border-color: rgba(52, 211, 153, 0.12); box-shadow: 0 0 18px rgba(52, 211, 153, 0.06); }
 .orb-processing .orb-circle { border-color: rgba(255, 184, 0, 0.12); animation: pulse 1.5s ease-in-out infinite; }
 .orb-speaking .orb-circle { border-color: rgba(138, 92, 246, 0.15); box-shadow: 0 0 22px rgba(138, 92, 246, 0.08); }
+
+/* Siri-style listening orb: outward pulses + cooler core (distinct from centre overlay while speaking) */
+.orb-siri-listen .orb-circle {
+  position: relative;
+  overflow: visible;
+  border-color: rgba(45, 212, 191, 0.22);
+  box-shadow:
+    0 0 20px rgba(45, 212, 191, 0.12),
+    0 0 40px rgba(56, 189, 248, 0.08);
+  background: radial-gradient(circle at 38% 36%, rgba(255, 255, 255, 0.14) 0%, transparent 38%),
+    radial-gradient(circle at 62% 68%, rgba(45, 212, 191, 0.18) 0%, transparent 42%),
+    radial-gradient(circle at 50% 50%, rgba(74, 123, 247, 0.12), rgba(0, 0, 0, 0.45));
+}
+
+.orb-siri-listen .orb-circle::before,
+.orb-siri-listen .orb-circle::after {
+  content: '';
+  position: absolute;
+  inset: -6px;
+  border-radius: 50%;
+  border: 1px solid rgba(45, 212, 191, 0.35);
+  pointer-events: none;
+  z-index: -1;
+  animation: siriListenRing 2.1s ease-out infinite;
+}
+
+.orb-siri-listen .orb-circle::after {
+  animation-delay: 0.95s;
+  border-color: rgba(56, 189, 248, 0.28);
+}
+
+@keyframes siriListenRing {
+  0% {
+    transform: scale(0.88);
+    opacity: 0.65;
+  }
+  100% {
+    transform: scale(1.38);
+    opacity: 0;
+  }
+}
+
+.orb-siri-listen {
+  overflow: visible;
+  margin-bottom: 4px;
+}
+
+.app.light .orb-siri-listen .orb-circle {
+  border-color: rgba(13, 148, 136, 0.25);
+  box-shadow: 0 0 18px rgba(13, 148, 136, 0.1);
+  background: radial-gradient(circle at 38% 36%, rgba(255, 255, 255, 0.55) 0%, transparent 40%),
+    radial-gradient(circle at 62% 68%, rgba(45, 212, 191, 0.15) 0%, transparent 42%),
+    radial-gradient(circle at 50% 50%, rgba(96, 165, 250, 0.1), rgba(248, 250, 252, 0.95));
+}
+
+.app.light .orb-siri-listen .orb-circle::before,
+.app.light .orb-siri-listen .orb-circle::after {
+  border-color: rgba(13, 148, 136, 0.3);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .orb-siri-listen .orb-circle::before,
+  .orb-siri-listen .orb-circle::after {
+    animation: none;
+    opacity: 0.2;
+    transform: scale(1.05);
+  }
+}
 
 @keyframes pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.05); } }
 
@@ -1357,3 +1425,128 @@
   border-color: rgba(0, 0, 0, 0.12);
   color: rgba(0, 0, 0, 0.55);
 }
+
+/* ── Speak Confirm Modal ───────────────────────────────────────── */
+.speak-confirm-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 300;
+  backdrop-filter: blur(4px);
+  animation: fade-in 0.15s ease;
+}
+
+.speak-confirm-modal {
+  width: min(420px, 90vw);
+  background: linear-gradient(135deg, rgba(20, 20, 35, 0.98), rgba(30, 25, 45, 0.98));
+  border: 1px solid rgba(138, 92, 246, 0.2);
+  border-radius: 16px;
+  padding: 24px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  animation: pop 0.2s ease-out;
+}
+
+.speak-confirm-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.speak-confirm-icon { font-size: 1.8rem; line-height: 1; }
+
+.speak-confirm-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.speak-confirm-message {
+  font-size: 0.88rem;
+  color: rgba(255, 255, 255, 0.6);
+  margin-bottom: 14px;
+  line-height: 1.4;
+}
+
+.speak-confirm-preview {
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(138, 92, 246, 0.15);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 16px;
+}
+
+.speak-confirm-label {
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: rgba(255, 255, 255, 0.35);
+  display: block;
+  margin-bottom: 5px;
+}
+
+.speak-confirm-text {
+  font-size: 0.82rem;
+  color: rgba(255, 255, 255, 0.75);
+  line-height: 1.35;
+  font-family: 'Share Tech Mono', monospace;
+}
+
+.speak-confirm-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.speak-confirm-btn-cancel,
+.speak-confirm-btn-confirm {
+  flex: 1;
+  padding: 9px 12px;
+  border-radius: 10px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  transition: all 0.15s;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.speak-confirm-btn-cancel {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.speak-confirm-btn-cancel:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.65);
+}
+
+.speak-confirm-btn-confirm {
+  background: linear-gradient(135deg, rgba(52, 211, 153, 0.15), rgba(99, 102, 241, 0.15));
+  border: 1px solid rgba(52, 211, 153, 0.3);
+  color: #6ee7b7;
+}
+
+.speak-confirm-btn-confirm:hover {
+  background: linear-gradient(135deg, rgba(52, 211, 153, 0.25), rgba(99, 102, 241, 0.25));
+  border-color: rgba(52, 211, 153, 0.5);
+  transform: scale(1.01);
+}
+
+.light .speak-confirm-modal {
+  background: linear-gradient(135deg, rgba(245, 245, 250, 0.98), rgba(250, 248, 255, 0.98));
+  border-color: rgba(99, 60, 210, 0.2);
+}
+
+.light .speak-confirm-title { color: rgba(0, 0, 0, 0.85); }
+.light .speak-confirm-message { color: rgba(0, 0, 0, 0.6); }
+.light .speak-confirm-preview { background: rgba(0, 0, 0, 0.02); border-color: rgba(99, 60, 210, 0.1); }
+.light .speak-confirm-label { color: rgba(0, 0, 0, 0.3); }
+.light .speak-confirm-text { color: rgba(0, 0, 0, 0.8); }
+.light .speak-confirm-btn-cancel { background: rgba(0, 0, 0, 0.03); border-color: rgba(0, 0, 0, 0.08); color: rgba(0, 0, 0, 0.45); }
+.light .speak-confirm-btn-cancel:hover { background: rgba(0, 0, 0, 0.06); color: rgba(0, 0, 0, 0.65); }
+.light .speak-confirm-btn-confirm { border-color: rgba(99, 60, 210, 0.3); color: #633cbe; }

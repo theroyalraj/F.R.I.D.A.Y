@@ -97,6 +97,13 @@ export async function buildOpenclawStatus() {
         intervalMinutes: musicIntervalMin,
         autoplayOn: envBool('FRIDAY_AUTOPLAY', true),
       },
+      silenceWatch: {
+        note: 'Python friday-silence-watch.py — ECHO check-in after idle (Redis friday:tts:last_activity)',
+        enabled: envBool('FRIDAY_SILENCE_WATCH', true),
+        idleSec: envInt('FRIDAY_SILENCE_IDLE_SEC', 600),
+        rearmSec: envInt('FRIDAY_SILENCE_REARM_SEC', 600),
+        pollSec: envInt('FRIDAY_SILENCE_POLL_SEC', 15),
+      },
     },
     pcAgent,
   };

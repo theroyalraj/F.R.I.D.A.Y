@@ -32,11 +32,11 @@ console.log('OK: tables', tables.join(', '));
 
 await pool.end();
 
-const { getTodos, addTodo, deleteTodo } = await import('../pc-agent/src/todosDb.js');
-const n = (await getTodos()).length;
-const todo = await addTodo({ title: 'smoke-mjs-todo', source: 'smoke-mjs' });
+const { getTodos, addTodo, deleteTodo, LEGACY_TODO_SCOPE } = await import('../pc-agent/src/todosDb.js');
+const n = (await getTodos(LEGACY_TODO_SCOPE)).length;
+const todo = await addTodo({ title: 'smoke-mjs-todo', source: 'smoke-mjs' }, LEGACY_TODO_SCOPE);
 console.log('OK: todosDb add/get, count was', n, 'new id', todo.id);
-await deleteTodo(todo.id);
+await deleteTodo(todo.id, LEGACY_TODO_SCOPE);
 console.log('OK: todosDb delete');
 
 const ai = await import('../pc-agent/src/actionItemsDb.js');

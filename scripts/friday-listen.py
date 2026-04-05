@@ -45,6 +45,7 @@ import threading
 import time
 import wave
 from pathlib import Path
+from typing import Callable, Optional
 
 # ── Load .env from repo root ───────────────────────────────────────────────────
 root = Path(__file__).resolve().parent.parent
@@ -280,7 +281,8 @@ def _try_answer_music_scheduler_offer(text: str, lower: str) -> bool:
                 roa_f = float(roa)
             except (TypeError, ValueError):
                 roa_f = 0.0
-            # -1 = scheduler still speaking / post-prompt gap; ignore mic until reopened (0 = open).
+            # -1 = scheduler still speaking (pre-TTS write). Positive = unix time when yes/no is accepted;
+            # 0 = open immediately (legacy). Block while time.time() < gate.
             if roa_f < 0 or (roa_f > 0 and time.time() < roa_f):
                 return False
     except Exception:
@@ -322,14 +324,24 @@ def _try_answer_music_scheduler_offer(text: str, lower: str) -> bool:
             post_event("heard", text)
             reply = pick_music_yes_ack()
             post_event("speak", reply)
-            speak(reply)
+            speak(
+                reply,
+                on_done=lambda: post_event(
+                    "listening", f"Ready for your command, {USER_DISPLAY}."
+                ),
+            )
             return True
         if _no(t):
             _MUSIC_OFFER_RESPONSE_FILE.write_text("no", encoding="utf-8")
             post_event("heard", text)
             reply = pick_music_no_ack()
             post_event("speak", reply)
-            speak(reply)
+            speak(
+                reply,
+                on_done=lambda: post_event(
+                    "listening", f"Ready for your command, {USER_DISPLAY}."
+                ),
+            )
             return True
     except OSError:
         pass
@@ -382,7 +394,13 @@ def _wait_for_tts_clear(timeout: float = 45.0) -> None:
         time.sleep(0.25)
 
 
-def speak(text: str, *, jarvis: bool = False, priority: bool = True):
+def speak(
+    text: str,
+    *,
+    jarvis: bool = False,
+    priority: bool = True,
+    on_done: Optional[Callable[[], None]] = None,
+):
     from friday_speaker import speaker
 
     log.info("-> speak: %s", text[:80])
@@ -416,6 +434,11 @@ def speak(text: str, *, jarvis: bool = False, priority: bool = True):
                     _speak_fallback(text)
                     _write_last_spoken_ts()
         finally:
+            if on_done:
+                try:
+                    on_done()
+                except Exception as e:
+                    log.warning("speak on_done failed: %s", e)
             time.sleep(_POST_SPEAK_COOLDOWN)
             _speaking.clear()
     threading.Thread(target=_run, daemon=True).start()
@@ -853,7 +876,12 @@ def main():
         except sr.RequestError as e:
             log.warning("Google STT error: %s", e)
             post_event("error", f"Google STT error: {e}")
-            speak(f"Speech recognition error, {USER_DISPLAY}. Check your internet connection.")
+            speak(
+                f"Speech recognition error, {USER_DISPLAY}. Check your internet connection.",
+                on_done=lambda: post_event(
+                    "listening", f"Ready for your command, {USER_DISPLAY}."
+                ),
+            )
             time.sleep(2)
             continue
         except Exception as e:
@@ -862,6 +890,11 @@ def main():
 
         text = text.strip()
         if not text:
+            continue
+
+        lower_raw = text.lower().strip()
+        # Music scheduler yes/no must work without wake word (otherwise "yes" is never heard).
+        if _try_answer_music_scheduler_offer(text, lower_raw):
             continue
 
         # Wake-word filter
@@ -874,9 +907,6 @@ def main():
         log.info("► %s", text)
 
         lower = text.lower().strip()
-
-        if _try_answer_music_scheduler_offer(text, lower):
-            continue
 
         # Stop background music by voice only after grace; does not shut down the daemon.
         if _is_music_stop_phrase(lower) and friday_play_music_hold_active():
@@ -924,8 +954,12 @@ def main():
         ])
         if lower in ("status", "are you there", "hello", "hey friday", "friday"):
             post_event("speak", ping_reply)
-            speak(ping_reply)
-            post_event("listening", f"Ready for your command, {USER_DISPLAY}.")
+            speak(
+                ping_reply,
+                on_done=lambda: post_event(
+                    "listening", f"Ready for your command, {USER_DISPLAY}."
+                ),
+            )
             continue
 
         # Ambient frequency control (semantic intercept before routing to agent)
@@ -970,8 +1004,12 @@ def main():
         spoken = reply if len(reply) <= 1000 else reply[:997] + "…"
         post_event("reply", spoken)
         post_event("speak", spoken)
-        speak(spoken)
-        post_event("listening", f"Ready for your command, {USER_DISPLAY}.")
+        speak(
+            spoken,
+            on_done=lambda: post_event(
+                "listening", f"Ready for your command, {USER_DISPLAY}."
+            ),
+        )
 
     log.info("Voice daemon stopped.")
 

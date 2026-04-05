@@ -9,6 +9,8 @@ CREATE TABLE IF NOT EXISTS todos (
   priority TEXT NOT NULL DEFAULT 'medium'
     CHECK (priority IN ('high', 'medium', 'low')),
   done BOOLEAN NOT NULL DEFAULT false,
+  pinned BOOLEAN NOT NULL DEFAULT false,
+  silent_remind BOOLEAN NOT NULL DEFAULT false,
   source TEXT NOT NULL DEFAULT 'manual',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()

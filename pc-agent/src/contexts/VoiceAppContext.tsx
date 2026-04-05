@@ -173,7 +173,6 @@ export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           setConnectionStatus('speaking');
           break;
         case 'reply':
-          setConnectionStatus('listening');
           addBubble({
             type: 'friday',
             text,

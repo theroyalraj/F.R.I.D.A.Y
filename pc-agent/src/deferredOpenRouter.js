@@ -2,9 +2,9 @@
  * OpenRouter fallback after Anthropic rate limits — runs off the request hot path
  * so the voice stack and event loop get a turn before the outbound call.
  *
- * Results are pushed via SSE (type "reply"). The HTTP ack sets speakAsync false so
- * server speak-async is not fired for the rate-limit status line; UIs show or speak
- * the real answer when they handle the SSE event.
+ * Results are pushed via SSE: "speak" + "reply" (+ delayed "listening" for UIs with no
+ * local TTS). The HTTP ack sets speakAsync false so server speak-async is not fired
+ * for the rate-limit status line; the Friday web orb speaks the SSE text locally.
  */
 
 import { callOpenRouterChat, openRouterModelForTier } from './openRouterApi.js';
@@ -45,14 +45,20 @@ export function scheduleOpenRouterFallback(ctx) {
         });
         const text = (result.text || '').trim();
         if (text && emitSse) {
+          emitSse('speak', { text });
           emitSse('reply', { text });
+          setTimeout(() => emitSse('listening', {}), 120);
         } else if (emitSse) {
           emitSse('error', { text: 'OpenRouter returned an empty reply.' });
+          setTimeout(() => emitSse('listening', {}), 120);
         }
       } catch (e) {
         const msg = String(e?.message || e).slice(0, 500);
         ctx.log?.warn({ err: msg }, 'deferred OpenRouter failed');
-        if (emitSse) emitSse('error', { text: `OpenRouter failed: ${msg}` });
+        if (emitSse) {
+          emitSse('error', { text: `OpenRouter failed: ${msg}` });
+          setTimeout(() => emitSse('listening', {}), 120);
+        }
       }
     })();
   });

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import styles from '../styles/auth.module.css';
 
@@ -7,20 +7,41 @@ type Props = {
   theme?: 'light' | 'dark';
 };
 
+const SALUTATIONS = [
+  { value: '', label: 'No title' },
+  { value: 'Mr.', label: 'Mr.' },
+  { value: 'Ms.', label: 'Ms.' },
+  { value: 'Mx.', label: 'Mx.' },
+  { value: 'Dr.', label: 'Dr.' },
+  { value: 'Prof.', label: 'Prof.' },
+] as const;
+
 const SignupPage: React.FC<Props> = ({ onBack, theme = 'dark' }) => {
   const { signup } = useAuth();
-  const [name, setName] = useState('');
+  const [salutation, setSalutation] = useState('');
+  const [givenName, setGivenName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  const composedName = useMemo(() => {
+    const g = givenName.trim();
+    if (!g) return '';
+    const s = salutation.trim();
+    return s ? `${s} ${g}` : g;
+  }, [salutation, givenName]);
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErr(null);
+    if (!composedName) {
+      setErr('Please enter your name (you can pick a title from the dropdown first).');
+      return;
+    }
     setBusy(true);
     try {
-      await signup(email.trim(), password, name.trim());
+      await signup(email.trim(), password, composedName);
     } catch (ex) {
       setErr(ex instanceof Error ? ex.message : 'Signup failed');
     } finally {
@@ -38,15 +59,37 @@ const SignupPage: React.FC<Props> = ({ onBack, theme = 'dark' }) => {
         {err ? <div className={styles.err}>{err}</div> : null}
         <form onSubmit={(e) => void submit(e)} autoComplete="on" method="post" action="#">
           <div className={styles.field}>
-            <label htmlFor="su-name">Your name</label>
+            <label htmlFor="su-salutation">How should we address you? (title)</label>
+            <select
+              id="su-salutation"
+              name="honorific-prefix"
+              value={salutation}
+              onChange={(e) => setSalutation(e.target.value)}
+              autoComplete="honorific-prefix"
+            >
+              {SALUTATIONS.map((o) => (
+                <option key={o.value || 'none'} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className={styles.field}>
+            <label htmlFor="su-given">Your name</label>
             <input
-              id="su-name"
-              name="name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              autoComplete="name"
-              placeholder="Full name"
+              id="su-given"
+              name="given-name"
+              value={givenName}
+              onChange={(e) => setGivenName(e.target.value)}
+              autoComplete="given-name"
+              placeholder="Given name or full name"
+              required
             />
+            {composedName ? (
+              <span className={styles.hint} aria-live="polite">
+                Saved as: {composedName}
+              </span>
+            ) : null}
           </div>
           <div className={styles.field}>
             <label htmlFor="su-email">Email</label>

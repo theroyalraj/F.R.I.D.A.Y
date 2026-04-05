@@ -83,3 +83,53 @@ export function signUserToken(userId, email, orgId, role) {
     { expiresIn: '30d' },
   );
 }
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/**
+ * Todos/reminders tenancy: Bearer PC_AGENT_SECRET → optional env default org/user, else legacy NULL bucket.
+ * Valid user JWT → orgId + sub (user id). No auth → legacy NULL bucket.
+ * Invalid Bearer (not secret, not valid JWT) → 401.
+ * Sets req.todoScope = { orgId: string|null, userId: string|null }, req.todoAuthKind.
+ * @param {string} agentSecret PC_AGENT_SECRET
+ */
+export function todoRequestContext(agentSecret) {
+  return (req, res, next) => {
+    const h = req.headers.authorization || '';
+    const token = h.startsWith('Bearer ') ? h.slice(7).trim() : '';
+    const SECRET = String(agentSecret || '').trim();
+
+    if (SECRET && token === SECRET) {
+      req.todoAuthKind = 'agent';
+      const o = (process.env.OPENCLAW_TODO_DEFAULT_ORG_ID || '').trim();
+      const u = (process.env.OPENCLAW_TODO_DEFAULT_USER_ID || '').trim();
+      req.todoScope =
+        o && u && UUID_RE.test(o) && UUID_RE.test(u)
+          ? { orgId: o, userId: u }
+          : { orgId: null, userId: null };
+      return next();
+    }
+
+    if (!token) {
+      req.todoAuthKind = 'anonymous';
+      req.todoScope = { orgId: null, userId: null };
+      return next();
+    }
+
+    try {
+      const secret = getJwtSecret();
+      const decoded = jwt.verify(token, secret);
+      const orgId = decoded.orgId != null ? String(decoded.orgId).trim() : '';
+      const userId = decoded.sub != null ? String(decoded.sub).trim() : '';
+      if (!orgId || !userId || !UUID_RE.test(orgId) || !UUID_RE.test(userId)) {
+        return res.status(401).json({ error: 'Invalid token scope for todos' });
+      }
+      req.todoAuthKind = 'user';
+      req.todoScope = { orgId, userId };
+      return next();
+    } catch {
+      return res.status(401).json({ error: 'Invalid or expired token' });
+    }
+  };
+}

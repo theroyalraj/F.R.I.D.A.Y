@@ -66,7 +66,8 @@
 }
 
 .field input,
-.field textarea {
+.field textarea,
+.field select {
   font: inherit;
   font-size: 1rem;
   line-height: 1.35;
@@ -77,6 +78,16 @@
   background: rgba(0, 0, 0, 0.35);
   color: var(--fr-text, #f4f4f8);
   width: 100%;
+}
+
+.field select {
+  cursor: pointer;
+  appearance: auto;
+}
+
+.field select option {
+  color: #111827;
+  background: #fff;
 }
 
 .field input::placeholder,
@@ -91,7 +102,8 @@
 }
 
 .light .field input,
-.light .field textarea {
+.light .field textarea,
+.light .field select {
   background: #fff;
   color: #111827;
   border-color: #d1d5db;
@@ -106,6 +118,25 @@
   font-size: 0.85rem;
   color: #fb7185;
   margin-bottom: 0.75rem;
+}
+
+.hint {
+  display: block;
+  font-size: 0.78rem;
+  opacity: 0.72;
+  margin-top: 0.25rem;
+  line-height: 1.35;
+}
+
+.light .hint {
+  color: #4b5563;
+}
+
+.steps {
+  font-size: 0.88rem;
+  opacity: 0.8;
+  margin-bottom: 1rem;
+  line-height: 1.45;
 }
 
 .actions {

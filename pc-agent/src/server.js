@@ -356,6 +356,17 @@ voiceRouter.post('/speak-async', async (req, res) => {
     if (line) req.log?.warn({ fridaySpeak: line }, '/voice/speak-async stderr');
   });
 
+  const preview = text.length > 240 ? `${text.slice(0, 240)}…` : text;
+  broadcastEvent('speak', { text: preview });
+  let listenSent = false;
+  const emitListenDone = () => {
+    if (listenSent) return;
+    listenSent = true;
+    broadcastEvent('listening', {});
+  };
+  child.once('close', emitListenDone);
+  child.once('error', emitListenDone);
+
   res.json({ ok: true, text: text.slice(0, 60) });
 });
 
@@ -716,7 +727,7 @@ app.use('/perception', createPerceptionRouter(auth));
 app.use('/settings', createSettingsRouter(auth));
 app.use('/automation', createAutomationRouter(auth));
 app.use('/integrations', createIntegrationsRouter(authJwtOrAgentSecret(SECRET)));
-app.use('/todos', createTodosRouter(broadcastEvent));
+app.use('/todos', createTodosRouter(broadcastEvent, SECRET));
 app.use('/action-items', createActionItemsRouter());
 
 app.use((err, req, res, _next) => {

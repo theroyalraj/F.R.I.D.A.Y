@@ -81,6 +81,7 @@ Stop-PythonDaemon 'friday-reminder-watch' '*friday-reminder-watch*'
 Stop-PythonDaemon 'cursor-reply-watch'    '*cursor-reply-watch*'
 Stop-PythonDaemon 'sage (cursor-thinking-ocr)' '*cursor-thinking-ocr*'
 Stop-PythonDaemon 'friday-ambient'        '*friday-ambient*'
+Stop-PythonDaemon 'friday-silence-watch'  '*friday-silence-watch*'
 Stop-PythonDaemon 'music-scheduler'       '*friday-music-scheduler*'
 
 Start-Sleep -Milliseconds 600
@@ -133,6 +134,14 @@ if (Get-DotEnvBool 'FRIDAY_AMBIENT' $false) {
 }
 else {
   Write-Host "Skipping friday-ambient (FRIDAY_AMBIENT not on)" -ForegroundColor DarkGray
+}
+
+if (Get-DotEnvBool 'FRIDAY_SILENCE_WATCH' $true) {
+  Write-Host "Starting friday-silence-watch (ECHO)..." -ForegroundColor Green
+  Start-Process $py -ArgumentList @('scripts/friday-silence-watch.py') -WorkingDirectory $root -WindowStyle Hidden
+}
+else {
+  Write-Host "Skipping friday-silence-watch (FRIDAY_SILENCE_WATCH off)" -ForegroundColor DarkGray
 }
 
 if (Get-DotEnvBool 'FRIDAY_MUSIC_SCHEDULER' $false) {

@@ -2,6 +2,9 @@
  * todosDb.js — Todos + reminders in PostgreSQL (OPENCLAW_DATABASE_URL).
  * Migrates legacy data/todos.json once → data/todos.json.migrated.
  * If Postgres is unavailable, falls back to JSON file (same paths as before).
+ *
+ * All reads/writes are scoped by { orgId, userId } (see todoRequestContext in authMiddleware).
+ * Legacy bucket: both null — shared anonymous/device todos (no JWT, or agent without default env).
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs';
@@ -16,6 +19,11 @@ const DB_PATH = path.join(DATA_DIR, 'todos.json');
 const MIGRATED_PATH = path.join(DATA_DIR, 'todos.json.migrated');
 
 const EMPTY_DB = () => ({ todos: [], reminders: [] });
+
+/** @typedef {{ orgId: string|null, userId: string|null }} TodoScope */
+
+/** Anonymous / legacy file bucket — also used by smoke scripts. */
+export const LEGACY_TODO_SCOPE = Object.freeze({ orgId: null, userId: null });
 
 let migrationPromise = null;
 
@@ -57,6 +65,38 @@ function safeTodoUuid(s) {
   return t;
 }
 
+/** @param {TodoScope|undefined|null} scope */
+export function normalizeTodoScope(scope) {
+  if (!scope) return { orgId: null, userId: null };
+  return {
+    orgId: scope.orgId != null && scope.orgId !== '' ? String(scope.orgId) : null,
+    userId: scope.userId != null && scope.userId !== '' ? String(scope.userId) : null,
+  };
+}
+
+function matchesJsonScope(item, scope) {
+  const s = normalizeTodoScope(scope);
+  const o = item.orgId ?? null;
+  const u = item.userId ?? null;
+  if (s.orgId == null && s.userId == null) {
+    return o == null && u == null;
+  }
+  return o === s.orgId && u === s.userId;
+}
+
+/**
+ * SQL: legacy (both cols null) OR exact org/user match.
+ * @param {number} p1 1-based param index for org_id
+ * @param {string} [alias] table alias + dot
+ */
+function sqlTodoScope(p1, alias = '') {
+  const org = `${alias}org_id`;
+  const uid = `${alias}user_id`;
+  const a = p1;
+  const b = p1 + 1;
+  return `((($${a}::uuid IS NULL AND $${b}::uuid IS NULL) AND ${org} IS NULL AND ${uid} IS NULL) OR (${org} = $${a} AND ${uid} = $${b}))`;
+}
+
 function mapTodoRow(row) {
   if (!row) return null;
   const ca = row.created_at;
@@ -67,6 +107,8 @@ function mapTodoRow(row) {
     detail: row.detail ?? '',
     priority: row.priority,
     done: Boolean(row.done),
+    pinned: Boolean(row.pinned),
+    silentRemind: Boolean(row.silent_remind),
     source: row.source ?? 'manual',
     createdAt: ca instanceof Date ? ca.toISOString() : ca,
     updatedAt: ua instanceof Date ? ua.toISOString() : ua,
@@ -109,8 +151,8 @@ async function ensureJsonMigrated(pool) {
       for (const t of db.todos) {
         const id = t.id && String(t.id).length >= 32 ? t.id : crypto.randomUUID();
         await client.query(
-          `INSERT INTO todos (id, title, detail, priority, done, source, created_at, updated_at)
-           VALUES ($1::uuid, $2, $3, $4, $5, $6, COALESCE($7::timestamptz, now()), COALESCE($8::timestamptz, now()))
+          `INSERT INTO todos (id, title, detail, priority, done, pinned, silent_remind, source, org_id, user_id, created_at, updated_at)
+           VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, COALESCE($9::timestamptz, now()), COALESCE($10::timestamptz, now()))
            ON CONFLICT (id) DO NOTHING`,
           [
             id,
@@ -118,6 +160,8 @@ async function ensureJsonMigrated(pool) {
             String(t.detail || '').trim(),
             ['high', 'medium', 'low'].includes(t.priority) ? t.priority : 'medium',
             Boolean(t.done),
+            Boolean(t.pinned),
+            Boolean(t.silentRemind),
             String(t.source || 'manual').trim(),
             t.createdAt || null,
             t.updatedAt || null,
@@ -129,8 +173,8 @@ async function ensureJsonMigrated(pool) {
         let todoId = safeTodoUuid(r.todoId);
         if (todoId && !db.todos.some((x) => String(x.id) === String(todoId))) todoId = null;
         await client.query(
-          `INSERT INTO reminders (id, title, due_iso, due_natural, fired, fired_at, todo_id, created_at)
-           VALUES ($1::uuid, $2, $3::timestamptz, $4, $5, $6::timestamptz, $7::uuid, COALESCE($8::timestamptz, now()))
+          `INSERT INTO reminders (id, title, due_iso, due_natural, fired, fired_at, todo_id, org_id, user_id, created_at)
+           VALUES ($1::uuid, $2, $3::timestamptz, $4, $5, $6::timestamptz, $7::uuid, NULL, NULL, COALESCE($8::timestamptz, now()))
            ON CONFLICT (id) DO NOTHING`,
           [
             id,
@@ -167,21 +211,37 @@ function usePostgres() {
 
 // ── Postgres implementation ─────────────────────────────────────────────────
 
-export async function getTodos() {
+const TODO_SELECT =
+  'SELECT id, title, detail, priority, done, pinned, silent_remind, source, created_at, updated_at FROM todos';
+const REM_SELECT =
+  'SELECT id, title, due_iso, due_natural, fired, fired_at, todo_id, created_at FROM reminders';
+
+/**
+ * @param {TodoScope} [scope]
+ */
+export async function getTodos(scope = LEGACY_TODO_SCOPE) {
+  const s = normalizeTodoScope(scope);
   const pool = usePostgres();
-  if (!pool) return _readJson().todos;
+  if (!pool) {
+    return _readJson().todos.filter((t) => matchesJsonScope(t, s));
+  }
   await ensureJsonMigrated(pool);
   const r = await pool.query(
-    'SELECT id, title, detail, priority, done, source, created_at, updated_at FROM todos ORDER BY created_at DESC',
+    `${TODO_SELECT} WHERE ${sqlTodoScope(1)} ORDER BY created_at DESC`,
+    [s.orgId, s.userId],
   );
   return r.rows.map(mapTodoRow);
 }
 
 /**
- * @param {{ title: string, detail?: string, priority?: 'high'|'medium'|'low', source?: string }} item
+ * @param {{ title: string, detail?: string, priority?: 'high'|'medium'|'low', source?: string, pinned?: boolean, silentRemind?: boolean }} item
+ * @param {TodoScope} [scope]
  */
-export async function addTodo(item) {
+export async function addTodo(item, scope = LEGACY_TODO_SCOPE) {
+  const s = normalizeTodoScope(scope);
   const pool = usePostgres();
+  const pinned = Boolean(item.pinned);
+  const silentRemind = Boolean(item.silentRemind);
   if (!pool) {
     const db = _readJson();
     const todo = {
@@ -190,7 +250,11 @@ export async function addTodo(item) {
       detail: String(item.detail || '').trim(),
       priority: ['high', 'medium', 'low'].includes(item.priority) ? item.priority : 'medium',
       done: false,
+      pinned,
+      silentRemind,
       source: String(item.source || 'manual').trim(),
+      orgId: s.orgId,
+      userId: s.userId,
       createdAt: _nowIso(),
       updatedAt: _nowIso(),
     };
@@ -201,26 +265,34 @@ export async function addTodo(item) {
   await ensureJsonMigrated(pool);
   const pr = ['high', 'medium', 'low'].includes(item.priority) ? item.priority : 'medium';
   const r = await pool.query(
-    `INSERT INTO todos (title, detail, priority, done, source)
-     VALUES ($1, $2, $3, false, $4)
-     RETURNING id, title, detail, priority, done, source, created_at, updated_at`,
+    `INSERT INTO todos (title, detail, priority, done, pinned, silent_remind, source, org_id, user_id)
+     VALUES ($1, $2, $3, false, $4, $5, $6, $7::uuid, $8::uuid)
+     RETURNING id, title, detail, priority, done, pinned, silent_remind, source, created_at, updated_at`,
     [
       String(item.title || '').trim(),
       String(item.detail || '').trim(),
       pr,
+      pinned,
+      silentRemind,
       String(item.source || 'manual').trim(),
+      s.orgId,
+      s.userId,
     ],
   );
   return mapTodoRow(r.rows[0]);
 }
 
-export async function updateTodo(id, patch) {
+/**
+ * @param {TodoScope} [scope]
+ */
+export async function updateTodo(id, patch, scope = LEGACY_TODO_SCOPE) {
+  const s = normalizeTodoScope(scope);
   const pool = usePostgres();
   if (!pool) {
     const db = _readJson();
-    const idx = db.todos.findIndex((t) => t.id === id);
+    const idx = db.todos.findIndex((t) => t.id === id && matchesJsonScope(t, s));
     if (idx === -1) return null;
-    const allowed = ['title', 'detail', 'priority', 'done'];
+    const allowed = ['title', 'detail', 'priority', 'done', 'pinned', 'silentRemind'];
     for (const k of allowed) {
       if (patch[k] !== undefined) db.todos[idx][k] = patch[k];
     }
@@ -248,67 +320,107 @@ export async function updateTodo(id, patch) {
     sets.push(`done = $${n++}`);
     vals.push(Boolean(patch.done));
   }
+  if (patch.pinned !== undefined) {
+    sets.push(`pinned = $${n++}`);
+    vals.push(Boolean(patch.pinned));
+  }
+  if (patch.silentRemind !== undefined) {
+    sets.push(`silent_remind = $${n++}`);
+    vals.push(Boolean(patch.silentRemind));
+  }
+  const idParam = n++;
+  vals.push(id);
+  const scopeA = n;
+  n += 2;
+  vals.push(s.orgId, s.userId);
+  const scopeSql = sqlTodoScope(scopeA);
+
   if (!sets.length) {
     const cur = await pool.query(
-      'SELECT id, title, detail, priority, done, source, created_at, updated_at FROM todos WHERE id = $1::uuid',
-      [id],
+      `${TODO_SELECT} WHERE id = $${idParam}::uuid AND ${scopeSql}`,
+      vals,
     );
     return mapTodoRow(cur.rows[0]);
   }
   sets.push(`updated_at = now()`);
-  vals.push(id);
   const r = await pool.query(
-    `UPDATE todos SET ${sets.join(', ')} WHERE id = $${n}::uuid
-     RETURNING id, title, detail, priority, done, source, created_at, updated_at`,
+    `UPDATE todos SET ${sets.join(', ')} WHERE id = $${idParam}::uuid AND ${scopeSql}
+     RETURNING id, title, detail, priority, done, pinned, silent_remind, source, created_at, updated_at`,
     vals,
   );
   return mapTodoRow(r.rows[0]);
 }
 
-export async function deleteTodo(id) {
+/**
+ * @param {TodoScope} [scope]
+ */
+export async function deleteTodo(id, scope = LEGACY_TODO_SCOPE) {
+  const s = normalizeTodoScope(scope);
   const pool = usePostgres();
   if (!pool) {
     const db = _readJson();
     const before = db.todos.length;
-    db.todos = db.todos.filter((t) => t.id !== id);
-    db.reminders = db.reminders.filter((r) => r.todoId !== id);
+    db.todos = db.todos.filter((t) => !(t.id === id && matchesJsonScope(t, s)));
+    db.reminders = db.reminders.filter(
+      (r) => !(r.todoId === id && matchesJsonScope(r, s)),
+    );
     _writeJson(db);
     return db.todos.length < before;
   }
   await ensureJsonMigrated(pool);
-  const r = await pool.query('DELETE FROM todos WHERE id = $1::uuid', [id]);
+  const idParam = 1;
+  const scopeA = 2;
+  const scopeB = 3;
+  const r = await pool.query(
+    `DELETE FROM todos WHERE id = $${idParam}::uuid AND ${sqlTodoScope(scopeA)}`,
+    [id, s.orgId, s.userId],
+  );
   return r.rowCount > 0;
 }
 
-export async function getReminders({ includeFired = false } = {}) {
+/**
+ * @param {{ includeFired?: boolean, scope?: TodoScope }} opts
+ */
+export async function getReminders({ includeFired = false, scope = LEGACY_TODO_SCOPE } = {}) {
+  const s = normalizeTodoScope(scope);
   const pool = usePostgres();
   if (!pool) {
     const db = _readJson();
-    if (includeFired) return db.reminders;
-    return db.reminders.filter((r) => !r.fired);
+    let list = db.reminders.filter((r) => matchesJsonScope(r, s));
+    if (!includeFired) list = list.filter((r) => !r.fired);
+    return list;
   }
   await ensureJsonMigrated(pool);
+  const base = `${REM_SELECT} WHERE ${sqlTodoScope(1)}`;
   const sql = includeFired
-    ? 'SELECT id, title, due_iso, due_natural, fired, fired_at, todo_id, created_at FROM reminders ORDER BY created_at DESC'
-    : 'SELECT id, title, due_iso, due_natural, fired, fired_at, todo_id, created_at FROM reminders WHERE fired = false ORDER BY created_at DESC';
-  const r = await pool.query(sql);
+    ? `${base} ORDER BY created_at DESC`
+    : `${base} AND fired = false ORDER BY created_at DESC`;
+  const r = await pool.query(sql, [s.orgId, s.userId]);
   return r.rows.map(mapReminderRow);
 }
 
 /**
  * @param {{ title: string, dueIso?: string|null, dueNatural?: string, todoId?: string }} item
+ * @param {TodoScope} [scope]
  */
-export async function addReminder(item) {
+export async function addReminder(item, scope = LEGACY_TODO_SCOPE) {
+  const s = normalizeTodoScope(scope);
   const pool = usePostgres();
   if (!pool) {
     const db = _readJson();
+    let todoId = item.todoId || null;
+    if (todoId && !db.todos.some((t) => t.id === todoId && matchesJsonScope(t, s))) {
+      todoId = null;
+    }
     const reminder = {
       id: crypto.randomUUID(),
       title: String(item.title || '').trim(),
       dueIso: item.dueIso || null,
       dueNatural: String(item.dueNatural || '').trim(),
       fired: false,
-      todoId: item.todoId || null,
+      todoId,
+      orgId: s.orgId,
+      userId: s.userId,
       createdAt: _nowIso(),
     };
     db.reminders.unshift(reminder);
@@ -316,26 +428,39 @@ export async function addReminder(item) {
     return reminder;
   }
   await ensureJsonMigrated(pool);
-  const tid = safeTodoUuid(item.todoId);
+  let tid = safeTodoUuid(item.todoId);
+  if (tid) {
+    const chk = await pool.query(
+      `SELECT 1 FROM todos WHERE id = $1::uuid AND ${sqlTodoScope(2)}`,
+      [tid, s.orgId, s.userId],
+    );
+    if (!chk.rowCount) tid = null;
+  }
   const r = await pool.query(
-    `INSERT INTO reminders (title, due_iso, due_natural, fired, todo_id)
-     VALUES ($1, $2::timestamptz, $3, false, $4::uuid)
+    `INSERT INTO reminders (title, due_iso, due_natural, fired, todo_id, org_id, user_id)
+     VALUES ($1, $2::timestamptz, $3, false, $4::uuid, $5::uuid, $6::uuid)
      RETURNING id, title, due_iso, due_natural, fired, fired_at, todo_id, created_at`,
     [
       String(item.title || '').trim(),
       item.dueIso ? new Date(item.dueIso) : null,
       String(item.dueNatural || '').trim(),
       tid,
+      s.orgId,
+      s.userId,
     ],
   );
   return mapReminderRow(r.rows[0]);
 }
 
-export async function markReminderFired(id) {
+/**
+ * @param {TodoScope} [scope]
+ */
+export async function markReminderFired(id, scope = LEGACY_TODO_SCOPE) {
+  const s = normalizeTodoScope(scope);
   const pool = usePostgres();
   if (!pool) {
     const db = _readJson();
-    const r = db.reminders.find((x) => x.id === id);
+    const r = db.reminders.find((x) => x.id === id && matchesJsonScope(x, s));
     if (!r) return null;
     r.fired = true;
     r.firedAt = _nowIso();
@@ -344,35 +469,48 @@ export async function markReminderFired(id) {
   }
   await ensureJsonMigrated(pool);
   const r = await pool.query(
-    `UPDATE reminders SET fired = true, fired_at = now() WHERE id = $1::uuid
+    `UPDATE reminders SET fired = true, fired_at = now()
+     WHERE id = $1::uuid AND ${sqlTodoScope(2)}
      RETURNING id, title, due_iso, due_natural, fired, fired_at, todo_id, created_at`,
-    [id],
+    [id, s.orgId, s.userId],
   );
   return mapReminderRow(r.rows[0]);
 }
 
-export async function deleteReminder(id) {
+/**
+ * @param {TodoScope} [scope]
+ */
+export async function deleteReminder(id, scope = LEGACY_TODO_SCOPE) {
+  const s = normalizeTodoScope(scope);
   const pool = usePostgres();
   if (!pool) {
     const db = _readJson();
     const before = db.reminders.length;
-    db.reminders = db.reminders.filter((r) => r.id !== id);
+    db.reminders = db.reminders.filter((r) => !(r.id === id && matchesJsonScope(r, s)));
     _writeJson(db);
     return db.reminders.length < before;
   }
   await ensureJsonMigrated(pool);
-  const r = await pool.query('DELETE FROM reminders WHERE id = $1::uuid', [id]);
+  const r = await pool.query(
+    `DELETE FROM reminders WHERE id = $1::uuid AND ${sqlTodoScope(2)}`,
+    [id, s.orgId, s.userId],
+  );
   return r.rowCount > 0;
 }
 
-/** Get all reminders due within the next `windowSec` seconds. */
-export async function getDueReminders(windowSec = 60) {
+/**
+ * @param {number} [windowSec]
+ * @param {TodoScope} [scope]
+ */
+export async function getDueReminders(windowSec = 60, scope = LEGACY_TODO_SCOPE) {
+  const s = normalizeTodoScope(scope);
   const pool = usePostgres();
   if (!pool) {
     const db = _readJson();
     const now = Date.now();
     const horizon = now + windowSec * 1000;
     return db.reminders.filter((r) => {
+      if (!matchesJsonScope(r, s)) return false;
       if (r.fired) return false;
       if (!r.dueIso) return false;
       const due = new Date(r.dueIso).getTime();
@@ -382,13 +520,13 @@ export async function getDueReminders(windowSec = 60) {
   await ensureJsonMigrated(pool);
   const sec = Math.max(1, Number(windowSec) || 60);
   const r = await pool.query(
-    `SELECT id, title, due_iso, due_natural, fired, fired_at, todo_id, created_at
-     FROM reminders
+    `${REM_SELECT}
      WHERE fired = false
        AND due_iso IS NOT NULL
        AND due_iso <= (NOW() + ($1::double precision * INTERVAL '1 second'))
+       AND ${sqlTodoScope(2)}
      ORDER BY due_iso ASC`,
-    [sec],
+    [sec, s.orgId, s.userId],
   );
   return r.rows.map(mapReminderRow);
 }

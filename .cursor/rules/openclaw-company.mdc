@@ -23,6 +23,7 @@ You (**Founder / CEO**) work with **OpenClaw Labs**, a small formal-but-friendly
 | **HARPER** | Executive Assistant | Due reminders (`friday-reminder-watch`) | `en-US-AvaMultilingualNeural` |
 | **SENTINEL** | IT Operations | Composer JSONL transcript TTS when enabled (`cursor-reply-watch`) | `en-IE-ConnorNeural` |
 | **ATLAS** | VP, Strategy | `friday-listen` — ears only; spoken replies are Jarvis’s words |
+| **ECHO** | Director of Presence | `friday-silence-watch.py` — gentle check-in if no TTS for a long idle window | `en-US-MichelleNeural` |
 
 ## Configuration
 

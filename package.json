@@ -31,6 +31,7 @@
     "test:ambient-checkin": "python scripts/test-ambient-checkin.py",
     "voice:daemon": "python scripts/friday-listen.py",
     "start:ambient": "python scripts/friday-ambient.py",
+    "start:silence-watch": "python scripts/friday-silence-watch.py",
     "start:cursor-reply": "python scripts/cursor-reply-watch.py",
     "start:cursor-thinking-ocr": "python scripts/cursor-thinking-ocr.py",
     "start:argus": "python scripts/argus.py",

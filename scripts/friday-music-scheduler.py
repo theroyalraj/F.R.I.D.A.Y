@@ -31,7 +31,7 @@ Env vars (all optional — reads .env):
   FRIDAY_MUSIC_ASK_BEFORE_PLAY true = speak a prompt and wait for mic yes/no before playing
                                  (recommended true — avoids surprise music when the scheduler fires)
   FRIDAY_MUSIC_ASK_WAIT_SEC    seconds to wait for an answer (default: 90)
-  FRIDAY_MUSIC_ASK_POST_PROMPT_SEC  seconds of silence after the ask TTS before yes/no counts (default: 5)
+  FRIDAY_MUSIC_ASK_POST_PROMPT_SEC  seconds after ask TTS ends before mic yes/no counts (default: 4). Gated in friday-listen via timestamp (no extra scheduler sleep).
   FRIDAY_SCHEDULER_PLAY_SECONDS  clip length for scheduler plays (default: FRIDAY_PLAY_SECONDS)
   FRIDAY_PLAY_SECONDS          fallback when scheduler entry seconds unset (default: 45)
   FRIDAY_PLAY_VOLUME           ffplay volume 0-100 (default: 70)
@@ -219,14 +219,14 @@ def _ask_wait_sec() -> float:
 
 
 def _ask_post_prompt_sec() -> float:
-    """Seconds after ask TTS finishes before friday-listen may record yes/no (and before scheduler polls)."""
+    """Seconds after ask TTS ends before friday-listen accepts yes/no (unix gate in offer JSON)."""
     raw = os.environ.get("FRIDAY_MUSIC_ASK_POST_PROMPT_SEC", "").strip().split("#")[0].strip()
     if raw:
         try:
             return max(0.0, min(float(raw), 120.0))
         except ValueError:
             pass
-    return 5.0
+    return 4.0
 
 
 _MUSIC_ASK_PROMPTS = (
@@ -256,7 +256,7 @@ def _speak_ask(prompt: str) -> None:
             "FRIDAY_TTS_PRIORITY": "1",
             "FRIDAY_TTS_BYPASS_CURSOR_DEFER": "true",
         }
-    kw: dict = {"cwd": str(ROOT), "env": env, "timeout": 120}
+    kw: dict = {"cwd": str(ROOT), "env": env, "timeout": 90}
     if sys.platform == "win32":
         kw["creationflags"] = subprocess.CREATE_NO_WINDOW
     try:
@@ -327,11 +327,17 @@ def _run_ask_then_maybe_play() -> None:
         return
 
     prompt = _offer_prompt(song)
-    log.info("Music ask — prompt then %.0fs gap, then up to %.0fs for yes/no: %s", post_prompt, wait_sec, song)
+    log.info(
+        "Music ask — after TTS, %.0fs mic gate then up to %.0fs for yes/no: %s",
+        post_prompt,
+        wait_sec,
+        song,
+    )
     _speak_ask(prompt)
-    if post_prompt > 0:
-        time.sleep(post_prompt)
-    deadline = time.time() + wait_sec
+    # Open the mic window via timestamp in JSON (friday-listen gates on this). Do not sleep here —
+    # previously we slept while the file still had response_open_at=-1, doubling the dead time.
+    gate = time.time() + post_prompt
+    deadline = gate + wait_sec
     try:
         MUSIC_OFFER_FILE.write_text(
             json.dumps(
@@ -339,7 +345,7 @@ def _run_ask_then_maybe_play() -> None:
                     "deadline": deadline,
                     "song": song,
                     "wait_sec": wait_sec,
-                    "response_open_at": 0.0,
+                    "response_open_at": gate,
                 },
                 indent=None,
             ),
