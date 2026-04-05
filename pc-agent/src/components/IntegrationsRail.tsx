@@ -477,10 +477,6 @@ export const IntegrationsRail: React.FC<Props> = ({
                 variant="avatar"
               />
             </div>
-            <p className={styles['integrations-security-policy']}>
-              First full npm audit each day uses a twenty four hour cache. High or critical issues add a pinned todo and
-              optional Windows notify.
-            </p>
           </div>
           {isNarrow && (
             <div className={styles['integrations-mobile-head']}>

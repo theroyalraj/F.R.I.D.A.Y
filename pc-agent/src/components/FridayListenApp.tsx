@@ -36,7 +36,7 @@ const LS_ALWAYS_SPEAK = 'friday.alwaysSpeakViaUi';
 
 /** Preset Cursor tasks from the Listen top bar (include @cursor for IDE routing). */
 const QUICK_CURSOR_RAISE_MR =
-  '@cursor In this workspace git repo: push the current branch if it is ahead of origin, then run gh pr create against the default base with a clear title and body from recent commits and the diff summary. If an open pull request already exists for this head branch, do not create another; paste the existing link.';
+  '@cursor Follow .cursor/rules/github-pr-after-push.mdc. In this workspace git repo: push the current branch if it is ahead of origin, then use gh per that rule to open or update a PR with a clear title and body from recent commits and the diff summary. If a pull request already exists for this head branch, do not create another; paste the existing link.';
 const QUICK_CURSOR_NARRATED_REVIEW =
   '@cursor Review the current working tree diff. Reply with a tight code-review summary meant to be read aloud: main risks, missing tests or edge cases, style nits if any, and one closing verdict sentence.';
 
@@ -990,10 +990,6 @@ const FridayListenApp: React.FC = () => {
       <div className={styles['openclaw-stack-wrap']}>
         <div className={styles['openclaw-policy-bar']}>
           <SecurityScanPanel authHeaders={authHeaders} theme={theme} showToast={showToast} variant="avatar" />
-          <p className={styles['openclaw-policy-inline']}>
-            First full npm audit each day uses a twenty four hour cache. High or critical issues add a pinned todo and
-            optional Windows notify.
-          </p>
         </div>
         {openclawStrip && (
           <div className={styles['openclaw-status-bar']} role="status" aria-live="polite">
