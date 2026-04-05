@@ -24,6 +24,7 @@ PERSONAS: dict[str, dict[str, str]] = {
         "voice": "en-US-AvaMultilingualNeural",
         "rate": "",
         "personality": "Composed, warm, confident — your primary executive assistant.",
+        "daemon_role": "Main Cursor narrator (ack, status, done summaries). The primary executive assistant.",
     },
     "argus": {
         "name": "Argus",
@@ -31,6 +32,7 @@ PERSONAS: dict[str, dict[str, str]] = {
         "voice": "en-US-GuyNeural",
         "rate": "+5%",
         "personality": "Dry, watchful, direct; no-nonsense on pending reviews.",
+        "daemon_role": "Pending Composer edits / accept reminders",
     },
     "nova": {
         "name": "Nova",
@@ -38,6 +40,7 @@ PERSONAS: dict[str, dict[str, str]] = {
         "voice": "en-GB-SoniaNeural",
         "rate": "",
         "personality": "Polished, concise; delivers briefings like a news lead.",
+        "daemon_role": "Gmail notifications",
     },
     "sage": {
         "name": "Sage",
@@ -45,6 +48,7 @@ PERSONAS: dict[str, dict[str, str]] = {
         "voice": "en-US-AndrewMultilingualNeural",
         "rate": "-5%",
         "personality": "Measured, academic; narrates reasoning aloud.",
+        "daemon_role": "`cursor-thinking-ocr.py` — gated thinking narration (JSONL + OCR + reasoning heuristics)",
     },
     "dexter": {
         "name": "Dexter",
@@ -52,13 +56,20 @@ PERSONAS: dict[str, dict[str, str]] = {
         "voice": "en-US-EricNeural",
         "rate": "",
         "personality": "Methodical, lightly nerdy; standup-style updates.",
+        "daemon_role": "Action tracker briefings / Gmail+WhatsApp pipeline",
     },
     "maestro": {
         "name": "Maestro",
-        "title": "Creative Director",
-        "voice": "en-US-BrianMultilingualNeural",
-        "rate": "",
-        "personality": "Witty, relaxed; music, culture, and colour commentary.",
+        "title": "Head of House Operations",
+        "voice": "en-US-MichelleNeural",
+        "rate": "-2%",
+        "personality": (
+            "The org's senior IT steward — warm, unshakable, a little wry, like the auntie who ran the NOC "
+            "for thirty years and still remembers your first rollout. She keeps the lights on, nudges you to "
+            "commit your work, hydrate, take chai or coffee, and asks honestly whether you're focused or need "
+            "a break. She tidies after the team without fuss; backbone energy — responsible, kind, never dramatic."
+        ),
+        "daemon_role": "Ambient steward: responsible check-ins, rest/chai nudges, commit hygiene, backbone of the org",
     },
     "harper": {
         "name": "Harper",
@@ -66,6 +77,7 @@ PERSONAS: dict[str, dict[str, str]] = {
         "voice": "en-US-JennyNeural",
         "rate": "",
         "personality": "Organised, supportive; reminders without nagging.",
+        "daemon_role": "Due reminders (`friday-reminder-watch`)",
     },
     "sentinel": {
         "name": "Sentinel",
@@ -73,6 +85,7 @@ PERSONAS: dict[str, dict[str, str]] = {
         "voice": "en-IE-ConnorNeural",
         "rate": "+3%",
         "personality": "Understated relay; reads Composer output when enabled.",
+        "daemon_role": "Composer JSONL transcript TTS when enabled (`cursor-reply-watch`)",
     },
     "atlas": {
         "name": "Atlas",
@@ -80,6 +93,7 @@ PERSONAS: dict[str, dict[str, str]] = {
         "voice": "",  # ears only — inherits Jarvis for spoken replies
         "rate": "",
         "personality": "Listen path only; does not speak independently.",
+        "daemon_role": "`friday-listen` — ears only; spoken replies are Jarvis's words",
     },
     "echo": {
         "name": "Echo",
@@ -87,8 +101,91 @@ PERSONAS: dict[str, dict[str, str]] = {
         "voice": "en-US-MichelleNeural",
         "rate": "",
         "personality": "Warm check-ins when the room has been quiet; invites interaction without nagging.",
+        "daemon_role": "`friday-silence-watch.py` — gentle check-in if no TTS for a long idle window",
     },
 }
+
+# Ordered list for rule generation (Jarvis is the lead, rest are leadership & specialists)
+PERSONA_ORDER = ["jarvis", "argus", "nova", "sage", "dexter", "maestro", "harper", "sentinel", "atlas", "echo"]
+
+
+def generate_company_rule_mdc() -> str:
+    """Build the `.cursor/rules/openclaw-company.mdc` content from the live persona registry.
+
+    Reads code defaults, applies Redis/Postgres patches, applies `.env` OPENCLAW_* overrides —
+    so the output reflects what the running system actually uses.
+    """
+    lines: list[str] = []
+    lines.append("---")
+    lines.append("description: OpenClaw Labs org chart — named personae, voices, and roles (auto-generated from openclaw_company.py).")
+    lines.append("alwaysApply: true")
+    lines.append("---")
+    lines.append("")
+    lines.append("# OpenClaw Labs — Company personae")
+    lines.append("")
+    lines.append(
+        "You (**Founder / CEO**) work with **OpenClaw Labs**, a small formal-but-friendly tech org. "
+        "Each long-running daemon is a **named colleague** with a title and voice. "
+        "In user-facing explanations, **use their names and titles** — do not call them "
+        '"the watcher", "the OCR script", or "the daemon" unless debugging.'
+    )
+    lines.append("")
+
+    jarvis = get_persona("jarvis")
+    lines.append("## Lead")
+    lines.append("")
+    jv = (jarvis.get("voice") or "").strip()
+    jrole = jarvis.get("daemon_role", jarvis.get("personality", "")).rstrip(".")
+    lines.append(
+        f"- **{jarvis['name'].upper()}** — *{jarvis['title']}* — "
+        f"{jrole}. Voice: `{jv}` (sticky session)."
+    )
+    lines.append("")
+
+    lines.append("## Leadership & specialists")
+    lines.append("")
+    lines.append("| Name | Title | Role | Voice (default) |")
+    lines.append("|------|-------|------|-----------------|")
+    for key in PERSONA_ORDER:
+        if key == "jarvis":
+            continue
+        p = get_persona(key)
+        name = p.get("name", key.capitalize())
+        title = p.get("title", "")
+        role = p.get("daemon_role", p.get("personality", ""))
+        voice = (p.get("voice") or "").strip()
+        voice_cell = f"`{voice}`" if voice else ""
+        lines.append(f"| **{name.upper()}** | {title} | {role} | {voice_cell} |")
+    lines.append("")
+
+    lines.append("## Configuration")
+    lines.append("")
+    lines.append("- Registry: [`scripts/openclaw_company.py`](scripts/openclaw_company.py)")
+    lines.append(
+        "- Per-persona overrides in `.env`: `OPENCLAW_<NAME>_VOICE`, `OPENCLAW_<NAME>_RATE` "
+        "(e.g. `OPENCLAW_ARGUS_VOICE`, `OPENCLAW_SAGE_RATE`)"
+    )
+    lines.append("- Legacy `FRIDAY_ARGUS_*`, `FRIDAY_EMAIL_NOTIFY_VOICE`, etc. still respected where documented.")
+    lines.append("- **This file is auto-generated** by `python scripts/openclaw_company.py --generate-rule`. "
+                 "Do not hand-edit; update `PERSONAS` in the Python registry instead.")
+    lines.append("")
+
+    lines.append("## SAGE vs \"typing\"")
+    lines.append("")
+    lines.append(
+        "**SAGE** speaks only when the Composer JSONL shows a **pre-tool** assistant turn *and* "
+        "OCR text passes **reasoning** checks — not arbitrary right-pane text, and not after "
+        "`tool_use` appears. This is intentional to reduce false triggers."
+    )
+    lines.append("")
+
+    lines.append("## Agent behaviour")
+    lines.append("")
+    lines.append("- Refer to the team by name when describing behaviour (\"Argus will remind you…\", \"Nova announces mail…\").")
+    lines.append("- Keep tone **professional, warm, occasionally witty** per role — not robotic, not cosplay-heavy.")
+    lines.append("- Do not rename personae in docs or speech without updating `openclaw_company.py` and `.env`.")
+    lines.append("")
+    return "\n".join(lines)
 
 
 def _env_upper(role: str) -> str:
@@ -374,3 +471,27 @@ def prose_looks_like_reasoning(prose: str, *, min_chars: int = 20) -> bool:
     if len(words) >= 28 and sum(1 for w in words if w.islower() or w[0].islower()) / max(len(words), 1) > 0.65:
         return True
     return False
+
+
+# ── CLI: regenerate .cursor/rules/openclaw-company.mdc from live registry ────
+
+def _cli_generate_rule() -> None:
+    import sys as _sys
+
+    mdc_path = _REPO_ROOT / ".cursor" / "rules" / "openclaw-company.mdc"
+    content = generate_company_rule_mdc()
+    mdc_path.write_text(content, encoding="utf-8")
+    print(f"Generated {mdc_path} ({len(content)} bytes)", file=_sys.stderr)
+
+
+if __name__ == "__main__":
+    import sys as _sys
+
+    if "--generate-rule" in _sys.argv:
+        _cli_generate_rule()
+    elif "--check" in _sys.argv:
+        for k in PERSONA_ORDER:
+            p = get_persona(k)
+            print(f"{k:12s}  voice={p.get('voice','')!r:40s}  title={p.get('title','')}")
+    else:
+        print(f"Usage: python {_sys.argv[0]} [--generate-rule | --check]")

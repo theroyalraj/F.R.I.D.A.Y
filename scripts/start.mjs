@@ -338,6 +338,13 @@ function freePort(port) {
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 async function main() {
+  // Regenerate .cursor/rules/openclaw-company.mdc from the live Python registry
+  // so the Cursor rule always reflects code defaults + .env overrides + Redis patches.
+  try {
+    execSync('python scripts/openclaw_company.py --generate-rule', { cwd: ROOT, stdio: 'pipe' });
+    log('agent', 'Company persona rule regenerated from openclaw_company.py');
+  } catch { /* non-fatal — rule stays as-is */ }
+
   const MODE = parseOpenclawMode();
   process.stdout.write(`${C.warn}[openclaw] OPENCLAW start mode: ${MODE}${C.reset}\n`);
   process.stdout.write(

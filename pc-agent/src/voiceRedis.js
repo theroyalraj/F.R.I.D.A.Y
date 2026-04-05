@@ -92,7 +92,7 @@ export async function touchVoiceContext(context, voice) {
 
 /**
  * Read voice data for a named context.
- * Returns { voice, set_at, last_used, status } or null if not found.
+ * Returns { voice, set_at, last_used, status, autoPlay } or null if not found.
  * @param {string} context
  */
 export async function getVoiceContext(context) {
@@ -105,6 +105,31 @@ export async function getVoiceContext(context) {
   } catch {
     return null;
   }
+}
+
+/**
+ * Check if autoPlay is enabled for a context (background-only playback).
+ * @param {string} context
+ * @returns {Promise<boolean>}
+ */
+export async function isAutoPlayEnabled(context) {
+  const data = await getVoiceContext(context);
+  return data?.autoPlay === 'true' || data?.autoPlay === true;
+}
+
+/**
+ * Set autoPlay flag for a context.
+ * @param {string} context
+ * @param {boolean} enabled
+ */
+export async function setAutoPlay(context, enabled) {
+  const c = await _getClient();
+  if (!c) return;
+  try {
+    await c.hSet(`${KEY_PREFIX}${context}`, {
+      autoPlay: String(enabled),
+    });
+  } catch { /* ignore */ }
 }
 
 /**

@@ -3,6 +3,7 @@ import { safeReadJson } from '../lib/fetchJson';
 import styles from '../styles/listen.module.css';
 
 type MailRow = { uid: string; from: string; subject: string; date: string };
+type MarkedMail = { [uid: string]: boolean };
 
 const MAIL_BATCH = 8;
 
@@ -67,8 +68,17 @@ export const IntegrationsRail: React.FC<Props> = ({
   const [waText, setWaText] = useState('');
   const [waSending, setWaSending] = useState(false);
   const [selectedMail, setSelectedMail] = useState<MailRow | null>(null);
+  const [markedMails, setMarkedMails] = useState<MarkedMail>({});
   const gmailRef = useRef(gmail);
   gmailRef.current = gmail;
+
+  const toggleMailMark = (uid: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setMarkedMails((prev) => ({
+      ...prev,
+      [uid]: !prev[uid],
+    }));
+  };
 
   const refreshMail = useCallback(async () => {
     try {
@@ -349,8 +359,23 @@ export const IntegrationsRail: React.FC<Props> = ({
                         className={`${styles['integrations-mail-row']} ${selectedMail?.uid === m.uid ? styles['integrations-mail-row-active'] : ''}`}
                         onClick={() => setSelectedMail(m)}
                       >
-                        <span className={styles['integrations-mail-subj']}>{m.subject || '(no subject)'}</span>
-                        {shortFromDate(m)}
+                        <div style={{ display: 'flex', alignItems: 'center', width: '100%', minWidth: 0 }}>
+                          <div
+                            className={`${styles['integrations-mail-mark']} ${markedMails[m.uid] ? styles['marked'] : ''}`}
+                            onClick={(e) => toggleMailMark(m.uid, e)}
+                            role="checkbox"
+                            aria-checked={markedMails[m.uid] ?? false}
+                          >
+                            {markedMails[m.uid] ? '✓' : ''}
+                          </div>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <span className={styles['integrations-mail-subj']}>{m.subject || '(no subject)'}</span>
+                            <div className={styles['integrations-mail-from']}>{m.from}</div>
+                          </div>
+                          <span style={{ fontSize: '0.52rem', color: 'rgba(255, 255, 255, 0.28)', flexShrink: 0, marginLeft: '6px' }}>
+                            {shortFromDate(m).props.children}
+                          </span>
+                        </div>
                       </button>
                     ))}
                   </>
@@ -365,8 +390,23 @@ export const IntegrationsRail: React.FC<Props> = ({
                         className={`${styles['integrations-mail-row']} ${selectedMail?.uid === m.uid ? styles['integrations-mail-row-active'] : ''}`}
                         onClick={() => setSelectedMail(m)}
                       >
-                        <span className={styles['integrations-mail-subj']}>{m.subject || '(no subject)'}</span>
-                        {shortFromDate(m)}
+                        <div style={{ display: 'flex', alignItems: 'center', width: '100%', minWidth: 0 }}>
+                          <div
+                            className={`${styles['integrations-mail-mark']} ${markedMails[m.uid] ? styles['marked'] : ''}`}
+                            onClick={(e) => toggleMailMark(m.uid, e)}
+                            role="checkbox"
+                            aria-checked={markedMails[m.uid] ?? false}
+                          >
+                            {markedMails[m.uid] ? '✓' : ''}
+                          </div>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <span className={styles['integrations-mail-subj']}>{m.subject || '(no subject)'}</span>
+                            <div className={styles['integrations-mail-from']}>{m.from}</div>
+                          </div>
+                          <span style={{ fontSize: '0.52rem', color: 'rgba(255, 255, 255, 0.28)', flexShrink: 0, marginLeft: '6px' }}>
+                            {shortFromDate(m).props.children}
+                          </span>
+                        </div>
                       </button>
                     ))}
                   </>

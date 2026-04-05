@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-friday-ambient.py -- Jarvis-style ambient intelligence for OpenClaw.
+friday-ambient.py — Jarvis-style ambient intelligence for OpenClaw, steered by **Maestro**
+(Head of House Operations): a seasoned IT steward — warm, responsible check-ins, rest and chai nudges,
+commit reminders, backbone energy. Periodic check-ins use a rotating caretaker voice pool.
 
 Live data sources (no API keys required unless noted):
   - Cricket / IPL "special" ambient (Hindi prompts, Neerja TTS, cricket witties, live headlines/scores):
@@ -24,7 +26,8 @@ Anthropic (optional): used for witty, personalised lines.
   401 / network failures trigger a 5-min cooldown to avoid log spam.
 
 Background check-in thread (FRIDAY_AMBIENT_CHECKIN_ENABLED, default on): grabs the Redis TTS lock on a
-timer and speaks the time plus a wellness line in sub-agent TTS so normal ambient yields.
+timer and speaks the time plus a steward line (Maestro / caretaker pool voices). Use
+FRIDAY_AMBIENT_CHECKIN_INTERVAL_SEC (minimum ~25s via FRIDAY_AMBIENT_CHECKIN_MIN_INTERVAL_SEC).
 
 Set FRIDAY_AMBIENT=true to enable.
 
@@ -572,17 +575,22 @@ def _python_for_friday_play() -> str:
 SUB_VOICE_RATE  = os.environ.get("FRIDAY_AMBIENT_SUB_VOICE_RATE",  "+9%")
 SUB_VOICE_PITCH = os.environ.get("FRIDAY_AMBIENT_SUB_VOICE_PITCH", "+3Hz")
 
-# Periodic sub-agent check-in: time + wellness ping (holds TTS lock; pauses competing ambient)
+# Periodic sub-agent check-in: time + steward / wellness (holds TTS lock; pauses competing ambient)
 CHECKIN_ENABLED = _env_bool("FRIDAY_AMBIENT_CHECKIN_ENABLED", True)
 try:
-    CHECKIN_INTERVAL_SEC = float(os.environ.get("FRIDAY_AMBIENT_CHECKIN_INTERVAL_SEC", "3600"))
+    CHECKIN_INTERVAL_SEC = float(os.environ.get("FRIDAY_AMBIENT_CHECKIN_INTERVAL_SEC", "900"))
 except ValueError:
-    CHECKIN_INTERVAL_SEC = 3600.0
-CHECKIN_INTERVAL_SEC = max(300.0, CHECKIN_INTERVAL_SEC)
+    CHECKIN_INTERVAL_SEC = 900.0
 try:
-    CHECKIN_INITIAL_DELAY_SEC = float(os.environ.get("FRIDAY_AMBIENT_CHECKIN_INITIAL_DELAY_SEC", "120"))
+    _checkin_floor = float(os.environ.get("FRIDAY_AMBIENT_CHECKIN_MIN_INTERVAL_SEC", "25"))
 except ValueError:
-    CHECKIN_INITIAL_DELAY_SEC = 120.0
+    _checkin_floor = 25.0
+# Enforce minimum cadence (default floor 25s so FRIDAY_AMBIENT_CHECKIN_INTERVAL_SEC=30 works).
+CHECKIN_INTERVAL_SEC = max(_checkin_floor, CHECKIN_INTERVAL_SEC)
+try:
+    CHECKIN_INITIAL_DELAY_SEC = float(os.environ.get("FRIDAY_AMBIENT_CHECKIN_INITIAL_DELAY_SEC", "90"))
+except ValueError:
+    CHECKIN_INITIAL_DELAY_SEC = 90.0
 CHECKIN_INITIAL_DELAY_SEC = max(0.0, CHECKIN_INITIAL_DELAY_SEC)
 
 logging.basicConfig(
@@ -591,6 +599,92 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("friday-ambient")
+
+
+def _house_voice_blocklist() -> set[str]:
+    bl = {v.strip() for v in os.environ.get("FRIDAY_TTS_VOICE_BLOCK", "").split(",") if v.strip()}
+    bl |= {
+        "en-AU-WilliamNeural",
+        "en-AU-WilliamMultilingualNeural",
+        "en-GB-RyanNeural",
+        "en-GB-ThomasNeural",
+    }
+    return bl
+
+
+_CARETAKER_VOICE_ROTOR = [0]
+
+
+def _caretaker_voice_pool_filtered() -> list[str]:
+    """Comma list FRIDAY_AMBIENT_CARETAKER_VOICES, else Maestro registry voice, minus blocklist."""
+    bl = _house_voice_blocklist()
+    raw = os.environ.get("FRIDAY_AMBIENT_CARETAKER_VOICES", "").strip()
+    out: list[str] = []
+    if raw:
+        for x in raw.split(","):
+            v = x.strip()
+            if v and v not in bl:
+                out.append(v)
+    if not out:
+        try:
+            from openclaw_company import get_persona
+
+            mv = (get_persona("maestro").get("voice") or "").strip()
+            if mv and mv not in bl:
+                out.append(mv)
+        except Exception:
+            pass
+    return out
+
+
+def _pick_caretaker_voice_rate_pitch() -> tuple[str | None, str | None, str | None]:
+    """Rotate through caretaker pool; rate from Maestro persona or FRIDAY_AMBIENT_CARETAKER_RATE."""
+    pool = _caretaker_voice_pool_filtered()
+    if not pool:
+        return None, None, None
+    i = _CARETAKER_VOICE_ROTOR[0] % len(pool)
+    _CARETAKER_VOICE_ROTOR[0] += 1
+    voice = pool[i]
+    rate: str | None = None
+    try:
+        from openclaw_company import get_persona
+
+        rate = (get_persona("maestro").get("rate") or "").strip() or None
+    except Exception:
+        pass
+    cr = os.environ.get("FRIDAY_AMBIENT_CARETAKER_RATE", "").strip()
+    if cr:
+        rate = cr
+    cp = os.environ.get("FRIDAY_AMBIENT_CARETAKER_PITCH", "").strip() or SUB_VOICE_PITCH
+    return voice, rate, cp
+
+
+def _ambient_steward_system_inject() -> str:
+    """Extra system text so Haiku lines carry Maestro's steward / backbone thread."""
+    try:
+        from openclaw_company import get_persona
+
+        p = get_persona("maestro")
+        name = (p.get("name") or "Maestro").strip()
+        title = (p.get("title") or "").strip()
+        pers = (p.get("personality") or "").strip()
+        bits = [
+            "\n\n═══ HOUSE STEWARD (ambient thread) ═══\n",
+            f"You share the floor with **{name}**",
+        ]
+        if title:
+            bits.append(f", {title}")
+        bits.append(" — the org's senior IT caretaker: warm, unshakable, mildly wry.\n")
+        if pers:
+            bits.append(f"Let this colour your asides: {pers}\n")
+        bits.append(
+            "Occasionally channel that backbone: nudge toward small good habits — save/commit work, hydrate, "
+            "honest check-ins (focus? need a breather?), chai or coffee, stepping away without guilt. "
+            "Never preachy or corporate; sound like family who've weathered every outage together.\n"
+        )
+        return "".join(bits)
+    except Exception:
+        return ""
 
 
 # ── Single-instance guard ─────────────────────────────────────────────────────
@@ -1661,6 +1755,7 @@ def generate_line_ai(
                 if mode == "cricket" and _raw_comm else ""
             )
         )
+        system += _ambient_steward_system_inject()
 
         # ── Mode-specific user prompts ─────────────────────────────────────
         if mode == "cricket":
@@ -2650,7 +2745,7 @@ def speak_blocking(text: str, voice: str | None = None) -> float:
     resolved_voice = voice
     rate_out: str | None = None
     if not resolved_voice and _ambient_main_voice_only():
-        # Maestro (Creative Director) — dedicated ambient voice even when main_voice_only
+        # Maestro (Head of House Operations) — dedicated ambient voice even when main_voice_only
         try:
             from openclaw_company import get_persona
 
@@ -2741,26 +2836,28 @@ def _format_local_time_spoken() -> str:
 
 
 _CHECKIN_TEMPLATES = [
+    # ── Steward: housekeeping, commits, backbone ────────────────────────────────
+    "{time}, {user}. Quick housekeeping — anything worth committing before we stack more on top? "
+    "Small saves spare the team at three in the morning.",
+    "{user}, it's {time}. I'm the one tidying after everyone; humour me — is your work saved and named sensibly?",
+    "{time}. {user}, backbone check — are we focused on what actually matters, or chasing shiny objects?",
+    "{user}, {time}. Honest question — am I helping you stay on track, or crowding you? Either answer is fine.",
+    # ── Rest, chai, coffee ─────────────────────────────────────────────────────
+    "It's {time}, {user}. When did you last stand up? Chai, coffee, water — pick one and actually taste it.",
+    "{user}, {time}. Permission to breathe: roll shoulders, sip something warm, then we get back to it.",
+    "{time}. {user}, I need you sharp next decade too — five minutes away now buys an hour of clarity later.",
+    "{user}, {time}. Want ruthless focus or a gentle check-in rhythm? Say the word and I'll match you.",
     # ── Physical / wellness ───────────────────────────────────────────────────
-    "Hey {user}, quick pulse check. It's {time}. How are you holding up? Maybe water, a stretch, or a short break?",
-    "Time check for {user}: {time}. You've been at this a while — want to pause, snack, or just breathe for a minute?",
-    "{user}, {time}. Sub-agent check-in: posture okay? Eyes need a break? I'm not going anywhere.",
-    "It's {time}, {user}. Gentle nudge — hydrate if you can, and don't forget to unclench your jaw.",
-    "{user}, shoulders. Right now. Drop them. It's {time} and you've been tensed up for a while.",
-    "Blink check, {user} — it's {time}. Seriously, look away from the screen for twenty seconds. I'll wait.",
-    # ── Humorous ─────────────────────────────────────────────────────────────
-    "{user}, it is {time} and I am legally required to ask if you've eaten anything that wasn't coffee.",
-    "Sub-agent reporting in at {time}. {user}, the chair is not a throne — stand up for sixty seconds.",
-    "{time}, {user}. Just checking you haven't been sucked into a rabbit hole. How's the surface world?",
-    "It's {time}. {user}, if you've been in flow state this whole time, impressive — but your back disagrees.",
-    # ── Motivational / curious ────────────────────────────────────────────────
-    "{time}, {user}. Quick check-in — how's the problem you were working on? Any breakthrough yet?",
-    "{user}, it's {time}. You've put in solid time. Take sixty seconds to step back and look at the big picture before diving back in.",
-    "Clock says {time}, {user}. Sometimes the best debugging tool is a short walk and fresh eyes.",
-    # ── Late-night / early-morning aware ─────────────────────────────────────
-    "{time} and you're still at it, {user}. Respect — but brain fog is real after midnight. A short break now saves an hour of confusion later.",
-    "Hey {user}, {time}. The screen has been winning for a while. Give your eyes a rest — even two minutes helps.",
-    "{user}, {time}. Sub-agent wellness ping: water, posture, one deep breath. Go.",
+    "Hey {user}, it's {time}. Pulse check — water, stretch, eyes off the glass for twenty seconds?",
+    "Time check: {time}, {user}. Posture? Jaw unclenched? Long enough in IT to nag with love.",
+    "{user}, blink for me — {time}. The ticket queue can wait half a minute.",
+    # ── Wry elder nerd ────────────────────────────────────────────────────────
+    "{user}, {time}. Have you eaten something that wasn't caffeine lately? Asking as your elder states nerd.",
+    "{time}. {user}, the chair isn't a life partner — stand, pace, sit back down fresh.",
+    "{time}, {user}. Rabbit hole check — we still on the same continent as the original task?",
+    # ── Late hours ─────────────────────────────────────────────────────────────
+    "{time} and you're still at it, {user}. Proud and worried in the same breath — even a short break helps.",
+    "Hey {user}, {time}. The screen wins if you never look away; let's not hand it the trophy.",
 ]
 
 
@@ -2768,10 +2865,16 @@ def _pick_checkin_line() -> str:
     return random.choice(_CHECKIN_TEMPLATES).format(user=USER_NAME, time=_format_local_time_spoken())
 
 
-def speak_subagent_blocking(text: str) -> float:
+def speak_subagent_blocking(
+    text: str,
+    *,
+    voice: str | None = None,
+    rate: str | None = None,
+    pitch: str | None = None,
+) -> float:
     """
-    Blocking TTS using the ambient sub-agent voice (rate/pitch + optional FRIDAY_AMBIENT_SUB_TTS_VOICE).
-    Used for periodic check-ins; ignores FRIDAY_AMBIENT_MAIN_VOICE_ONLY so timbre stays distinct.
+    Blocking TTS using the ambient sub-agent voice or an explicit caretaker voice (check-in thread).
+    When ``voice`` is None, uses FRIDAY_AMBIENT_SUB_TTS_VOICE + SUB_VOICE_RATE/PITCH.
     """
     from friday_speaker import speaker
 
@@ -2781,6 +2884,10 @@ def speak_subagent_blocking(text: str) -> float:
     if should_defer_ambient_for_cursor():
         return 0.0
     subv = os.environ.get("FRIDAY_AMBIENT_SUB_TTS_VOICE", "").strip() or None
+    if voice is not None:
+        subv = voice or None
+    rate_eff = rate if rate is not None else SUB_VOICE_RATE
+    pitch_eff = pitch if pitch is not None else SUB_VOICE_PITCH
     line = text.strip()[:4000]
     try:
         AMBIENT_SPEAKING_FILE.write_text(line, encoding="utf-8")
@@ -2790,8 +2897,8 @@ def speak_subagent_blocking(text: str) -> float:
         speaker.speak_blocking(
             line,
             voice=subv,
-            rate=SUB_VOICE_RATE,
-            pitch=SUB_VOICE_PITCH,
+            rate=rate_eff,
+            pitch=pitch_eff,
             use_session_sticky=False,
         )
     except Exception as e:
@@ -3057,16 +3164,23 @@ def _execute_checkin_speak(
     last_ambient_holder: list[float],
     line: str,
 ) -> None:
-    """Run sub-agent check-in TTS and log (caller holds Redis TTS lock)."""
+    """Run steward check-in TTS (caretaker pool) and log (caller holds Redis TTS lock)."""
     last_ambient_holder[0] = time.time()
-    d1 = int(speak_subagent_blocking(line) * 1000)
+    cv, cr, cp = _pick_caretaker_voice_rate_pitch()
+    if cv:
+        d1 = int(speak_subagent_blocking(line, voice=cv, rate=cr, pitch=cp) * 1000)
+    else:
+        d1 = int(speak_subagent_blocking(line) * 1000)
     last_ambient_holder[0] = time.time()
     try:
         TTS_TS_FILE.write_text(str(time.time()), encoding="utf-8")
     except OSError:
         pass
     log_spoken(conn, line, "ambient_checkin", d1)
-    log.info("[checkin] sub-agent time and wellness ping")
+    log.info(
+        "[checkin] Maestro steward ping (voice=%s)",
+        cv or (os.environ.get("FRIDAY_AMBIENT_SUB_TTS_VOICE", "").strip() or "sub-default"),
+    )
 
 
 def _ambient_checkin_loop(
@@ -3082,48 +3196,44 @@ def _ambient_checkin_loop(
     """
     if stop.wait(timeout=CHECKIN_INITIAL_DELAY_SEC):
         return
+    tts_wait_cap = max(10.0, min(60.0, CHECKIN_INTERVAL_SEC * 1.5))
     while not stop.is_set():
         try:
             if should_defer_ambient_for_cursor():
-                if stop.wait(timeout=30.0):
+                if stop.wait(timeout=min(30.0, CHECKIN_INTERVAL_SEC)):
                     break
                 continue
             if _is_music_playing():
-                if stop.wait(timeout=45.0):
+                if stop.wait(timeout=min(45.0, CHECKIN_INTERVAL_SEC)):
                     break
                 continue
-            quiet_deadline = time.time() + 180.0
+            quiet_deadline = time.time() + tts_wait_cap
             while time.time() < quiet_deadline and not stop.is_set():
                 if not _is_tts_active():
                     break
-                if stop.wait(timeout=2.0):
+                if stop.wait(timeout=1.5):
                     return
             else:
                 if stop.is_set():
                     return
-                if stop.wait(timeout=CHECKIN_INTERVAL_SEC):
-                    break
                 continue
             if stop.is_set():
                 return
             line = _pick_checkin_line()
-            need_redis_wait = False
+            spoken = False
             with speak_lock:
                 if stop.is_set():
                     return
                 if should_defer_ambient_for_cursor() or _is_music_playing() or _is_tts_active():
                     pass
-                elif not _acquire_tts_lock(r):
-                    need_redis_wait = True
-                else:
+                elif _acquire_tts_lock(r):
                     try:
                         _execute_checkin_speak(conn, last_ambient_holder, line)
+                        spoken = True
                     finally:
                         _release_tts_lock(r)
-            if need_redis_wait:
-                # Must not hold speak_lock here — main thread may be waiting inside
-                # _wait_for_tts_lock_release while holding speak_lock (deadlock otherwise).
-                _wait_for_tts_lock_release(r, timeout=90.0)
+            if not spoken:
+                _wait_for_tts_lock_release(r, timeout=tts_wait_cap)
                 if stop.is_set():
                     return
                 with speak_lock:

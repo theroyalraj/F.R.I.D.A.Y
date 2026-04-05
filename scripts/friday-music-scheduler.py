@@ -476,7 +476,7 @@ def main():
     interval_sec = INTERVAL_MIN * 60
     if WEIGHTED_HINDI_MODE:
         log.info(
-            "Maestro (Creative Director) — music scheduler online, every %.0f min, "
+            "Maestro (Head of House Operations) — music scheduler online, every %.0f min, "
             "weighted Hindi %.2f%% (hindi=%d phrases, intl=%d phrases)",
             INTERVAL_MIN,
             HINDI_WEIGHT * 100,
@@ -492,7 +492,7 @@ def main():
             )
     else:
         log.info(
-            "Maestro (Creative Director) — music scheduler online, every %.0f min, %d song(s) in playlist",
+            "Maestro (Head of House Operations) — music scheduler online, every %.0f min, %d song(s) in playlist",
             INTERVAL_MIN,
             len(LEGACY_PLAYLIST),
         )

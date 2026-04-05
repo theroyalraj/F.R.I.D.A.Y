@@ -97,12 +97,28 @@ export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [musicOrbCaption, setMusicOrbCaption] = useState('');
   const [speakingPersonaKey, setSpeakingPersonaKey] = useState<SpeakingPersonaKey>(null);
   const [listenMuted, setListenMuted] = useState(false);
-  const [exchanges, setExchanges] = useState(0);
   const [uptime, setUptime] = useState(0);
   const [lastHeardText, setLastHeardText] = useState('');
   const [edgeVoices, setEdgeVoices] = useState<Array<{ voice: string; label: string }>>([]);
-  const [currentVoice, setCurrentVoice] = useState('en-US-AvaMultilingualNeural');
-  const [activePersonaKey, setActivePersonaKey] = useState<CompanyPersonaKey | 'custom'>('jarvis');
+  const [currentVoice, setCurrentVoice] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return (localStorage.getItem('friday.session.voice') as string | null) ?? 'en-US-AvaMultilingualNeural';
+    }
+    return 'en-US-AvaMultilingualNeural';
+  });
+  const [activePersonaKey, setActivePersonaKey] = useState<CompanyPersonaKey | 'custom'>(() => {
+    if (typeof window !== 'undefined') {
+      return (localStorage.getItem('friday.session.personaKey') as CompanyPersonaKey | 'custom' | null) ?? 'jarvis';
+    }
+    return 'jarvis';
+  });
+  const [exchanges, setExchanges] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('friday.session.exchanges');
+      return saved ? parseInt(saved, 10) : 0;
+    }
+    return 0;
+  });
   const [personaOverrides, setPersonaOverrides] = useState<Record<string, PersonaOverride>>(() =>
     typeof window !== 'undefined' ? loadPersonaOverrides() : {},
   );
@@ -117,7 +133,17 @@ export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
     return 'dark';
   });
-  const [bubbles, setBubbles] = useState<ChatBubble[]>([]);
+  const [bubbles, setBubbles] = useState<ChatBubble[]>(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        const saved = localStorage.getItem('friday.session.bubbles');
+        return saved ? JSON.parse(saved) : [];
+      } catch {
+        return [];
+      }
+    }
+    return [];
+  });
   const [toasts, setToasts] = useState<Array<{ id: string; message: string; type: 'info' | 'error' | 'success' }>>([]);
 
   const toastIdRef = useRef(0);
@@ -188,6 +214,26 @@ export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     localStorage.setItem('friday.theme', theme);
   }, [theme]);
 
+  // Persist chat bubbles to localStorage for session recovery
+  useEffect(() => {
+    try {
+      localStorage.setItem('friday.session.bubbles', JSON.stringify(bubbles));
+    } catch {
+      // Silently fail if localStorage is full or unavailable
+    }
+  }, [bubbles]);
+
+  // Persist session state
+  useEffect(() => {
+    try {
+      localStorage.setItem('friday.session.voice', currentVoice);
+      localStorage.setItem('friday.session.personaKey', activePersonaKey);
+      localStorage.setItem('friday.session.exchanges', String(exchanges));
+    } catch {
+      // Silently fail if localStorage is unavailable
+    }
+  }, [currentVoice, activePersonaKey, exchanges]);
+
   const refreshPersonaOverrides = useCallback(() => {
     setPersonaOverrides(loadPersonaOverrides());
   }, []);
@@ -226,6 +272,12 @@ export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const clearBubbles = useCallback(() => {
     setBubbles([]);
+    try {
+      localStorage.removeItem('friday.session.bubbles');
+      localStorage.removeItem('friday.session.exchanges');
+    } catch {
+      // Ignore
+    }
   }, []);
 
   const dismissToast = useCallback((id: string) => {

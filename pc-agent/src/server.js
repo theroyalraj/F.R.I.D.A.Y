@@ -367,18 +367,48 @@ voiceRouter.post('/speak-async', async (req, res) => {
     if (line) req.log?.warn({ fridaySpeak: line }, '/voice/speak-async stderr');
   });
 
+  // Check if autoPlay is enabled - if so, suppress visual UI and only play audio
+  const { isAutoPlayEnabled } = await import('./voiceRedis.js');
+  const autoPlayEnabled = await isAutoPlayEnabled('api');
   const preview = text.length > 240 ? `${text.slice(0, 240)}…` : text;
-  broadcastEvent('speak', { text: preview });
+
+  // Only broadcast speak event if autoPlay is NOT enabled (show UI when not in background mode)
+  if (!autoPlayEnabled) {
+    broadcastEvent('speak', { text: preview });
+  }
+
   let listenSent = false;
   const emitListenDone = () => {
     if (listenSent) return;
     listenSent = true;
-    broadcastEvent('listening', {});
+    // Only emit listening if we showed the speak event
+    if (!autoPlayEnabled) {
+      broadcastEvent('listening', {});
+    }
   };
   child.once('close', emitListenDone);
   child.once('error', emitListenDone);
 
-  res.json({ ok: true, text: text.slice(0, 60) });
+  res.json({ ok: true, text: text.slice(0, 60), autoPlay: autoPlayEnabled });
+});
+
+/** Toggle autoPlay mode (background-only playback, no visual UI). */
+voiceRouter.post('/auto-play', async (req, res) => {
+  const { enabled } = req.body || {};
+  if (typeof enabled !== 'boolean') {
+    return res.status(400).json({ error: 'Expected { enabled: boolean }' });
+  }
+  const { setAutoPlay, isAutoPlayEnabled } = await import('./voiceRedis.js');
+  await setAutoPlay('api', enabled);
+  const newState = await isAutoPlayEnabled('api');
+  res.json({ ok: true, autoPlay: newState });
+});
+
+/** Get current autoPlay status. */
+voiceRouter.get('/auto-play', async (req, res) => {
+  const { isAutoPlayEnabled } = await import('./voiceRedis.js');
+  const autoPlay = await isAutoPlayEnabled('api');
+  res.json({ ok: true, autoPlay });
 });
 
 /** Free local neural TTS (Piper) → WAV; optional paid OpenAI (set FRIDAY_TTS_OPENAI=true). Else client uses browser. */

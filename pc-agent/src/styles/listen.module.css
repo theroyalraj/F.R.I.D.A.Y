@@ -1074,6 +1074,42 @@
   max-width: 100%;
 }
 
+.integrations-mail-from {
+  font-size: 0.54rem;
+  color: rgba(255, 255, 255, 0.45);
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+  margin-top: 2px;
+}
+
+.integrations-mail-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  cursor: pointer;
+  margin-right: 6px;
+  flex-shrink: 0;
+  transition: all 0.15s;
+}
+
+.integrations-mail-mark:hover {
+  background: rgba(138, 92, 246, 0.2);
+  border-color: rgba(138, 92, 246, 0.5);
+}
+
+.integrations-mail-mark.marked {
+  background: rgba(138, 92, 246, 0.4);
+  border-color: rgba(138, 92, 246, 0.8);
+}
+
 .integrations-mail-meta {
   font-size: 0.52rem;
   color: rgba(255, 255, 255, 0.28);
