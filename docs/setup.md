@@ -291,11 +291,24 @@ Register a **webhook** on that instance so Evolution POSTs incoming-message even
 
 If you set **`WHATSAPP_WEBHOOK_SECRET`**, configure Evolution (or a reverse proxy) to send header **`X-Openclaw-WhatsApp-Secret`** with that value on each POST, or leave the secret empty for local-only testing.
 
+### 9.6a WhatsApp group → Jira (skill-gateway)
+
+**skill-gateway** can turn **allowlisted group** messages into **Jira issues** using Claude for triage and Evolution `sendText` for an in-thread confirmation. It runs on the existing route **`POST /webhook/evolution`** when the event is **`MESSAGES_UPSERT`** (same handler as call notifications).
+
+**Delivering events to the gateway:** Many setups point Evolution’s webhook only at N8N. The Jira pipeline must receive the same payloads. Pick one:
+
+1. **Mirror from N8N (recommended):** Right after the **Webhook** node in [`n8n/workflows/whatsapp-evolution-intake.json`](../n8n/workflows/whatsapp-evolution-intake.json), add an **HTTP Request** node: **POST** `http://host.docker.internal:3848/webhook/evolution`, **Body** = raw JSON from the Evolution webhook (same object N8N received), headers **`Content-Type: application/json`** and, if used, **`X-Openclaw-WhatsApp-Secret`** matching **`WHATSAPP_WEBHOOK_SECRET`**. Run this path in parallel with your existing parse/PCAgent flow (do not replace the N8N URL Evolution already calls unless you also forward to N8N from the gateway).
+2. **Direct to gateway only:** Point Evolution at **`http://host.docker.internal:3848/webhook/evolution`** — you then lose stock **`whatsapp-intake`** unless you add forwarding (not included).
+
+**Configuration (`.env`):** enable **`WHATSAPP_JIRA_ENABLED=true`**, set **`WHATSAPP_JIRA_GROUPS`** (comma-separated group JIDs such as `120363…@g.us` from Evolution “fetch groups” / logs), **`WHATSAPP_JIRA_PROJECT`**, **`JIRA_BASE_URL`**, **`JIRA_EMAIL`**, **`JIRA_API_TOKEN`**, and **`ANTHROPIC_API_KEY`**. Optional: **`WHATSAPP_JIRA_TRIGGER`** (e.g. `/ticket`) so only lines with that prefix become tickets; **`WHATSAPP_JIRA_USERS`** JSON map of name → Jira **accountId**; **`WHATSAPP_JIRA_DRY_RUN=true`** to classify without creating issues. See commented block in `.env`.
+
+**Smoke test:** `npm run test:whatsapp-jira` (expects **skill-gateway** listening on **3848**).
+
 ### 9.7 End-to-end check
 
 1. **pc-agent** running on the host (`node pc-agent/src/server.js` or your usual command).  
 2. Send a **text** WhatsApp message to the linked number. N8N should run **ParseEvolution → PCAgent → FanoutWhatsApp → SendWhatsApp** (one send per entry in `WHATSAPP_ALWAYS_REPLY_NUMBERS`, or one to the sender if unset); you get a reply with **`summary`** from Claude.  
-3. **Groups** are ignored by the sample workflow (only 1:1 chats).  
+3. **Groups:** the stock N8N workflow targets 1:1 chats. **Group → Jira** uses **`WHATSAPP_JIRA_*`** on **`/webhook/evolution`** (see §9.6a).  
 4. Do **not** expose N8N or Evolution to the public internet without TLS, auth, and rate limits.
 
 ### 9.7a Friday Listen — Mail and WhatsApp rail

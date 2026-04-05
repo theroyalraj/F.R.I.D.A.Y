@@ -156,5 +156,6 @@ Base: `http://127.0.0.1:3848`
 |--------|------|---------|
 | POST | `/alexa` | Alexa skill webhook |
 | POST | `/openclaw/trigger` | Manual trigger (requires `X-Openclaw-Secret`) |
+| POST | `/webhook/evolution` | Evolution API (WhatsApp): calls, optional group→Jira when `WHATSAPP_JIRA_*` set — see `docs/setup.md` §9.6a |
 | POST | `/internal/stop-all-media` | Stop all music: taskkill friday-player/ffplay, clear music Redis, Alexa pause. Optional `?full=1` clears TTS locks too |
 

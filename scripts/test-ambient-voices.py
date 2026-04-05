@@ -6,6 +6,8 @@ Speak short lines for every Edge voice path friday-ambient can use (given .env).
   is true, that is usually just FRIDAY_TTS_VOICE).
 - --probe-all: also speaks Hindi / Hinglish / optional AMBIENT + SUB voices so you can
   verify Edge routing before turning main-voice-only off.
+- When set in .env: **FRIDAY_AMBIENT_CARETAKER_VOICES** (Hindi check-in sample each) and
+  **FRIDAY_AMBIENT_MEME_ZONE_QUIP_VOICE** (default Neerja if unset).
 
 Usage:
   python scripts/test-ambient-voices.py --dry-run
@@ -147,6 +149,38 @@ def build_cases(*, probe_all: bool) -> list[tuple[str, str, dict[str, str]]]:
                     },
                 )
             )
+
+        ck_raw = os.environ.get("FRIDAY_AMBIENT_CARETAKER_VOICES", "").strip()
+        if ck_raw:
+            cr_ct = os.environ.get("FRIDAY_AMBIENT_CARETAKER_RATE", "").strip()
+            cp_ct = (
+                os.environ.get("FRIDAY_AMBIENT_CARETAKER_PITCH", "").strip()
+                or os.environ.get("FRIDAY_AMBIENT_SUB_VOICE_PITCH", "+3Hz")
+            )
+            sub_rate_fallback = os.environ.get("FRIDAY_AMBIENT_SUB_VOICE_RATE", "+9%")
+            for idx, cv in enumerate([x.strip() for x in ck_raw.split(",") if x.strip()]):
+                cases.append(
+                    (
+                        f"caretaker_checkin_friday_ambient_caretaker_voices_{idx}",
+                        "चेक-इन आवाज़ — यह हिंदी में मास्ट्रो की लाइन है।",
+                        {
+                            "FRIDAY_TTS_VOICE": cv,
+                            "FRIDAY_TTS_RATE": cr_ct or sub_rate_fallback,
+                            "FRIDAY_TTS_PITCH": cp_ct,
+                        },
+                    )
+                )
+
+        mq = os.environ.get("FRIDAY_AMBIENT_MEME_ZONE_QUIP_VOICE", "").strip()
+        if not mq:
+            mq = "en-IN-NeerjaExpressiveNeural"
+        cases.append(
+            (
+                "meme_zone_quip_FRIDAY_AMBIENT_MEME_ZONE_QUIP_VOICE",
+                "Meme zone quip voice — quick line after you stop a clip early.",
+                {"FRIDAY_TTS_VOICE": mq},
+            )
+        )
 
     # De-dupe identical (voice, rate, pitch, text) — keep first label
     seen: set[tuple] = set()

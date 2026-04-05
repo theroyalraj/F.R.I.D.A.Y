@@ -4,10 +4,14 @@
  *
  *   CALL (personal, not group)  → stop all media + highest-priority TTS
  *   CALL (group or video)       → persistent Windows toast (no auto-dismiss)
- *   MESSAGES_UPSERT             → optional TTS announcement of new messages
+ *   MESSAGES_UPSERT             → optional TTS announcement of new DMs + optional
+ *                                 WhatsApp group → Jira pipeline (WHATSAPP_JIRA_*)
  *
  * Configure the webhook URL in Evolution API to point at:
  *   POST http://host.docker.internal:3848/webhook/evolution
+ *
+ * If Evolution already posts only to N8N, mirror each POST to this URL from N8N
+ * (see docs/setup.md § WhatsApp group → Jira).
  */
 
 import { rootLogger } from './log.js';
@@ -15,6 +19,7 @@ import { sendWinToast, sendPersistentCallToast } from './winToast.js';
 import { stopAllFridayAudioSync } from './stopAllFridayAudio.js';
 import { fridaySpeakEnabled, speakFridayPy } from './fridaySpeak.js';
 import { winTtsEnabled, speakWinTts } from './winTts.js';
+import { processWhatsAppJiraMessagesUpsert } from './whatsappJiraPipeline.js';
 
 const log = rootLogger.child({ module: 'evolutionWebhook' });
 
@@ -213,6 +218,9 @@ export function handleEvolutionWebhook(req, res) {
       handleCallEvent(data);
     } else if (event === 'MESSAGES_UPSERT' || event === 'MESSAGE' || event === 'MESSAGES') {
       handleMessagesUpsert(data);
+      void processWhatsAppJiraMessagesUpsert(data, log).catch((err) => {
+        log.error({ err: String(err?.message || err) }, 'whatsapp jira pipeline error');
+      });
     } else if (event === 'CONNECTION_UPDATE') {
       const state = data?.state || data?.connection || '';
       log.info({ state }, 'WhatsApp connection update');

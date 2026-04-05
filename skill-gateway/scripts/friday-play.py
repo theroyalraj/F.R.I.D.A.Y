@@ -16,7 +16,7 @@ Env vars (all optional):
   FRIDAY_PLAY_SECONDS  max play seconds (default: 45; --full ignores this)
   FRIDAY_PLAY_EARLY_STOP_SEC  trim this many seconds before natural end when duration metadata looks reliable (default: 2)
   FRIDAY_PLAY_MIN_TRUSTED_DURATION_SEC  if ffprobe duration is below this, metadata is treated as unreliable — no early trim, cap by FRIDAY_PLAY_SECONDS only (default: 30)
-  FRIDAY_PLAY_VOLUME     ffplay startup volume 0–100 (default: 100). Use ~10–20 for quiet background so TTS stays clear.
+  FRIDAY_PLAY_VOLUME     ffplay startup volume 0–100 (default: 20). Music is quiet background; TTS auto-ducks it further via FRIDAY_MUSIC_DUCK_LEVEL.
   FRIDAY_MUSIC_DEVICE  Windows: friendly-name substring for output (e.g. Speakers).
                        Briefly sets default endpoint so ffplay opens on that device,
                        then restores your previous default so TTS can stay on another output.
@@ -31,6 +31,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -147,6 +148,25 @@ def _play_volume_percent() -> int:
     return max(0, min(100, v))
 
 
+def _set_music_mixer_volume(pid: int, target: float, timeout: float = 3.0) -> None:
+    """After ffplay spawns, pin its Windows mixer session to the desired volume.
+    This lets friday-speak duck/restore via the same mixer API."""
+    try:
+        from pycaw.utils import AudioUtilities
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            for s in AudioUtilities.GetAllSessions():
+                try:
+                    if s.Process and s.Process.pid == pid and s.SimpleAudioVolume:
+                        s.SimpleAudioVolume.SetMasterVolume(max(0.0, min(1.0, target)), None)
+                        return
+                except Exception:
+                    pass
+            time.sleep(0.08)
+    except Exception:
+        pass
+
+
 def get_duration(mp3_path: Path) -> float | None:
     """Return audio duration in seconds using ffprobe, or None on failure."""
     try:
@@ -243,6 +263,11 @@ def play(mp3_path: Path):
         except OSError:
             pass
         set_music_active_ttl(music_redis_ttl_for_play_seconds(play_sec))
+        threading.Thread(
+            target=_set_music_mixer_volume,
+            args=(proc.pid, vol / 100.0),
+            daemon=True,
+        ).start()
 
         if switched_for_music and original_default_id:
             time.sleep(0.22)

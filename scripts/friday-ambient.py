@@ -26,7 +26,8 @@ Anthropic (optional): used for witty, personalised lines.
   401 / network failures trigger a 5-min cooldown to avoid log spam.
 
 Background check-in thread (FRIDAY_AMBIENT_CHECKIN_ENABLED, default on): grabs the Redis TTS lock on a
-timer and speaks the time plus a steward line (Maestro / caretaker pool voices). Use
+timer and speaks the time plus a steward line (Maestro / caretaker pool voices). Lines come from a wide,
+playful template pool (English or Devanagari Hindi) and skip the last few picks so repeats stay rare. Use
 FRIDAY_AMBIENT_CHECKIN_INTERVAL_SEC (minimum ~25s via FRIDAY_AMBIENT_CHECKIN_MIN_INTERVAL_SEC).
 
 Set FRIDAY_AMBIENT=true to enable.
@@ -41,6 +42,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import hashlib
+from collections import deque
 import json
 import logging
 import os
@@ -2583,6 +2585,38 @@ _REDIS_TTS_LOCK      = "friday:tts:lock"
 _REDIS_TTS_LOCK_TTL  = 45   # seconds — covers max expected TTS duration
 
 
+def _pid_alive(pid: int) -> bool:
+    """Check if a PID is alive on Windows or POSIX."""
+    if pid <= 0:
+        return False
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            SYNCHRONIZE = 0x00100000
+            h = kernel32.OpenProcess(SYNCHRONIZE, False, pid)
+            if h:
+                kernel32.CloseHandle(h)
+                return True
+            return False
+        else:
+            os.kill(pid, 0)
+            return True
+    except (OSError, PermissionError):
+        return False
+    except Exception:
+        return True
+
+
+def _extract_lock_pid(holder_value) -> int:
+    """Extract PID from lock value — either 'PID' or 'PID:HASH'."""
+    try:
+        s = str(holder_value).strip()
+        return int(s.split(":")[0])
+    except (ValueError, TypeError):
+        return 0
+
+
 def _acquire_tts_lock(r) -> bool:
     """
     Atomically acquire the global TTS lock.
@@ -2591,6 +2625,9 @@ def _acquire_tts_lock(r) -> bool:
     is already speaking (caller should skip this cycle).
     Falls back to True if Redis is unavailable (fail-open — prefer speech
     over silence, but dedup still helps in that case).
+
+    Includes stale lock detection: if the lock holder PID is dead, clears
+    the lock and retries.
     """
     try:
         result = r.set(_REDIS_TTS_LOCK, os.getpid(), nx=True, ex=_REDIS_TTS_LOCK_TTL)
@@ -2599,8 +2636,16 @@ def _acquire_tts_lock(r) -> bool:
         # Lock is held — check if by ourselves (e.g. crash/restart artefact)
         try:
             holder = r.get(_REDIS_TTS_LOCK)
-            if holder and int(str(holder)) == os.getpid():
-                return True   # We already own it
+            if holder:
+                holder_pid = _extract_lock_pid(holder)
+                if holder_pid == os.getpid():
+                    return True
+                if holder_pid > 0 and not _pid_alive(holder_pid):
+                    log.info("[tts-lock] clearing stale lock held by dead PID %d", holder_pid)
+                    r.delete(_REDIS_TTS_LOCK)
+                    result2 = r.set(_REDIS_TTS_LOCK, os.getpid(), nx=True, ex=_REDIS_TTS_LOCK_TTL)
+                    if result2:
+                        return True
         except Exception:
             pass
         return False
@@ -2612,7 +2657,7 @@ def _release_tts_lock(r) -> None:
     """Release the TTS lock if we own it."""
     try:
         holder = r.get(_REDIS_TTS_LOCK)
-        if holder and int(str(holder)) == os.getpid():
+        if holder and _extract_lock_pid(holder) == os.getpid():
             r.delete(_REDIS_TTS_LOCK)
     except Exception:
         pass
@@ -2621,16 +2666,22 @@ def _release_tts_lock(r) -> None:
 def _wait_for_tts_lock_release(r, timeout: float = 90.0, poll: float = 0.5) -> None:
     """
     Block until the Redis TTS lock is free (another process finished speaking)
-    or timeout elapses.  After this returns, the caller should reset its own
-    gap timer so ambient doesn't fire immediately on top of the finished speech.
+    or timeout elapses. Includes stale lock detection — if the holder PID is
+    dead, clears the lock immediately.
     """
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            if not r.exists(_REDIS_TTS_LOCK):
-                return   # lock released — other process finished
+            holder = r.get(_REDIS_TTS_LOCK)
+            if not holder:
+                return
+            holder_pid = _extract_lock_pid(holder)
+            if holder_pid > 0 and not _pid_alive(holder_pid):
+                log.info("[tts-lock] wait: clearing stale lock held by dead PID %d", holder_pid)
+                r.delete(_REDIS_TTS_LOCK)
+                return
         except Exception:
-            return       # Redis down — fail open, carry on
+            return
         time.sleep(poll)
     log.debug("_wait_for_tts_lock_release: gave up after %.0fs", timeout)
 
@@ -2846,60 +2897,116 @@ def _format_local_time_spoken() -> str:
 
 
 _CHECKIN_TEMPLATES = [
-    # ── Steward: housekeeping, commits, backbone ────────────────────────────────
-    "{time}, {user}. Quick housekeeping — anything worth committing before we stack more on top? "
-    "Small saves spare the team at three in the morning.",
-    "{user}, it's {time}. I'm the one tidying after everyone; humour me — is your work saved and named sensibly?",
-    "{time}. {user}, backbone check — are we focused on what actually matters, or chasing shiny objects?",
-    "{user}, {time}. Honest question — am I helping you stay on track, or crowding you? Either answer is fine.",
-    # ── Rest, chai, coffee ─────────────────────────────────────────────────────
-    "It's {time}, {user}. When did you last stand up? Chai, coffee, water — pick one and actually taste it.",
-    "{user}, {time}. Permission to breathe: roll shoulders, sip something warm, then we get back to it.",
-    "{time}. {user}, I need you sharp next decade too — five minutes away now buys an hour of clarity later.",
-    "{user}, {time}. Want ruthless focus or a gentle check-in rhythm? Say the word and I'll match you.",
-    # ── Physical / wellness ───────────────────────────────────────────────────
-    "Hey {user}, it's {time}. Pulse check — water, stretch, eyes off the glass for twenty seconds?",
-    "Time check: {time}, {user}. Posture? Jaw unclenched? Long enough in IT to nag with love.",
-    "{user}, blink for me — {time}. The ticket queue can wait half a minute.",
-    # ── Wry elder nerd ────────────────────────────────────────────────────────
-    "{user}, {time}. Have you eaten something that wasn't caffeine lately? Asking as your elder states nerd.",
-    "{time}. {user}, the chair isn't a life partner — stand, pace, sit back down fresh.",
-    "{time}, {user}. Rabbit hole check — we still on the same continent as the original task?",
-    # ── Late hours ─────────────────────────────────────────────────────────────
-    "{time} and you're still at it, {user}. Proud and worried in the same breath — even a short break helps.",
-    "Hey {user}, {time}. The screen wins if you never look away; let's not hand it the trophy.",
+    # ── Steward: housekeeping, commits — with twists ───────────────────────────
+    "{time}, {user}. Deposit gossip: anything worth committing before we stack chaos on top? "
+    "Future-you at three A M sends thanks.",
+    "{user}, it's {time}. I’m the one who finds the unsaved tab at the worst moment — humour me, is everything named like a human wrote it?",
+    "{time}. {user}, spine check — are we still sailing toward the real harbour, or chasing shiny bottle caps?",
+    "{user}, {time}. Quick poll: am I the useful nag or the annoying one? Trick question — I’m both; just tell me the ratio.",
+    "{time}, {user}. Before the next rabbit hole opens — did you leave breadcrumbs for yourself, or pure vibes?",
+    # ── Rest, chai, metaphor buffet ───────────────────────────────────────────
+    "It's {time}, {user}. Stat tallies suggest you’ve been a statue. Chai, coffee, water — pick a liquid with intention.",
+    "{user}, {time}. Micro-adventure: stand, sigh like a drama villain, sip something warm, return a slightly new person.",
+    "{time}. {user}, I’m banking on you being brilliant in twenty thirty-five too — five stolen minutes now buys a clear hour later.",
+    "{user}, {time}. Do you want me whisper-mode steady or drum-major loud? I can swing either; you pick the season.",
+    "{time}, {user}. Your neck called; it wants a salary negotiation. Roll it once, we’ll call it a draw.",
+    # ── Body / eyes / posture — playful ──────────────────────────────────────
+    "Hey {user}, {time}. Twenty-second vacation: water, stretch, stare at anything that isn’t glowing.",
+    "Time’s {time}, {user}. Shoulders: elevator going up? Jaw: auditioning for a thriller? Relax both, love.",
+    "{user}, blink parade — {time}. The ticket queue has patience; your corneas might not.",
+    "{time}, {user}. If your posture were a Git branch it’d be titled fix-me-later — quick ergonomics commit?",
+    # ── Wry elder nerd / tech whimsy ───────────────────────────────────────────
+    "{user}, {time}. Calorie audit: has anything entered you today that wasn’t bean juice or optimism?",
+    "{time}. {user}, the chair misses you when you walk — give it a little longing; stand, loop the room, sit fresh.",
+    "{time}, {user}. GPS check on the rabbit hole — still orbiting the original mission, or inventing side quests?",
+    "{user}, {time}. Low-battery warning, but for humans. Plug into food, air, or a ridiculous stretch.",
+    # ── Late hours / romance with the screen ──────────────────────────────────
+    "{time} and you’re still glowering at pixels, {user}. Proud, worried, impressed — pick two; also breathe.",
+    "Hey {user}, {time}. The screen doesn’t get a trophy for holding your gaze. Look away like you mean it.",
+    # ── Fresh angles: curiosity, mischief, warmth ────────────────────────────
+    "{time}. {user}, tiny scandal: when did you last feel proud of one small thing you shipped? Say it out loud once.",
+    "{user}, {time}. Season finale energy — is this arc about shipping or about collecting plot threads?",
+    "{time}, {user}. I brought you a virtual biscuit.Nutrition-free, but the thought’s warm.Reward yourself a real bite too.",
+    "{user}, {time}. If focus were Wi-Fi, what’s your signal strength right now — full bars or that one sad wedge?",
+    "{time}. {user}, permission slip: you may be ordinary for ninety seconds.Stare at a wall.It counts as maintenance.",
+    "{user}, {time}. Dear protagonist — this is the bit where you hydrate before the montage continues.",
+    "{time}, {user}. Roll credits on the tab you’re hoarding for ‘later’.Later is a myth; close or commit.",
+    "{user}, {time}. Orchestral swell: stretch fingers, roll ankles, return like you had an intermission.",
+    "{time}. {user}, your brain ran a marathon in sneakers.Inflate the lungs; send oxygen upstairs.",
+    "{user}, {time}. Mini boss fight versus dehydration.Drink water like it’s a power-up.",
+    "{time}, {user}. Steward’s bingo: saved work, clear filename, one gulp of water — how many squares you got?",
+    "{user}, {time}. Comedy option: narrate your next keystroke like a sports announcer.Then get back to serious mode.",
+    "{time}. {user}, the universe did not assign you to this chair forever — orbit away briefly.",
+    "{user}, {time}. Tea-leaves in my imaginary cup say you need a five-minute reset. Fake the leaves if you disagree.",
+    "{time}, {user}. Whisper: you’re allowed to be kind to Future You without a project ticket.",
+    "{user}, {time}. Ambient’s spicy take — perfection is boring; a messy save beats a mythic rewrite.",
+    "{time}. {user}, shake the Etch A Sketch behind your eyes; look at something green or boringly far away.",
+    "{user}, {time}. Director’s note: softer shoulders, slower blink, same brilliance.",
 ]
 
-# Hindi check-in templates — used when FRIDAY_AMBIENT_LANG=hindi
+# Hindi check-in templates — used when FRIDAY_AMBIENT_LANG=hindi (creative, varied Devanagari)
 _CHECKIN_TEMPLATES_HI = [
-    # ── घर की बड़ी बुजुर्ग — housekeeping, काम ──────────────────────────────
-    "{time} हो गए, {user}। ज़रा देखो — जो काम किया वो save किया या नहीं? बाद में पछताना ठीक नहीं।",
-    "{user}, {time} बज रहे हैं। मैं यहाँ सब संभालती हूँ — तुम बताओ, काम सही दिशा में है ना?",
-    "{time}, {user}। एक बात बताओ — असल ज़रूरी काम पर हो, या कहीं भटक गए?",
-    "{user}, {time}। सच बताना — मैं मदद कर रही हूँ या परेशान कर रही हूँ? दोनों जवाब ठीक हैं।",
-    # ── आराम, चाय, पानी ─────────────────────────────────────────────────────
-    "{time} हो गए, {user}। कब से बैठे हो? चाय पियो, पानी पियो, ज़रा उठो तो।",
-    "{user}, {time}। थोड़ा साँस लो — कंधे हिलाओ, कुछ गरम पियो, फिर काम पर लगो।",
-    "{time}, {user}। अगले दस साल भी काम करना है — पाँच मिनट का break बाद में घंटों की clarity देता है।",
-    "{user}, {time}। बोलो — एकदम focus चाहिए या बीच-बीच में check-in? जैसा कहो वैसा करूँगी।",
-    # ── शरीर का ख़याल ────────────────────────────────────────────────────────
-    "अरे {user}, {time} बज गए। पानी पिया? थोड़ा stretch किया? बीस सेकंड के लिए screen से आँखें हटाओ।",
-    "{time}, {user}। कमर सीधी है? जबड़ा tight तो नहीं? बरसों से computers देखती हूँ — प्यार से टोकती हूँ।",
-    "{user}, एक बार पलकें झपकाओ — {time} हो गए। ticket queue थोड़ी देर रुक सकती है।",
-    # ── बुज़ुर्ग वाली ज़िद ────────────────────────────────────────────────────
-    "{user}, {time}। कुछ खाया आज? सिर्फ चाय और code से काम नहीं चलेगा।",
-    "{time}। {user}, कुर्सी घर नहीं है — उठो, थोड़ा टहलो, फिर ताज़े दिमाग़ से बैठो।",
-    "{time}, {user}। ज़रा check करो — जो काम शुरू किया था उस पर हो या कहीं नई पगडंडी पर चले गए?",
-    # ── देर रात ──────────────────────────────────────────────────────────────
-    "{time} और अभी भी काम, {user}। गर्व भी है, चिंता भी — थोड़ा break लो, नुकसान नहीं होगा।",
-    "अरे {user}, {time}। screen को जीतने मत दो — एक नज़र हटाओ, थोड़ा सुस्ताओ।",
+    # ── घर की बड़ी बुज़ुर्ग, मगर नए रंग ───────────────────────────────────────
+    "{time} हो गए, {user}। छोटी चोरी-चोरी सवाल — जो किया वो save है ना? रात को रोना महँगा पड़ता है।",
+    "{user}, {time} बज रहे। मैं यहाँ हाउस की बड़ी हूँ — सच बताओ, जहाज़ सही बंदरगाह की तरफ़ है ना?",
+    "{time}, {user}। वैसे एक बात — असली काम पर हो या साइड क्वेस्ट इकट्ठे कर रहे हो?",
+    "{user}, {time}। मैं मदद हूँ या टोकने वाली हूँ? दोनों एक सिक्के के दो पहलू — बस बता दो ताल क्या रखें।",
+    "{time}, {user}। कल के लिए छोटा-सा नक्शा छोड़ गए हो या सिर्फ दिमाग़ में धुआँ?",
+    # ── चाय, पानी, नाटकीय इजाज़त ────────────────────────────────────────────
+    "{time}, {user}। कब से मूर्ति बने बैठे हो? चाय, पानी, कुछ तो पियो — खाली कीबोर्ड से पेट नहीं भरता।",
+    "{user}, {time}। इजाज़त है: कंधे घुमाओ, गरम कुछ पियो, फिल्मी अंदाज़ में एक साँस लो, फिर लग जाओ।",
+    "{time}, {user}। अगले दस साल भी तुम्हें चाहिए ना? आज पाँच मिनट की छोटी छुट्टी कल की घंटों बचाएगी।",
+    "{user}, {time}। चाहिए शांत साथी वाला चेक-इन या ढाबे वाली चिल्ल? बोलो, ताल मिला लूँगी।",
+    "{time}, {user}। गले ने शिकायत भेजी है — पानी नम करो, आवाज़ हल्की करो, स्क्रीन से आँखें उतारो।",
+    # ── शरीर, आँखें, कमर — प्यार से टोक ─────────────────────────────────────
+    "अरे {user}, {time}। बीस सेकंड की छुट्टी: पानी, हाथ फैलाना, कुछ ऐसा देखो जो चमकता न हो।",
+    "{time}, {user}। कमर सीधी है या सवाल पूछ रही है? जबड़ा ढीला — सब आईटी वालों की माँ हूँ मैं।",
+    "{user}, पलकें मारो — {time}। टिकट कतार थोड़ी देर रुक सकती है, आँखें नहीं।",
+    "{time}, {user}। अगर पोश्चर गिट ब्रांच होता तो नाम होता फिक्स-मी-लेटर — एक एर्गोनॉमिक्स वाला कमिट?",
+    # ── खाना, हँसी, ज़िद ──────────────────────────────────────────────────────
+    "{user}, {time}। आज कुछ ऐसा खाया जो चाय से नहीं बना? बताओ सच; मैं नोट करूँगी।",
+    "{time}। {user}, कुर्सी ससुराल नहीं है — उठो, थोड़ा टहलो, फिर ताज़े दिमाग़ से बैठो।",
+    "{time}, {user}। पगडंडी चेक — जिस काम पर निकले थे उसी पर हो या नई गली मिल गई?",
+    "{user}, {time}। बैटरी लो — इंसान वाली। खाना, हवा, या एक मूर्खतापूर्ण स्ट्रेच चार्ज करो।",
+    # ── देर रात, स्क्रीन से मोहब्बत ───────────────────────────────────────────
+    "{time} और अभी भी जादुई बॉक्स, {user}। गर्व है, चिंता है — दो मिनट सांस लो, संसार नहीं टूटेगा।",
+    "अरे {user}, {time}। स्क्रीन को ट्रॉफ़ी मत दो — नज़र हटाओ, दुनिया भी देख लो।",
+    # ── नए कोण: चुलबुली, गर्मजोशी ─────────────────────────────────────────────
+    "{time}, {user}। छोटा गुनगुनाहट-सा सवाल — आज किस छोटी जीत पर एक सेकंड की मुस्कान बनती है? कहकर सुनाओ।",
+    "{user}, {time}। कहानी का कौन सा हिस्सा चल रहा — असली क्लाइमैक्स या साइड किरदारों की भीड़?",
+    "{time}, {user}। काल्पनिक बिस्कुट लाई हूँ — पोषण शून्य, प्यार भरपूर; असली नाश्ता भी कर लेना।",
+    "{user}, {time}। अगर फोकस वाई-फाई होता तो सिग्नल कितने खाने पर है — पूरे बार या एक ढीला खाँचा?",
+    "{time}, {user}। इजाज़त है नब्बे सेकंड साधारण रहने की — दीवार घूरो, मंत्र बिना।",
+    "{user}, {time}। नायक वाला हिस्सा — मॉन्टाज से पहले पानी पियो, वरना स्टंट डबल हो जाते हैं।",
+    "{time}, {user}। वो टैब जो बाद में के नाम पर जीवित है — आज एक को विदाई दे दो।",
+    "{user}, {time}। उंगलियाँ नाचें, घुटने घुमें, फिर कीबोर्ड पर वापसी ताज़ी ऊर्जा के साथ।",
+    "{time}, {user}। दिमाग़ मैराथन दौड़ा चप्पल पहनकर — फेफड़ों को ऑक्सीजन का वेतन दो।",
+    "{user}, {time}। पानी बॉस फाइट — एक घूँट से हेल्थ बार भरो।",
+    "{time}, {user}। स्टीवर्ड बिंगो: सेव है? नाम ठीक है? एक घूँट पानी? कितने डब्बे भरे?",
+    "{user}, {time}। अगला कीस्ट्रोक कॉमेंट्री की तरह चिल्लाओ, फिर शांति से काम पर लौट जाओ।",
+    "{time}, {user}। कुर्सी हमेशा के लिए नहीं मिली — थोड़ा उठो, दुनिया को याद करो।",
+    "{user}, {time}। चाय की पत्तियाँ कहती हैं छोटा ब्रेक लो — शायद वे सही हों।",
+    "{time}, {user}। फुसफुसाहट: कल वाले तुम्हें आज से मेहरबानी करने की इजाज़त है, टिकट की ज़रूरत नहीं।",
+    "{user}, {time}। परफेक्शन उबाऊ है; अधूरा सेव कभी-कभी मिथक वाले रीराइट से बेहतर है।",
+    "{time}, {user}। आँखों के पीछे स्लेट साफ करो — कुछ हरा या बोरिंग दूर का देखो।",
+    "{user}, {time}। निर्देशन: कंधे नरम, पलकें धीमी, दिमाग़ वैसा ही तेज़।",
+    "{time}, {user}। अच्छा सुनो — आज एक छोटी बात जो अच्छी लगी, खुद से एक बार बोलकर सुनो।",
+    "{user}, {time}। सीढ़ी उतरने वाला पल — गहरी साँस, फिर ऊपर फिर से।",
 ]
+
+
+_CHECKIN_RECENT_TEMPLATES: deque[str] = deque(maxlen=6)
 
 
 def _pick_checkin_line() -> str:
     lang = os.environ.get("FRIDAY_AMBIENT_LANG", "").strip().lower()
     pool = _CHECKIN_TEMPLATES_HI if lang == "hindi" else _CHECKIN_TEMPLATES
-    return random.choice(pool).format(user=USER_NAME, time=_format_local_time_spoken())
+    candidates = [t for t in pool if t not in _CHECKIN_RECENT_TEMPLATES]
+    if not candidates:
+        candidates = list(pool)
+    tpl = random.choice(candidates)
+    _CHECKIN_RECENT_TEMPLATES.append(tpl)
+    return tpl.format(user=USER_NAME, time=_format_local_time_spoken())
 
 
 def speak_subagent_blocking(

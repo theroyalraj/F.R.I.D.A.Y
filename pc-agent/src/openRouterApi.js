@@ -67,13 +67,11 @@ export function openRouterModelForTier(tier, env = process.env) {
 }
 
 /**
+ * Single-shot call with one specific API key (no rotation).
+ * @param {string} apiKey
  * @param {{ prompt: string, system: string, model: string, maxTokens?: number, timeoutMs?: number, log?: import('pino').Logger }} opts
- * @returns {Promise<{ ok: boolean, text: string, model: string, ms: number, httpStatus?: number }>}
  */
-export async function callOpenRouterChat(opts) {
-  const apiKey = normalizeOpenRouterApiKey();
-  if (!apiKey) throw new Error('OPENROUTER_API_KEY not set');
-
+async function _callWithKey(apiKey, opts) {
   const model = opts.model;
   const timeoutMs = opts.timeoutMs ?? 30_000;
   const maxTokens = opts.maxTokens ?? 256;
@@ -123,11 +121,63 @@ export async function callOpenRouterChat(opts) {
     }
 
     const text = data?.choices?.[0]?.message?.content?.trim() || '';
-    opts.log?.info({ model, ms, chars: text.length, via: 'openrouter' }, 'openRouter: ok');
     return { ok: true, text, model, ms };
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Call OpenRouter with automatic key rotation on 429.
+ * Tries up to MAX_KEYS (3) different API keys round-robin before giving up.
+ *
+ * @param {{ prompt: string, system: string, model: string, maxTokens?: number, timeoutMs?: number, log?: import('pino').Logger }} opts
+ * @returns {Promise<{ ok: boolean, text: string, model: string, ms: number, httpStatus?: number, keyRotations?: number }>}
+ */
+export async function callOpenRouterChat(opts) {
+  const { getNextKey, markKeyCooldown, clearKeyCooldown, loadKeyPool } = await import('./openRouterKeyPool.js');
+  const pool = loadKeyPool();
+
+  if (pool.length === 0) {
+    const legacy = normalizeOpenRouterApiKey();
+    if (!legacy) throw new Error('OPENROUTER_API_KEY not set');
+    pool.push(legacy);
+  }
+
+  const triedKeys = new Set();
+  let lastErr = null;
+
+  for (let rotation = 0; rotation < pool.length; rotation++) {
+    const key = await getNextKey() || pool[rotation % pool.length];
+    if (triedKeys.has(key)) continue;
+    triedKeys.add(key);
+
+    const shortId = key.slice(-8);
+    try {
+      const result = await _callWithKey(key, opts);
+      await clearKeyCooldown(key);
+      opts.log?.info(
+        { model: opts.model, ms: result.ms, chars: (result.text || '').length, via: 'openrouter', keyShort: shortId, rotation },
+        'openRouter: ok',
+      );
+      return { ...result, keyRotations: rotation };
+    } catch (e) {
+      lastErr = e;
+      const status = e?.httpStatus || 0;
+      if (status === 429 && rotation < pool.length - 1) {
+        opts.log?.warn(
+          { model: opts.model, keyShort: shortId, status, rotation },
+          'openRouter: 429 on key — rotating to next',
+        );
+        await markKeyCooldown(key);
+        continue;
+      }
+      throw e;
+    }
+  }
+
+  if (lastErr) throw lastErr;
+  throw new Error('OPENROUTER_API_KEY not set');
 }
 
 /**

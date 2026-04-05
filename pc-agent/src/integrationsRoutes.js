@@ -2,6 +2,7 @@ import express from 'express';
 import crypto from 'node:crypto';
 import { fetchGmailSnapshot } from './gmailRunner.js';
 import { getPoolSnapshot, refreshModelPool } from './openRouterModelPool.js';
+import { getKeyPoolSnapshot, validateAllKeys } from './openRouterKeyPool.js';
 
 function evolutionBase() {
   const port = (process.env.EVOLUTION_PORT || '8181').trim();
@@ -300,6 +301,24 @@ export function createIntegrationsRouter(authMiddleware) {
       await refreshModelPool({ log: req.log, force: true });
       const snap = await getPoolSnapshot();
       res.json({ ok: true, refreshed: true, ...snap });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  });
+
+  r.get('/key-pool', async (_req, res) => {
+    try {
+      const snap = await getKeyPoolSnapshot();
+      res.json({ ok: true, ...snap });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  });
+
+  r.post('/key-pool/validate', async (req, res) => {
+    try {
+      const results = await validateAllKeys();
+      res.json({ ok: true, keys: results });
     } catch (e) {
       res.status(500).json({ ok: false, error: String(e?.message || e) });
     }

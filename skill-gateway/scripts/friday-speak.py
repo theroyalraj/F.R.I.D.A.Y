@@ -875,28 +875,44 @@ async def _stream_and_play(switch_done: threading.Event, my_gen: int) -> None:
         print(f"[friday-speak] cached {len(audio_data)} bytes for next time", flush=True)
 
 
-# ── Music fade-out ─────────────────────────────────────────────────────────────
-def _fade_and_stop_music(fade_sec: float = 1.5, steps: int = 20) -> None:
-    """
-    Fade out ONLY the startup song (friday-play.py's ffplay process) before TTS speaks.
-    Targets the specific PID from friday-play.pid so TTS voices are never accidentally faded.
-    Skipped while friday-play holds music unless FRIDAY_TTS_INTERRUPT_MUSIC=ui.
-    """
-    if friday_play_music_hold_active() and not may_interrupt_music_from_tts():
-        print(
-            "[friday-speak] music hold active — skip fade (set FRIDAY_TTS_INTERRUPT_MUSIC=ui to duck)",
-            flush=True,
-        )
-        return
+# ── Music ducking ──────────────────────────────────────────────────────────────
+_MUSIC_PRE_DUCK_VOL: float | None = None
+
+
+def _music_duck_level() -> float:
+    """Target mixer volume for music while TTS speaks (0.0–1.0). Default 0.05 (5%)."""
+    raw = os.environ.get("FRIDAY_MUSIC_DUCK_LEVEL", "0.05").split("#")[0].strip()
+    try:
+        return max(0.0, min(1.0, float(raw)))
+    except ValueError:
+        return 0.05
+
+
+def _music_normal_level() -> float:
+    """Normal mixer volume for music (derived from FRIDAY_PLAY_VOLUME 0–100 → 0.0–1.0)."""
+    raw = os.environ.get("FRIDAY_PLAY_VOLUME", "20").split("#")[0].strip()
+    try:
+        return max(0.0, min(1.0, int(float(raw)) / 100.0))
+    except ValueError:
+        return 0.20
+
+
+def _get_music_pid() -> int | None:
+    """Read the music player PID from friday-play.pid (if music is active)."""
     pid_file = Path(tempfile.gettempdir()) / "friday-play.pid"
     if not pid_file.exists():
-        return
-
+        return None
     try:
-        song_pid = int(pid_file.read_text().strip())
+        return int(pid_file.read_text().strip())
     except Exception:
-        return
+        return None
 
+
+def _set_music_mixer_volume(song_pid: int, target: float, fade_sec: float = 0.3, steps: int = 8) -> float | None:
+    """
+    Smoothly set the Windows audio mixer volume for a music PID.
+    Returns the previous volume (for restore), or None if not applicable.
+    """
     try:
         from pycaw.utils import AudioUtilities
 
@@ -905,24 +921,88 @@ def _fade_and_stop_music(fade_sec: float = 1.5, steps: int = 20) -> None:
             s for s in sessions
             if s.Process and s.Process.pid == song_pid and s.SimpleAudioVolume
         ]
+        if not music_sessions:
+            return None
 
-        if music_sessions:
-            step_time = fade_sec / steps
-            for i in range(steps + 1):
-                vol = 1.0 - (i / steps)
-                for s in music_sessions:
-                    try:
-                        s.SimpleAudioVolume.SetMasterVolume(vol, None)
-                    except Exception:
-                        pass
-                if i < steps:
-                    time.sleep(step_time)
-            print(f"[friday-speak] song faded out (PID {song_pid})", flush=True)
+        prev = music_sessions[0].SimpleAudioVolume.GetMasterVolume()
+        if abs(prev - target) < 0.02:
+            return prev
+
+        step_time = fade_sec / max(1, steps)
+        for i in range(steps + 1):
+            t = i / steps
+            vol = prev + (target - prev) * t
+            for s in music_sessions:
+                try:
+                    s.SimpleAudioVolume.SetMasterVolume(max(0.0, min(1.0, vol)), None)
+                except Exception:
+                    pass
+            if i < steps:
+                time.sleep(step_time)
+        return prev
     except ImportError:
-        pass
+        return None
     except Exception as exc:
-        print(f"[friday-speak] fade-out skipped ({exc.__class__.__name__}: {exc})", file=sys.stderr, flush=True)
+        print(f"[friday-speak] mixer set skipped ({exc.__class__.__name__}: {exc})", file=sys.stderr, flush=True)
+        return None
 
+
+def _duck_music() -> None:
+    """
+    Lower music volume before TTS speaks. Does NOT kill the music player.
+    If no music is playing or the hold is active, does nothing.
+    Stores the pre-duck volume so _restore_music_volume can bring it back.
+    """
+    global _MUSIC_PRE_DUCK_VOL
+    if friday_play_music_hold_active() and not may_interrupt_music_from_tts():
+        print(
+            "[friday-speak] music hold active — skip duck (set FRIDAY_TTS_INTERRUPT_MUSIC=ui to duck)",
+            flush=True,
+        )
+        return
+    song_pid = _get_music_pid()
+    if song_pid is None:
+        return
+    duck = _music_duck_level()
+    prev = _set_music_mixer_volume(song_pid, duck, fade_sec=0.4, steps=10)
+    if prev is not None:
+        _MUSIC_PRE_DUCK_VOL = prev
+        print(f"[friday-speak] ducked music {prev:.0%} → {duck:.0%} (PID {song_pid})", flush=True)
+
+
+def _restore_music_volume() -> None:
+    """Restore music volume to the normal level after TTS finishes."""
+    global _MUSIC_PRE_DUCK_VOL
+    song_pid = _get_music_pid()
+    if song_pid is None:
+        _MUSIC_PRE_DUCK_VOL = None
+        return
+    target = _music_normal_level()
+    if _MUSIC_PRE_DUCK_VOL is not None:
+        target = max(target, _MUSIC_PRE_DUCK_VOL)
+    prev = _set_music_mixer_volume(song_pid, target, fade_sec=0.5, steps=10)
+    if prev is not None:
+        print(f"[friday-speak] restored music {prev:.0%} → {target:.0%} (PID {song_pid})", flush=True)
+    _MUSIC_PRE_DUCK_VOL = None
+
+
+def _fade_and_stop_music(fade_sec: float = 1.5, steps: int = 20) -> None:
+    """
+    Fade out and kill the startup song (friday-play.py's ffplay process).
+    Used by priority pre-empt when we need the music completely gone.
+    For normal TTS, use _duck_music / _restore_music_volume instead.
+    """
+    if friday_play_music_hold_active() and not may_interrupt_music_from_tts():
+        return
+    pid_file = Path(tempfile.gettempdir()) / "friday-play.pid"
+    if not pid_file.exists():
+        return
+    try:
+        song_pid = int(pid_file.read_text().strip())
+    except Exception:
+        return
+    _set_music_mixer_volume(song_pid, 0.0, fade_sec=fade_sec, steps=steps)
+    print(f"[friday-speak] song faded out (PID {song_pid})", flush=True)
     try:
         os.kill(song_pid, _signal.SIGTERM)
         pid_file.unlink(missing_ok=True)
@@ -1718,7 +1798,7 @@ async def _speak_inner(my_gen: int) -> None:
         print(f"[friday-speak] thinking pool span voice: {_span_voice}", flush=True)
         _max_pc = int(os.environ.get("FRIDAY_CURSOR_THINKING_MAX_CHUNK_CHARS", "320"))
         _sentences = _split_thinking_sentences(TEXT, max_chars=max(80, min(_max_pc, 1200)))
-        _fade_and_stop_music()
+        _duck_music()
         switch_done.wait(timeout=10)
         for _si, _sent in enumerate(_sentences):
             if _playback_superseded(my_gen):
@@ -1741,6 +1821,7 @@ async def _speak_inner(my_gen: int) -> None:
                 await asyncio.sleep(random.uniform(0.18, 0.42))
         TEXT = _pool_orig_text
         VOICE = _pool_orig_voice
+        _restore_music_volume()
         _restore_device(device_result)
         return
 
@@ -1767,7 +1848,7 @@ async def _speak_inner(my_gen: int) -> None:
                 f"(min_chars={_chunk_min}, max_chunk={_chunk_max_pc})",
                 flush=True,
             )
-            _fade_and_stop_music()
+            _duck_music()
             switch_done.wait(timeout=10)
             for _ci, _part in enumerate(_chunk_parts):
                 if _playback_superseded(my_gen):
@@ -1798,6 +1879,7 @@ async def _speak_inner(my_gen: int) -> None:
                 if _ci < len(_chunk_parts) - 1 and not _playback_superseded(my_gen):
                     await asyncio.sleep(random.uniform(0.12, 0.28))
             TEXT = _orig_text_chunks
+            _restore_music_volume()
             _restore_device(device_result)
             return
 
@@ -1810,8 +1892,9 @@ async def _speak_inner(my_gen: int) -> None:
         switch_done.wait(timeout=10)
         if _playback_superseded(my_gen):
             return
-        _fade_and_stop_music()
+        _duck_music()
         _play_with_device(cached, device_result, use_device, my_gen)
+        _restore_music_volume()
         return
 
     # Cache miss — download full MP3 then play from file (clean audio, no pipe stutter).
@@ -1819,7 +1902,7 @@ async def _speak_inner(my_gen: int) -> None:
     _use_stream = os.environ.get("FRIDAY_TTS_STREAM", "false").strip().lower() in (
         "1", "true", "yes", "on",
     )
-    _fade_and_stop_music()
+    _duck_music()
 
     if _use_stream:
         try:
@@ -1836,6 +1919,7 @@ async def _speak_inner(my_gen: int) -> None:
                 _save_cache(mp3_data)
                 switch_done.wait(timeout=10)
                 _restore_device(device_result)
+                _restore_music_volume()
                 return
             _save_cache(mp3_data)
             switch_done.wait(timeout=10)
@@ -1857,10 +1941,12 @@ async def _speak_inner(my_gen: int) -> None:
             )
             switch_done.wait(timeout=2)
             _restore_device(device_result)
+            _restore_music_volume()
             if not _playback_superseded(my_gen):
                 _sapi_speak()
             sys.exit(1)
 
+    _restore_music_volume()
     _restore_device(device_result)
 
 

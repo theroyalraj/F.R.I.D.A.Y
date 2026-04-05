@@ -70,6 +70,9 @@ const SessionSidebar: React.FC<SessionSidebarProps> = ({
 
   return (
     <div className={`${styles['session-sidebar']} ${styles[`session-sidebar-${theme}`]}`}>
+      {/* Tasks — top of sidebar for maximum visibility */}
+      <TodoPanel authHeaders={authHeaders} theme={theme} />
+
       <div className={styles['session-sidebar-header']}>
         <h2 className={styles['session-sidebar-title']}>Voice Sessions</h2>
         {isLoading && <span className={styles['session-sidebar-loading']}>⟳</span>}
@@ -117,10 +120,6 @@ const SessionSidebar: React.FC<SessionSidebarProps> = ({
           rate={100}
           isActive={true}
         />
-
-        {/* Todo panel */}
-        <div className={styles['session-sidebar-divider']} />
-        <TodoPanel authHeaders={authHeaders} theme={theme} />
       </div>
     </div>
   );

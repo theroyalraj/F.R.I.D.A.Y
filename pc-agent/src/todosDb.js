@@ -78,9 +78,7 @@ function matchesJsonScope(item, scope) {
   const s = normalizeTodoScope(scope);
   const o = item.orgId ?? null;
   const u = item.userId ?? null;
-  if (s.orgId == null && s.userId == null) {
-    return o == null && u == null;
-  }
+  if (o == null && u == null) return true;
   return o === s.orgId && u === s.userId;
 }
 
@@ -94,7 +92,7 @@ function sqlTodoScope(p1, alias = '') {
   const uid = `${alias}user_id`;
   const a = p1;
   const b = p1 + 1;
-  return `((($${a}::uuid IS NULL AND $${b}::uuid IS NULL) AND ${org} IS NULL AND ${uid} IS NULL) OR (${org} = $${a} AND ${uid} = $${b}))`;
+  return `((${org} IS NULL AND ${uid} IS NULL) OR (${org} = $${a} AND ${uid} = $${b}))`;
 }
 
 function mapTodoRow(row) {
