@@ -111,9 +111,13 @@ try {
 
 const speakText = taskMessage.length > 120 ? taskMessage.slice(0, 117) + '…' : taskMessage;
 
+const ttsHeaders = { 'Content-Type': 'application/json', 'ngrok-skip-browser-warning': '1' };
+const agentSecret = process.env.PC_AGENT_SECRET;
+if (agentSecret) ttsHeaders.Authorization = `Bearer ${agentSecret}`;
+
 const ttsRes = await fetch(`${agentBase}/voice/tts`, {
   method:  'POST',
-  headers: { 'Content-Type': 'application/json', 'ngrok-skip-browser-warning': '1' },
+  headers: ttsHeaders,
   body:    JSON.stringify({ text: speakText }),
   cache:   'no-store',
 }).catch((e) => { console.error('TTS fetch failed:', e.message); process.exit(1); });
