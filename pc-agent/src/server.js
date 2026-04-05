@@ -45,6 +45,7 @@ import { createOrganizationRouter } from './organizationRoutes.js';
 import { authJwtOrAgentSecret } from './authMiddleware.js';
 import { ensureAuthSchema } from './ensureAuthSchema.js';
 import { registerDeferredOpenRouterEmitter } from './deferredOpenRouter.js';
+import { refreshModelPool } from './openRouterModelPool.js';
 import {
   refreshPersonaPatchRedisFromDb,
   getVoicePersonasRegistrySnapshot,
@@ -556,6 +557,60 @@ voiceRouter.get('/status', async (_req, res) => {
   }
 });
 
+/** Return voice sessions with metadata enrichment for UI display. */
+voiceRouter.get('/sessions', async (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    const contexts = await getAllVoiceContexts();
+    // Enrich sessions with metadata
+    const sessions = contexts.map((ctx) => {
+      const voice = String(ctx.voice || '').toLowerCase();
+      // Extract basic metadata from voice name
+      const shortName = voice.replace(/([A-Z][a-z]+)/g, ' $1').trim() || voice;
+      const isMultilingual = voice.includes('multilingual');
+      const isNeutral = voice.includes('neutral');
+      const isFemale = voice.includes('emma') || voice.includes('aria') || voice.includes('jenny') ||
+                       voice.includes('nancy') || voice.includes('libby') || voice.includes('sonia') ||
+                       voice.includes('natasha') || voice.includes('clara') || voice.includes('neerja');
+      const gender = isFemale ? 'F' : isNeutral ? 'Neutral' : 'M';
+
+      // Extract locale
+      const localeMatch = voice.match(/^(en-[A-Z]{2})/);
+      const locale = localeMatch ? localeMatch[1] : 'en-US';
+
+      // Gender-based emoji
+      const icon = gender === 'F' ? '👩‍💼' : gender === 'M' ? '👨‍💼' : '🤖';
+
+      // Color based on gender
+      const colors = {
+        F: '#f0abfc',    // pink
+        M: '#60a5fa',    // blue
+        Neutral: '#8b5cf6', // purple
+      };
+      const color = colors[gender] || '#8b5cf6';
+
+      return {
+        context: ctx.context,
+        voice: ctx.voice,
+        setAt: ctx.set_at,
+        lastUsed: ctx.last_used,
+        status: ctx.status,
+        metadata: {
+          gender,
+          locale,
+          icon,
+          color,
+          description: `${gender === 'F' ? 'Female' : gender === 'M' ? 'Male' : 'Neutral'} voice · ${locale}`,
+        },
+      };
+    });
+
+    res.json({ ok: true, sessions });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: String(err.message || err) });
+  }
+});
+
 /** Set the active Edge TTS voice for this server session (persisted to Redis). */
 voiceRouter.post('/set-voice', (req, res) => {
   const { voice } = req.body || {};
@@ -839,6 +894,11 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 
 async function bootstrap() {
   registerDeferredOpenRouterEmitter((type, data) => broadcastEvent(type, data));
+
+  // Populate OpenRouter free model pool from /models API on startup
+  refreshModelPool({ log: rootLogger, force: true }).catch((e) =>
+    rootLogger.debug({ err: String(e?.message || e) }, 'openRouterModelPool: initial refresh skipped'),
+  );
 
   try {
     await ensureAuthSchema(rootLogger);

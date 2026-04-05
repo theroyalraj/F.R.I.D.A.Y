@@ -5,6 +5,7 @@ import { callClaudeApi, isApiKeyAvailable } from './claudeApi.js';
 import {
   OPENROUTER_SETUP_MESSAGE,
   callOpenRouterChat,
+  callOpenRouterCascade,
   isOpenRouterConfigured,
   openRouterFreeModel,
 } from './openRouterApi.js';
@@ -14,6 +15,7 @@ import { inferClaudeModelForTask, isAutoModelEnabled } from './claudeRouter.js';
 import { sanitizeClaudeModel } from './claudeModel.js';
 import { getSpeakStyle, buildSpeakStyleInstruction } from './speakStyle.js';
 import { getCachedCompanyContextString } from './companyDb.js';
+import { getModelCascade, isClaudeFallbackEnabled, refreshModelPool } from './openRouterModelPool.js';
 
 // Sources that need fast conversational responses — use direct API, not CLI
 const FAST_SOURCES = new Set(['mic-daemon', 'voice', 'friday-mic-daemon', 'whatsapp', 'ui']);
@@ -152,7 +154,7 @@ export async function runTask(body, reqLog, options = {}) {
     }
   }
 
-  // ── OpenRouter free (direct): no Anthropic call — uses OPENROUTER_FREE_MODEL ─
+  // ── OpenRouter free (cascade): try pool models, fall back to Claude Opus ────
   const openRouterDirectTimeoutMs =
     src === 'whatsapp' ? Math.min(TIMEOUT, 180_000) : Math.min(TIMEOUT, 45_000);
 
@@ -170,45 +172,107 @@ export async function runTask(body, reqLog, options = {}) {
         },
       };
     }
-    const model = openRouterFreeModel();
-    reqLog.info({ mode: 'openrouter', model, apiTimeoutMs: openRouterDirectTimeoutMs }, 'openrouter direct (free model)');
-    try {
+
+    // Background-refresh pool from OpenRouter /models API (non-blocking after first load)
+    refreshModelPool({ log: reqLog }).catch(() => {});
+
+    const cascade = await getModelCascade(4);
+    reqLog.info(
+      { mode: 'openrouter', cascade, apiTimeoutMs: openRouterDirectTimeoutMs },
+      'openrouter cascade (free models)',
+    );
+
+    if (cascade.length > 0) {
       const system = buildVoiceSystem({ speakStyleExtra, companyContext });
-      const result = await callOpenRouterChat({
+      const result = await callOpenRouterCascade({
         prompt: t,
         system,
-        model,
+        models: cascade,
         timeoutMs: openRouterDirectTimeoutMs,
         log: reqLog,
       });
-      reqLog.info(
-        { mode: 'openrouter', ok: result.ok, ms: result.ms, model: result.model },
-        'openrouter direct done',
+
+      if (result.ok && (result.text || '').trim()) {
+        reqLog.info(
+          { mode: 'openrouter', ok: true, ms: result.ms, model: result.model, attempts: result.attempts },
+          'openrouter cascade done',
+        );
+        return {
+          status: 200,
+          json: {
+            ok: true,
+            mode: 'openrouter',
+            userId,
+            correlationId,
+            summary: result.text,
+          },
+        };
+      }
+
+      reqLog.warn(
+        { mode: 'openrouter', attempts: result.attempts, lastError: result.lastError },
+        'openrouter cascade: all free models failed',
       );
-      return {
-        status: 200,
-        json: {
-          ok: result.ok,
-          mode: 'openrouter',
-          userId,
-          correlationId,
-          summary: result.text || 'No reply text from the model.',
-        },
-      };
-    } catch (e) {
-      const msg = e?.message || String(e);
-      reqLog.warn({ err: msg }, 'openrouter direct failed');
-      return {
-        status: 200,
-        json: {
-          ok: false,
-          mode: 'openrouter',
-          userId,
-          correlationId,
-          error: msg.slice(0, 400),
-        },
-      };
+    } else {
+      reqLog.warn({ mode: 'openrouter' }, 'openrouter cascade: pool empty (all models in cooldown)');
     }
+
+    // ── Fallback to Claude Opus via Anthropic API ──
+    if (isClaudeFallbackEnabled() && isApiKeyAvailable()) {
+      reqLog.info({ mode: 'api', tier: 'opus', via: 'claude-fallback' }, 'free models exhausted — falling back to Claude Opus');
+      try {
+        const opusResult = await callClaudeApi(t, {
+          model: 'opus',
+          timeoutMs: openRouterDirectTimeoutMs,
+          log: reqLog,
+          speakStyleExtra,
+          companyContext,
+        });
+        if (opusResult.ok && (opusResult.text || '').trim()) {
+          reqLog.info(
+            { mode: 'api', model: opusResult.model, ms: opusResult.ms, via: 'claude-fallback' },
+            'Claude Opus fallback succeeded',
+          );
+          return {
+            status: 200,
+            json: {
+              ok: true,
+              mode: 'claude-fallback',
+              userId,
+              correlationId,
+              summary: opusResult.text,
+            },
+          };
+        }
+        if (opusResult.deferred && opusResult.deferredContext) {
+          scheduleOpenRouterFallback(opusResult.deferredContext);
+          return {
+            status: 200,
+            json: {
+              ok: true,
+              mode: 'claude-fallback',
+              userId,
+              correlationId,
+              summary: '',
+              deferredOpenRouter: true,
+            },
+          };
+        }
+      } catch (e) {
+        reqLog.warn({ err: String(e?.message || e).slice(0, 200) }, 'Claude Opus fallback also failed');
+      }
+    }
+
+    return {
+      status: 200,
+      json: {
+        ok: false,
+        mode: 'openrouter',
+        userId,
+        correlationId,
+        error: 'All free models rate-limited and Claude fallback unavailable. Try again shortly.',
+      },
+    };
   }
 
   // ── Fast path: direct API for voice/mic commands ────────────────────────────

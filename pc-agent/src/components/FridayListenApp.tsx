@@ -10,6 +10,8 @@ import VoiceSiriOverlay from './VoiceSiriOverlay';
 import MiniNotifyOrb from './MiniNotifyOrb';
 import { IntegrationsRail } from './IntegrationsRail';
 import { PersonaRosterModal } from './PersonaRosterModal';
+import LaunchOverlay from './LaunchOverlay';
+import SessionSidebar from './SessionSidebar';
 import {
   COMPANY_PERSONAS,
   SPEAKING_PERSONA_ORDER,
@@ -133,6 +135,8 @@ const FridayListenApp: React.FC = () => {
     roleCount: number;
     err?: string;
   } | null>(null);
+  const [launchOverlayVisible, setLaunchOverlayVisible] = useState(true);
+  const [sessionsLoading, setSessionsLoading] = useState(false);
   const [speakStyle, setSpeakStyle] = useState<{
     funny: boolean;
     snarky: boolean;
@@ -608,6 +612,9 @@ const FridayListenApp: React.FC = () => {
 
   return (
     <div className={`${styles.app} ${theme === 'light' ? styles.light : ''}`}>
+      {launchOverlayVisible && (
+        <LaunchOverlay onFadeComplete={() => setLaunchOverlayVisible(false)} />
+      )}
       <VoiceSiriOverlay
         open={connectionStatus === 'speaking'}
         theme={theme}
@@ -1008,6 +1015,20 @@ const FridayListenApp: React.FC = () => {
           onDrawerClose={() => setIntegrationsDrawerOpen(false)}
           isNarrow={isNarrow}
         />
+
+        {/* Voice Sessions Sidebar */}
+        {!isNarrow && (
+          <SessionSidebar
+            sessions={sessions}
+            currentVoice={currentVoice}
+            currentVoiceLabel={replyPersona.name}
+            currentVoiceIcon={curMeta.icon}
+            currentVoiceColor={curMeta.color}
+            currentVoiceDescription={replyPersona.personality || `${replyPersona.title} — ${replyPersona.name}`}
+            isLoading={sessionsLoading}
+            theme={theme}
+          />
+        )}
       </div>
 
       <PersonaRosterModal

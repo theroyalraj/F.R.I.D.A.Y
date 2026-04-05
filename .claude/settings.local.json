@@ -137,7 +137,10 @@
       "Bash(curl -s -X POST http://127.0.0.1:3847/auth/dev-session)",
       "Bash(grep -n '`' D:/code/openclaw/pc-agent/src/components/FridayListenApp.tsx)",
       "Bash(grep -n '${' D:/code/openclaw/pc-agent/src/components/FridayListenApp.tsx)",
-      "Bash(curl -s -X POST http://127.0.0.1:3847/voice/speak-async -H \"Content-Type: application/json\" -d '{\"\"\"\"text\"\"\"\":\"\"\"\"Hello, this is Nova speaking faster now\"\"\"\"}')"
+      "Bash(curl -s -X POST http://127.0.0.1:3847/voice/speak-async -H \"Content-Type: application/json\" -d '{\"\"\"\"text\"\"\"\":\"\"\"\"Hello, this is Nova speaking faster now\"\"\"\"}')",
+      "Bash(ls -la ~/.claude/*.json)",
+      "Skill(update-config)",
+      "Skill(update-config:*)"
     ]
   }
 }

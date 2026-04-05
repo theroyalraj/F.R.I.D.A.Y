@@ -68,7 +68,7 @@ export function openRouterModelForTier(tier, env = process.env) {
 
 /**
  * @param {{ prompt: string, system: string, model: string, maxTokens?: number, timeoutMs?: number, log?: import('pino').Logger }} opts
- * @returns {Promise<{ ok: boolean, text: string, model: string, ms: number }>}
+ * @returns {Promise<{ ok: boolean, text: string, model: string, ms: number, httpStatus?: number }>}
  */
 export async function callOpenRouterChat(opts) {
   const apiKey = normalizeOpenRouterApiKey();
@@ -110,15 +110,9 @@ export async function callOpenRouterChat(opts) {
     const raw = await resp.text().catch(() => '');
     if (!resp.ok) {
       const snippet = String(raw).slice(0, 220);
-      const hint401 =
-        resp.status === 401
-          ? ' Invalid or revoked key — open https://openrouter.ai/keys, create a fresh sk-or-v1 key, paste into OPENROUTER_API_KEY in dot env (no quotes), restart pc-agent.'
-          : '';
-      const hint404 =
-        resp.status === 404 && /no endpoints found|not found/i.test(snippet)
-          ? ' Model slug retired or wrong — set OPENROUTER_FREE_MODEL=openrouter/free (or pick a model from https://openrouter.ai/models?pricing=free), restart pc-agent.'
-          : '';
-      throw new Error(`OpenRouter API ${resp.status}: ${snippet}${hint401}${hint404}`);
+      const err = new Error(`OpenRouter API ${resp.status}: ${snippet}`);
+      err.httpStatus = resp.status;
+      throw err;
     }
 
     let data;
@@ -134,4 +128,45 @@ export async function callOpenRouterChat(opts) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Cascade: try multiple models from the pool. On success, mark the model as working.
+ * On 429/404, mark failed and try the next. If all fail, returns { ok: false, allFailed: true }.
+ * @param {{ prompt: string, system: string, models: string[], maxTokens?: number, timeoutMs?: number, log?: import('pino').Logger }} opts
+ * @returns {Promise<{ ok: boolean, text: string, model: string, ms: number, allFailed?: boolean, attempts?: number }>}
+ */
+export async function callOpenRouterCascade(opts) {
+  const { markModelOk, markModelFailed } = await import('./openRouterModelPool.js');
+  const models = opts.models || [];
+  let lastErr = null;
+  for (let i = 0; i < models.length; i += 1) {
+    const model = models[i];
+    try {
+      const result = await callOpenRouterChat({ ...opts, model });
+      if (result.ok && (result.text || '').trim()) {
+        await markModelOk(model);
+        return { ...result, attempts: i + 1 };
+      }
+      opts.log?.warn({ model, attempt: i + 1 }, 'openRouter cascade: empty reply, trying next');
+      await markModelFailed(model, 0);
+    } catch (e) {
+      const status = e?.httpStatus || 0;
+      opts.log?.warn(
+        { model, attempt: i + 1, status, err: String(e?.message || e).slice(0, 200) },
+        'openRouter cascade: model failed',
+      );
+      await markModelFailed(model, status);
+      lastErr = e;
+    }
+  }
+  return {
+    ok: false,
+    text: '',
+    model: models[models.length - 1] || '',
+    ms: 0,
+    allFailed: true,
+    attempts: models.length,
+    lastError: lastErr?.message || 'all models exhausted',
+  };
 }

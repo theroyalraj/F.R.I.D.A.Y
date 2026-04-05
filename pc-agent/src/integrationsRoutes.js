@@ -1,6 +1,7 @@
 import express from 'express';
 import crypto from 'node:crypto';
 import { fetchGmailSnapshot } from './gmailRunner.js';
+import { getPoolSnapshot, refreshModelPool } from './openRouterModelPool.js';
 
 function evolutionBase() {
   const port = (process.env.EVOLUTION_PORT || '8181').trim();
@@ -282,6 +283,25 @@ export function createIntegrationsRouter(authMiddleware) {
         ok: false,
         error: msg.includes('abort') ? 'Evolution send timed out — check WhatsApp connection' : msg,
       });
+    }
+  });
+
+  r.get('/model-pool', async (_req, res) => {
+    try {
+      const snap = await getPoolSnapshot();
+      res.json({ ok: true, ...snap });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  });
+
+  r.post('/model-pool/refresh', async (req, res) => {
+    try {
+      await refreshModelPool({ log: req.log, force: true });
+      const snap = await getPoolSnapshot();
+      res.json({ ok: true, refreshed: true, ...snap });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
     }
   });
 
