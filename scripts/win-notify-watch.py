@@ -438,10 +438,12 @@ def _speak(app: str, title: str, body: str, priority: str = "0", primary_id: str
     if len(speech) > 500:
         speech = speech[:497] + "…"
 
-    # Emit win_notify SSE event to UI (no DND check — always show in UI)
+    # Emit win_notify SSE event to UI — send cleaned speech, not raw toast
+    ct = clean_mail_noise(title)
+    cb = clean_mail_noise(body)
     _post_json(
         f"{PC_AGENT_URL}/voice/event",
-        {"type": "win_notify", "app": app, "title": title, "body": body, "priority": priority},
+        {"type": "win_notify", "app": app, "title": ct, "body": cb, "text": speech, "priority": priority},
         secret=PC_AGENT_SECRET,
     )
 
