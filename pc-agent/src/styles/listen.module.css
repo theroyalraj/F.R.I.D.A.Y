@@ -1007,17 +1007,21 @@
   grid-template-columns: 1fr 1fr;
   gap: 8px;
   min-height: 140px;
-  max-height: 240px;
+  align-content: start;
 }
 
 .integrations-mail-list {
+  max-height: 280px;
   overflow-y: auto;
   min-width: 0;
   padding-right: 4px;
 }
 
 .integrations-mail-detail {
+  max-height: 320px;
   overflow-y: auto;
+  overflow-x: hidden;
+  word-break: break-word;
   min-width: 0;
   padding: 8px 8px 8px 10px;
   background: rgba(0, 0, 0, 0.2);
@@ -1041,6 +1045,7 @@
   align-items: flex-start;
   gap: 2px;
   width: 100%;
+  min-width: 0;
   text-align: left;
   padding: 6px 7px;
   margin-bottom: 4px;
@@ -1063,10 +1068,10 @@
   font-weight: 600;
   color: rgba(255, 255, 255, 0.78);
   line-height: 1.25;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
   overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
 }
 
 .integrations-mail-meta {

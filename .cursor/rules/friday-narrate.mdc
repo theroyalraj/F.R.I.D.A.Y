@@ -106,13 +106,13 @@ speak → "Both agents running. Reporting back when done."
 speak → "All done. [verbose summary]."
 ```
 
-**Subagent voice (mandatory in subagent prompts):** each Task subagent must use the adult subagent voice pool — never Ana or any child/teen voice. No separate `pick-session-voice.py` call needed — `friday-speak.py` auto-picks if missing. Just set:
+**Subagent voice (mandatory in subagent prompts):** each Task subagent must use the **young-sounding** subagent voice pool (Jenny, Aria, Michelle, etc. — see `pick-session-voice.py`). No separate `pick-session-voice.py` call needed — `friday-speak.py` auto-picks if missing. Just set:
 
 `$env:FRIDAY_TTS_SESSION='subagent'` plus `FRIDAY_TTS_PRIORITY='1'` and `FRIDAY_TTS_BYPASS_CURSOR_DEFER=true` on **every** `friday-speak.py` call.
 
 `FRIDAY_TTS_PRIORITY=1` is non-negotiable for subagents — without it, subagents queue silently behind ambient TTS and the user never hears them. Priority pre-empts ambient, clears any TTS lock, and speaks immediately.
 
-Main Cursor chat uses `FRIDAY_TTS_VOICE` from the environment (Jarvis by default); subagents stay on the separate sticky teen pool.
+Main Cursor chat uses `FRIDAY_TTS_VOICE` from the environment (Jarvis by default); subagents stay on the separate young-sounding sticky pool.
 
 ---
 

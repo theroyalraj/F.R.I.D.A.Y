@@ -7,6 +7,7 @@ import ToastContainer from './Toast';
 import SpeakStylePanel from './SpeakStylePanel';
 import SpeakConfirmModal from './SpeakConfirmModal';
 import VoiceSiriOverlay from './VoiceSiriOverlay';
+import MiniNotifyOrb from './MiniNotifyOrb';
 import { IntegrationsRail } from './IntegrationsRail';
 import { PersonaRosterModal } from './PersonaRosterModal';
 import {
@@ -92,6 +93,8 @@ const FridayListenApp: React.FC = () => {
     personaCatalog, setPersonaCatalog,
     speakingPersonaKey,
     musicOrbCaption,
+    miniOrb,
+    dismissMiniOrb,
   } = useVoiceApp();
   const { authHeaders } = useAuth();
 
@@ -271,12 +274,27 @@ const FridayListenApp: React.FC = () => {
       const seconds = typeof me.seconds === 'number' && Number.isFinite(me.seconds) ? me.seconds : 30;
       const caption = typeof me.text === 'string' && me.text.trim() ? me.text.trim() : 'Playing…';
       postEvent('music_play', caption, { musicSeconds: seconds, musicPersonaKey: 'maestro' });
+      const line = /^playing/i.test(caption) ? caption : `Playing: ${caption}`;
+      addBubble({
+        type: 'friday',
+        text: line,
+        ts: Date.now(),
+        persona: mergePersona('maestro', personaOverrides, currentVoice, personaCatalog),
+      });
     } else {
       // If a speak event carries an explicit voice field, snap persona first
       if ((event.type === 'speak' || event.type === 'thinking') && event.voice) {
         postEvent('voice_changed', String(event.voice));
       }
       postEvent(event.type, event.text || '');
+      if (event.type === 'speak' && (event.text || '').trim()) {
+        addBubble({
+          type: 'friday',
+          text: (event.text || '').trim(),
+          ts: Date.now(),
+          persona: mergePersona(activePersonaKey, personaOverrides, currentVoice, personaCatalog),
+        });
+      }
       if (event.type === 'speak' || event.type === 'thinking') setSpeakingText(event.text || 'Speaking...');
       if (event.type === 'listening' || event.type === 'reply') setSpeakingText('');
       // "Always Speak via UI" — play SSE reply through the browser even when Python daemons are silent
@@ -605,6 +623,14 @@ const FridayListenApp: React.FC = () => {
             ? (personaCatalog?.[speakingPersonaKey]?.title?.trim() || COMPANY_PERSONAS[speakingPersonaKey].title)
             : undefined
         }
+      />
+      <MiniNotifyOrb
+        visible={miniOrb != null}
+        icon={miniOrb?.icon ?? '\u2728'}
+        caption={miniOrb?.caption ?? ''}
+        personaKey={miniOrb?.personaKey ?? 'jarvis'}
+        theme={theme}
+        onDismiss={dismissMiniOrb}
       />
       {/* Glow */}
       <div ref={glowRef} className={`${styles['glow-wrap']} ${styles[`glow-${connectionStatus}`]}`}>

@@ -29,6 +29,9 @@ Optional:
   .session-voice.json cursor_reply_voice; else Sentinel persona (OPENCLAW_SENTINEL_*).
   CURSOR_TRANSCRIPTS_DIR — override path to agent-transcripts
 
+Perf logging (compare with cursor-grpc-watch): when FRIDAY_CURSOR_GRPC_LOG is on (default), prints
+  [JSONL:t0] … [JSONL:t4_tts_fire] with perf_counter deltas from the first fs event for this debounce burst.
+
 Thinking TTS pacing (batched sentences + sized chunks; avoids a firehose of tiny clips):
   FRIDAY_CURSOR_THINKING_TTS_RATE — optional fixed Edge rate for thinking (when unset, rate is adaptive).
     Thinking playback is **non-priority** so FRIDAY_TTS_PRIORITY=1 speaks pre-empt it.
@@ -126,6 +129,23 @@ POLL_ACTIVE_SEC = 0.15
 RESCAN_SEC = 30.0
 _ACTIVE_WINDOW_SEC = 5.0
 _SPOKEN_HASHES_MAX = 500
+
+# JSONL timing (same toggle as gRPC: FRIDAY_CURSOR_GRPC_LOG).
+_JSONL_FS_T0: dict[str, float] = {}
+_JSONL_WORK_META: dict[str, tuple[float, float]] = {}
+
+
+def _cursor_perf_log_enabled() -> bool:
+    raw = os.environ.get("FRIDAY_CURSOR_GRPC_LOG", "true").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def _jsonl_mark_fs_event(key: str) -> None:
+    if key not in _JSONL_FS_T0:
+        _JSONL_FS_T0[key] = time.perf_counter()
+        if _cursor_perf_log_enabled():
+            tail = key[-48:] if len(key) > 48 else key
+            print(f"[JSONL:t0] +0.0ms path={tail}", flush=True)
 
 # Monotonic counter: advances once per thinking block (per call to _speak_thinking_paced).
 # Ensures voice changes between spans/blocks, not between sentences within the same block.
@@ -494,9 +514,14 @@ def strip_to_prose(raw: str) -> str:
     return s
 
 
-def _speak_main(text: str) -> None:
+def _speak_main(text: str, *, jsonl_perf_t0: float | None = None) -> None:
     from friday_speaker import speaker
 
+    if jsonl_perf_t0 is not None and _cursor_perf_log_enabled():
+        print(
+            f"[JSONL:t4_tts_fire] +{(time.perf_counter() - jsonl_perf_t0) * 1000.0:.1f}ms",
+            flush=True,
+        )
     v, r = _resolve_cursor_reply_voice()
     kw: dict = {
         "session": "cursor-reply",
@@ -511,9 +536,14 @@ def _speak_main(text: str) -> None:
     speaker.speak(text, **kw)
 
 
-def _speak_subagent(text: str) -> None:
+def _speak_subagent(text: str, *, jsonl_perf_t0: float | None = None) -> None:
     from friday_speaker import speaker
 
+    if jsonl_perf_t0 is not None and _cursor_perf_log_enabled():
+        print(
+            f"[JSONL:t4_tts_fire] +{(time.perf_counter() - jsonl_perf_t0) * 1000.0:.1f}ms",
+            flush=True,
+        )
     speaker.speak(
         text,
         session="subagent",
@@ -1082,6 +1112,7 @@ def _process_jsonl_path(
     st = state_map.get(path_str)
     if st is None:
         return
+    perf_anchor = st.pop("_jsonl_perf_t0", None)
     p = Path(path_str)
     try:
         sz = p.stat().st_size
@@ -1171,9 +1202,19 @@ def _process_jsonl_path(
                 spoken_hashes.discard(old_h)
 
         if is_main and speak_main:
-            _speak_main(prose)
+            if perf_anchor is not None and _cursor_perf_log_enabled():
+                print(
+                    f"[JSONL:t3_parsed] +{(time.perf_counter() - perf_anchor) * 1000.0:.1f}ms",
+                    flush=True,
+                )
+            _speak_main(prose, jsonl_perf_t0=perf_anchor)
         elif is_sub and speak_sub:
-            _speak_subagent(prose)
+            if perf_anchor is not None and _cursor_perf_log_enabled():
+                print(
+                    f"[JSONL:t3_parsed] +{(time.perf_counter() - perf_anchor) * 1000.0:.1f}ms",
+                    flush=True,
+                )
+            _speak_subagent(prose, jsonl_perf_t0=perf_anchor)
 
 
 class _TranscriptEventHandler(FileSystemEventHandler):
@@ -1211,6 +1252,7 @@ class _TranscriptEventHandler(FileSystemEventHandler):
         except OSError:
             return
         debounce = _file_event_debounce_sec()
+        _jsonl_mark_fs_event(key)
         with self._debounce_lock:
             old = self._path_timers.pop(key, None)
             if old is not None:
@@ -1219,6 +1261,12 @@ class _TranscriptEventHandler(FileSystemEventHandler):
             def run() -> None:
                 with self._debounce_lock:
                     self._path_timers.pop(key, None)
+                t0 = _JSONL_FS_T0.pop(key, None)
+                t1 = time.perf_counter()
+                if t0 is not None and _cursor_perf_log_enabled():
+                    print(f"[JSONL:t1_debounce] +{(t1 - t0) * 1000.0:.1f}ms", flush=True)
+                if t0 is not None:
+                    _JSONL_WORK_META[key] = (t0, t1)
                 self._work_q.put(key)
 
             t = threading.Timer(debounce, run)
@@ -1264,10 +1312,18 @@ def _transcript_worker_loop(
                 continue
             if isinstance(item, str):
                 key = item
+                meta = _JSONL_WORK_META.pop(key, None)
+                t2 = time.perf_counter()
+                if meta and _cursor_perf_log_enabled():
+                    t0, _t1_enq = meta
+                    print(f"[JSONL:t2_dequeue] +{(t2 - t0) * 1000.0:.1f}ms", flush=True)
                 if key not in state_map:
                     _rescan_transcript_paths(state_map)
                     if key not in state_map:
                         continue
+                st_hit = state_map.get(key)
+                if st_hit is not None and meta is not None:
+                    st_hit["_jsonl_perf_t0"] = meta[0]
                 session = _load_session()
                 main_uuid = (session.get("chat_id") or "").strip()
                 if not main_uuid and not warned_no_chat[0]:

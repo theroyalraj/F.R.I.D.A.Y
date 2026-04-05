@@ -21,7 +21,7 @@ Optional party mode:
 
 Subagents (Task tool):
   Run:  FRIDAY_TTS_SESSION=subagent  python pick-session-voice.py --subagent
-  Uses a GLOBAL sticky subagent_voice from the adult pool — same voice across ALL chats, never Ana.
+  Uses a GLOBAL sticky subagent_voice from the young-sounding pool — same voice across ALL chats.
 
 Cursor-reply TTS (cursor-reply-watch.py — distinct from main + subagent):
   python pick-session-voice.py --cursor-reply
@@ -100,15 +100,13 @@ ADULT_POOL = [v for v in [
     "en-IE-ConnorNeural",               # warm Irish male
 ] if v not in _BLOCKED_VOICES]
 
-# Subagent pool — adult voices only; distinct enough from the main pool to be recognisable
+# Subagent pool — young-sounding voices; distinct from the main adult pool
 SUBAGENT_POOL = [v for v in [
-    "en-US-ChristopherNeural",          # deep, confident American male
-    "en-US-GuyNeural",                  # clear American male anchor-style
-    "en-US-EricNeural",                 # calm, natural American male
-    "en-GB-SoniaNeural",                # polished British female
-    "en-IE-ConnorNeural",               # warm Irish male
-    "en-US-AndrewMultilingualNeural",   # warm American male
-    "en-US-BrianMultilingualNeural",    # smooth American male
+    "en-US-JennyNeural",                 # perky young American female
+    "en-US-AriaNeural",                  # youthful American female
+    "en-US-MichelleNeural",              # warm younger American female
+    "en-US-BlueNeural",                  # lighter American male
+    "en-US-NancyNeural",                 # lighter American female
 ] if v not in _BLOCKED_VOICES]
 
 # ── Paths ──────────────────────────────────────────────────────────────────────

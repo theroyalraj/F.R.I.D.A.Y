@@ -3,10 +3,10 @@
 gmail.py — Read, search and list Gmail via IMAP (built-in Python, no extra deps).
 
 Usage:
-  python scripts/gmail.py list [--count N] [--folder FOLDER]
+  python scripts/gmail.py list [--count N] [--folder FOLDER] [--offset N]
   python scripts/gmail.py read <UID>
   python scripts/gmail.py search <query>
-  python scripts/gmail.py unread [--count N]
+  python scripts/gmail.py unread [--count N] [--offset N]
 
 Config (env or .env):
   GMAIL_ADDRESS   your Gmail address
@@ -106,24 +106,43 @@ def _fetch_full(m: imaplib.IMAP4_SSL, uid: str) -> dict:
         "body":    textwrap.shorten(body.strip(), width=4000, placeholder="… [truncated]"),
     }
 
+def _paginate_uids(raw_uids: list, count: int, offset: int) -> list:
+    """Return up to ``count`` UIDs, skipping the newest ``offset`` (older mail page)."""
+    if not raw_uids:
+        return []
+    count = max(1, int(count))
+    offset = max(0, int(offset))
+    if offset >= len(raw_uids):
+        return []
+    if offset == 0:
+        picked = raw_uids[-count:]
+    else:
+        picked = raw_uids[-(offset + count) : -offset]
+    return picked
+
+
 def cmd_list(args):
-    count  = int(_arg(args, "--count",  "10"))
+    count = int(_arg(args, "--count", "10"))
+    off = int(_arg(args, "--offset", "0"))
     folder = _arg(args, "--folder", "INBOX")
     m = _connect()
     m.select(folder, readonly=True)
     _, uids = m.uid("search", None, "ALL")
-    all_uids = uids[0].split()[-count:]
-    results = [_fetch_envelope(m, u) for u in reversed(all_uids)]
+    all_uids = uids[0].split()
+    picked = _paginate_uids(all_uids, count, off)
+    results = [_fetch_envelope(m, u) for u in reversed(picked)]
     m.logout()
     print(json.dumps(results, ensure_ascii=False, indent=2))
 
 def cmd_unread(args):
     count = int(_arg(args, "--count", "10"))
+    off = int(_arg(args, "--offset", "0"))
     m = _connect()
     m.select("INBOX", readonly=True)
     _, uids = m.uid("search", None, "UNSEEN")
-    all_uids = uids[0].split()[-count:]
-    results = [_fetch_envelope(m, u) for u in reversed(all_uids)]
+    all_uids = uids[0].split()
+    picked = _paginate_uids(all_uids, count, off)
+    results = [_fetch_envelope(m, u) for u in reversed(picked)]
     m.logout()
     print(json.dumps(results, ensure_ascii=False, indent=2))
 

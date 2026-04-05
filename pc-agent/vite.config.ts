@@ -5,6 +5,8 @@ import path from 'path';
 export default defineConfig({
   plugins: [react()],
   root: '.',
+  // Load repo-root .env so VITE_* keys (e.g. mini orb hide) ship with `vite build`.
+  envDir: path.resolve(__dirname, '..'),
   server: {
     port: 5173,
     open: false,

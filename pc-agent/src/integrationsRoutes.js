@@ -141,8 +141,15 @@ export function createIntegrationsRouter(authMiddleware) {
   r.get('/gmail', async (req, res) => {
     const unreadCount = Math.min(50, Math.max(1, Number(req.query.unreadCount) || 15));
     const recentCount = Math.min(50, Math.max(1, Number(req.query.recentCount) || 12));
+    const unreadOffset = Math.min(500, Math.max(0, Number(req.query.unreadOffset) || 0));
+    const recentOffset = Math.min(500, Math.max(0, Number(req.query.recentOffset) || 0));
     try {
-      const snap = await fetchGmailSnapshot({ unreadCount, recentCount });
+      const snap = await fetchGmailSnapshot({
+        unreadCount,
+        recentCount,
+        unreadOffset,
+        recentOffset,
+      });
       res.json(snap);
     } catch (e) {
       req.log?.warn({ err: String(e.message) }, 'integrations gmail failed');

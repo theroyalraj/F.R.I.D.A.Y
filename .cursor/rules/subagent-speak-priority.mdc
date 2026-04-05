@@ -5,7 +5,7 @@ alwaysApply: true
 
 # Subagent TTS — Priority is Mandatory
 
-Every `friday-speak.py` call inside a Task subagent (explore / shell / generalPurpose) **MUST** include `FRIDAY_TTS_PRIORITY=1`. Subagents use the adult voice pool — never Ana or any child/teen voice.
+Every `friday-speak.py` call inside a Task subagent (explore / shell / generalPurpose) **MUST** include `FRIDAY_TTS_PRIORITY=1`. Subagents use the **young-sounding** sticky pool (Jenny, Aria, Michelle, Blue, Nancy — see `pick-session-voice.py`). Do not force Ana or other toddler timbres.
 
 ## Why this matters
 

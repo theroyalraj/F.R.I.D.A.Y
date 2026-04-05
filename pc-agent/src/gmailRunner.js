@@ -38,14 +38,25 @@ export function runPythonGmail(args) {
 }
 
 /**
- * @param {{ unreadCount?: number, recentCount?: number }} opts
+ * @param {{
+ *   unreadCount?: number,
+ *   recentCount?: number,
+ *   unreadOffset?: number,
+ *   recentOffset?: number,
+ * }} opts
  */
 export async function fetchGmailSnapshot(opts = {}) {
   const unreadCount = Math.min(50, Math.max(1, Number(opts.unreadCount) || 15));
   const recentCount = Math.min(50, Math.max(1, Number(opts.recentCount) || 12));
+  const unreadOffset = Math.min(500, Math.max(0, Number(opts.unreadOffset) || 0));
+  const recentOffset = Math.min(500, Math.max(0, Number(opts.recentOffset) || 0));
+  const unreadArgs = ['unread', '--count', String(unreadCount)];
+  const recentArgs = ['list', '--count', String(recentCount)];
+  if (unreadOffset > 0) unreadArgs.push('--offset', String(unreadOffset));
+  if (recentOffset > 0) recentArgs.push('--offset', String(recentOffset));
   const [unreadJson, recentJson] = await Promise.all([
-    runPythonGmail(['unread', '--count', String(unreadCount)]),
-    runPythonGmail(['list', '--count', String(recentCount)]),
+    runPythonGmail(unreadArgs),
+    runPythonGmail(recentArgs),
   ]);
   return {
     ok: true,

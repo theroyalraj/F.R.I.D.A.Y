@@ -112,7 +112,7 @@ Ambient chatter: `scripts/friday-ambient.py` — fires every 60–120 seconds (a
 
 ## Cursor reply TTS (Composer JSONL)
 
-Script: `scripts/cursor-reply-watch.py` — tails `agent-transcripts/*/*.jsonl`, speaks **assistant prose only** (code fences and tool calls stripped before TTS). Uses **watchdog** OS file events plus a periodic rescan fallback (not polling). Install deps once: `pip install -r scripts/requirements-cursor-reply-watch.txt`.
+Script: `scripts/cursor-reply-watch.py` — tails `agent-transcripts/*/*.jsonl`, speaks **assistant prose only** (code fences and tool calls stripped before TTS). Uses **watchdog** OS file events plus a periodic rescan fallback (not polling). Install deps once: `pip install -r scripts/requirements-cursor-reply-watch.txt` (includes **httpx** / **h2** for optional `scripts/cursor-grpc-watch.py`).
 
 - Main Composer lines use `FRIDAY_TTS_SESSION=cursor-reply` and a third voice from `pick-session-voice.py --cursor-reply`.
 - Other transcript UUIDs use the sticky subagent voice + priority.

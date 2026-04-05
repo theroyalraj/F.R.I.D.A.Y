@@ -129,6 +129,11 @@ function readCursorReplyWatchFromDotEnv() {
   return main || sub || thinking;
 }
 
+/** Experimental Cursor ChatService stream (duplicate API usage vs IDE). */
+function readCursorGrpcWatchFromDotEnv() {
+  return envBool('FRIDAY_CURSOR_GRPC', false);
+}
+
 /**
  * all — single machine: gateway + agent + voice/Cursor daemons + action tracker (default).
  * server — headless/backend: gateway + agent + optional Gmail watch + action tracker (no mic UI spawn).
@@ -177,6 +182,7 @@ const C = {
   listener: '\x1b[35m',   // magenta
   cursor:   '\x1b[95m',   // bright magenta — Composer reply TTS
   sage:     '\x1b[94m',   // bright blue — SAGE (thinking OCR)
+  grpc:     '\x1b[35m',   // magenta — Cursor gRPC stream watch
   argus:    '\x1b[93m',   // bright yellow — ARGUS pending-accept watcher
   ambient:  '\x1b[96m',   // bright cyan
   echo:     '\x1b[92m',   // bright green — ECHO silence / presence watcher
@@ -423,6 +429,12 @@ ${C.reset}\n`);
     if (readCursorReplyWatchFromDotEnv() && existsSync(cursorWatchScript)) {
       log('cursor', 'Composer reply TTS watcher will start shortly after the voice daemon...');
       await start('cursor', 'python', ['scripts/cursor-reply-watch.py'], { delayMs: 500 });
+    }
+
+    const cursorGrpcScript = path.join(ROOT, 'scripts', 'cursor-grpc-watch.py');
+    if (readCursorGrpcWatchFromDotEnv() && existsSync(cursorGrpcScript)) {
+      log('grpc', 'Cursor gRPC stream watcher will start in 900 ms...');
+      await start('grpc', 'python', ['scripts/cursor-grpc-watch.py'], { delayMs: 900 });
     }
 
     const thinkingOcrScript = path.join(ROOT, 'scripts', 'cursor-thinking-ocr.py');

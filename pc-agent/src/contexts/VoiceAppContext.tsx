@@ -28,6 +28,18 @@ export interface VoicePostEventOptions {
   musicPersonaKey?: CompanyPersonaKey;
 }
 
+/** Mini orb payload (non-blocking notification, e.g. music). */
+export interface MiniOrbState {
+  icon: string;
+  caption: string;
+  personaKey: CompanyPersonaKey;
+}
+
+const MINI_ORB_HIDE_MS = Math.max(
+  2000,
+  (Number(import.meta.env.VITE_MINI_ORB_AUTO_HIDE_SEC) || 8) * 1000,
+);
+
 export interface VoiceAppContextType {
   connectionStatus: ConnectionStatus;
   /** Siri orb line while friday-play holds the floor after TTS (e.g. "Playing: …"). */
@@ -73,6 +85,9 @@ export interface VoiceAppContextType {
    * @returns When type is `listening`, `true` means the orb should keep showing (music continuation after TTS).
    */
   postEvent: (type: string, text?: string, opts?: VoicePostEventOptions) => void | boolean;
+  /** Small fixed orb for background notifications (music, future mail / gRPC). */
+  miniOrb: MiniOrbState | null;
+  dismissMiniOrb: () => void;
 }
 
 const VoiceAppContext = createContext<VoiceAppContextType | undefined>(undefined);
@@ -110,6 +125,9 @@ export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const MAX_BUBBLES = 80;
   const DEDUPE_WINDOW_MS = 8000;
 
+  const [miniOrb, setMiniOrb] = useState<MiniOrbState | null>(null);
+  const miniOrbTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const musicVisualTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const musicVisualUntilRef = useRef(0);
   const activeMusicVisualRef = useRef<{ personaKey: CompanyPersonaKey; caption: string } | null>(null);
@@ -119,6 +137,21 @@ export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     caption: string;
   } | null>(null);
   const ttsActiveRef = useRef(false);
+
+  const dismissMiniOrb = useCallback(() => {
+    if (miniOrbTimerRef.current) {
+      clearTimeout(miniOrbTimerRef.current);
+      miniOrbTimerRef.current = null;
+    }
+    setMiniOrb(null);
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (miniOrbTimerRef.current) clearTimeout(miniOrbTimerRef.current);
+    },
+    [],
+  );
 
   const clearMusicVisualTimer = useCallback(() => {
     if (musicVisualTimerRef.current) {
@@ -267,6 +300,19 @@ export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           } else {
             applyMusicVisual({ seconds, personaKey, caption });
           }
+          setMiniOrb({
+            icon: '\u266A',
+            caption: caption.length > 200 ? `${caption.slice(0, 197)}...` : caption,
+            personaKey,
+          });
+          if (miniOrbTimerRef.current) {
+            clearTimeout(miniOrbTimerRef.current);
+            miniOrbTimerRef.current = null;
+          }
+          miniOrbTimerRef.current = setTimeout(() => {
+            miniOrbTimerRef.current = null;
+            setMiniOrb(null);
+          }, MINI_ORB_HIDE_MS);
           break;
         }
         case 'reply':
@@ -336,6 +382,8 @@ export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     showToast,
     dismissToast,
     postEvent,
+    miniOrb,
+    dismissMiniOrb,
   };
 
   return <VoiceAppContext.Provider value={value}>{children}</VoiceAppContext.Provider>;

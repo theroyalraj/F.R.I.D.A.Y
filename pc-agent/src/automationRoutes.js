@@ -14,8 +14,15 @@ export function createAutomationRouter(authMiddleware) {
     const b = req.body || {};
     const unreadCount = Math.min(50, Math.max(1, Number(b.unreadCount) || 15));
     const recentCount = Math.min(50, Math.max(1, Number(b.recentCount) || 12));
+    const unreadOffset = Math.min(500, Math.max(0, Number(b.unreadOffset) || 0));
+    const recentOffset = Math.min(500, Math.max(0, Number(b.recentOffset) || 0));
     try {
-      const snap = await fetchGmailSnapshot({ unreadCount, recentCount });
+      const snap = await fetchGmailSnapshot({
+        unreadCount,
+        recentCount,
+        unreadOffset,
+        recentOffset,
+      });
       res.json(snap);
     } catch (e) {
       req.log?.warn({ err: String(e.message) }, 'gmail-snapshot failed');

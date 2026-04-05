@@ -1,14 +1,18 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { safeReadJson } from '../lib/fetchJson';
 import styles from '../styles/listen.module.css';
 
 type MailRow = { uid: string; from: string; subject: string; date: string };
+
+const MAIL_BATCH = 8;
 
 type GmailState = {
   unread: MailRow[];
   recent: MailRow[];
   error: string | null;
   loading: boolean;
+  hasMoreUnread: boolean;
+  hasMoreRecent: boolean;
 };
 
 type WaMsg = { id: string; from: string; text: string; ts: string };
@@ -46,6 +50,8 @@ export const IntegrationsRail: React.FC<Props> = ({
     recent: [],
     error: null,
     loading: true,
+    hasMoreUnread: false,
+    hasMoreRecent: false,
   });
   const [waStatus, setWaStatus] = useState<WaStatus>({
     connectionStatus: null,
@@ -61,11 +67,56 @@ export const IntegrationsRail: React.FC<Props> = ({
   const [waText, setWaText] = useState('');
   const [waSending, setWaSending] = useState(false);
   const [selectedMail, setSelectedMail] = useState<MailRow | null>(null);
+  const gmailRef = useRef(gmail);
+  gmailRef.current = gmail;
 
   const refreshMail = useCallback(async () => {
     try {
+      setGmail((g) => ({ ...g, loading: true }));
       const r = await fetch(
-        `/integrations/gmail?unreadCount=20&recentCount=15`,
+        `/integrations/gmail?unreadCount=${MAIL_BATCH}&recentCount=${MAIL_BATCH}&unreadOffset=0&recentOffset=0`,
+        { headers: authHeaders() },
+      );
+      const { data } = await safeReadJson(r);
+      const d = data as {
+        error?: string;
+        unread?: unknown[];
+        recent?: unknown[];
+      };
+      if (!r.ok || (d && typeof d.error === 'string' && !Array.isArray(d.unread))) {
+        setGmail((g) => ({
+          ...g,
+          loading: false,
+          error: d?.error || `HTTP ${r.status}`,
+        }));
+        return;
+      }
+      const unread = Array.isArray(d.unread) ? (d.unread as MailRow[]) : [];
+      const recent = Array.isArray(d.recent) ? (d.recent as MailRow[]) : [];
+      setGmail({
+        unread,
+        recent,
+        error: null,
+        loading: false,
+        hasMoreUnread: unread.length >= MAIL_BATCH,
+        hasMoreRecent: recent.length >= MAIL_BATCH,
+      });
+    } catch (e) {
+      setGmail((g) => ({
+        ...g,
+        loading: false,
+        error: String((e as Error).message || e),
+      }));
+    }
+  }, [authHeaders]);
+
+  const loadMoreMail = useCallback(async () => {
+    try {
+      setGmail((g) => ({ ...g, loading: true }));
+      const uOff = gmailRef.current.unread.length;
+      const rOff = gmailRef.current.recent.length;
+      const r = await fetch(
+        `/integrations/gmail?unreadCount=${MAIL_BATCH}&recentCount=${MAIL_BATCH}&unreadOffset=${uOff}&recentOffset=${rOff}`,
         { headers: authHeaders() },
       );
       const { data } = await safeReadJson(r);
@@ -78,11 +129,22 @@ export const IntegrationsRail: React.FC<Props> = ({
         }));
         return;
       }
-      setGmail({
-        unread: Array.isArray(d.unread) ? d.unread as MailRow[] : [],
-        recent: Array.isArray(d.recent) ? d.recent as MailRow[] : [],
-        error: null,
-        loading: false,
+      const nu = Array.isArray(d.unread) ? (d.unread as MailRow[]) : [];
+      const nr = Array.isArray(d.recent) ? (d.recent as MailRow[]) : [];
+      setGmail((g) => {
+        const uids = new Set(g.unread.map((x) => x.uid));
+        const rids = new Set(g.recent.map((x) => x.uid));
+        const mergedU = [...g.unread, ...nu.filter((x) => !uids.has(x.uid))];
+        const mergedR = [...g.recent, ...nr.filter((x) => !rids.has(x.uid))];
+        return {
+          ...g,
+          unread: mergedU,
+          recent: mergedR,
+          error: null,
+          loading: false,
+          hasMoreUnread: nu.length >= MAIL_BATCH,
+          hasMoreRecent: nr.length >= MAIL_BATCH,
+        };
       });
     } catch (e) {
       setGmail((g) => ({
@@ -308,6 +370,17 @@ export const IntegrationsRail: React.FC<Props> = ({
                       </button>
                     ))}
                   </>
+                )}
+                {(gmail.hasMoreUnread || gmail.hasMoreRecent) && (
+                  <button
+                    type="button"
+                    className={styles['integrations-refresh']}
+                    style={{ width: '100%', marginTop: 8 }}
+                    onClick={() => loadMoreMail()}
+                    disabled={gmail.loading}
+                  >
+                    {gmail.loading ? 'Loading…' : 'Load more'}
+                  </button>
                 )}
               </div>
               <div className={styles['integrations-mail-detail']}>

@@ -48,7 +48,7 @@ All tool calls fire in the same message. Voice narration and actual work happen 
 
 `friday-speak.py` reads `.session-voice.json` on startup. If the file doesn't exist, it auto-spawns `pick-session-voice.py` in the background (non-blocking) to create it. **You never need to call `pick-session-voice.py` separately.**
 
-**Task subagents (explore / shell / generalPurpose):** use a separate adult voice from the subagent pool — never Ana or any child/teen voice. Just set the session env:
+**Task subagents (explore / shell / generalPurpose):** use the **young-sounding** subagent sticky pool (Jenny, Aria, Michelle…). Do not force Ana or toddler voices. Just set the session env:
 
 ```powershell
 cd d:\code\openclaw; $env:FRIDAY_TTS_SESSION='subagent'; $env:FRIDAY_TTS_PRIORITY='1'; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "Got it. …"
