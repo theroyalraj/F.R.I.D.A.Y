@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
-# openclaw-client-bootstrap.sh — clone or pull OpenClaw, install deps, point at a remote pc-agent (ngrok), start client stack.
-# Host the raw URL on a GitHub Gist; users: curl -fsSL https://gist.githubusercontent.com/.../raw/.../openclaw-client-bootstrap.sh | bash -s -- --ngrok-url https://xxx.ngrok-free.app --repo https://github.com/you/openclaw.git
+# openclaw-client-bootstrap.sh — clone/pull OpenClaw, Cursor rules + deps, optional ngrok client attach.
+#
+# Gist (update raw URL after republish):
+#   curl -fsSL 'https://gist.githubusercontent.com/USER/ID/raw/openclaw-client-bootstrap.sh' | bash -s -- --help
+#
+# Modes:
+#   --pull-only     git clone or pull only (needs --repo)
+#   --setup-only    after repo exists: regenerate .cursor rules, npm ci, pip client deps (needs --repo if not cloned)
+#   (default)       full client: pull + setup + write PC_AGENT_URL + celebration + start:client-stack (needs --ngrok-url)
+#   --no-setup      with default mode: skip npm ci and pip (fast path; you already ran --setup-only)
+#
 # Requires: git, npm, curl, bash. On Windows use Git Bash or WSL.
 set -euo pipefail
 
@@ -9,6 +18,9 @@ BRANCH="${OPENCLAW_BRANCH:-main}"
 NGROK_URL=""
 CELEBRATION=1
 INSTALL_ROOT="${OPENCLAW_HOME:-$HOME/openclaw}"
+PULL_ONLY=0
+SETUP_ONLY=0
+NO_SETUP=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -17,53 +29,139 @@ while [[ $# -gt 0 ]]; do
     --branch) BRANCH="${2:-}"; shift 2 ;;
     --celebration-off) CELEBRATION=0; shift ;;
     --home) INSTALL_ROOT="${2:-}"; shift 2 ;;
+    --pull-only) PULL_ONLY=1; shift ;;
+    --setup-only) SETUP_ONLY=1; shift ;;
+    --no-setup) NO_SETUP=1; shift ;;
     -h|--help)
-      echo "Usage: OPENCLAW_REPO_URL=https://... $0 --ngrok-url https://host [--repo URL] [--branch main] [--home path] [--celebration-off]"
+      cat <<'EOF'
+Usage:
+  OPENCLAW_REPO_URL=https://github.com/you/openclaw.git  OPENCLAW_HOME=~/openclaw  $0 --pull-only
+  OPENCLAW_REPO_URL=...  $0 --setup-only
+  $0 --ngrok-url https://host.ngrok-free.app --repo https://github.com/you/openclaw.git
+
+Flags:
+  --repo URL          Git remote (or env OPENCLAW_REPO_URL)
+  --branch NAME       Default main
+  --home PATH         Install dir (or OPENCLAW_HOME), default ~/openclaw
+  --ngrok-url HTTPS   Public pc-agent base, no trailing slash (full client mode only)
+  --pull-only         Only clone or git pull
+  --setup-only        Pull if needed, then: openclaw_company rule, npm ci, pip client requirements
+  --no-setup          Full client mode but skip npm ci and pip
+  --celebration-off   Skip first-connect TTS
+  -h, --help          This text
+
+Examples:
+  curl -fsSL .../openclaw-client-bootstrap.sh | bash -s -- --pull-only --repo https://github.com/you/repo.git
+  curl ... | bash -s -- --setup-only --repo https://github.com/you/repo.git
+  curl ... | bash -s -- --ngrok-url https://x.ngrok-free.app --repo https://github.com/you/repo.git
+EOF
       exit 0 ;;
     *) echo "Unknown arg: $1" >&2; exit 1 ;;
   esac
 done
 
+if [[ "${PULL_ONLY}" -eq 1 && "${SETUP_ONLY}" -eq 1 ]]; then
+  echo "Use only one of --pull-only or --setup-only" >&2
+  exit 1
+fi
+
+ensure_repo_clone_or_pull() {
+  mkdir -p "${INSTALL_ROOT}"
+  if [[ ! -d "${INSTALL_ROOT}/.git" ]]; then
+    if [[ -z "${REPO}" ]]; then
+      echo "Clone needs --repo or OPENCLAW_REPO_URL" >&2
+      exit 1
+    fi
+    git clone --depth 1 --branch "${BRANCH}" "${REPO}" "${INSTALL_ROOT}" || {
+      git clone --depth 1 "${REPO}" "${INSTALL_ROOT}"
+      git -C "${INSTALL_ROOT}" checkout "${BRANCH}" || true
+    }
+  else
+    git -C "${INSTALL_ROOT}" fetch origin "${BRANCH}" --depth 1 || true
+    git -C "${INSTALL_ROOT}" checkout "${BRANCH}" || true
+    git -C "${INSTALL_ROOT}" pull --ff-only origin "${BRANCH}" || true
+  fi
+}
+
+run_generate_rule() {
+  if command -v python3 >/dev/null 2>&1; then
+    python3 scripts/openclaw_company.py --generate-rule 2>/dev/null || true
+  elif command -v python >/dev/null 2>&1; then
+    python scripts/openclaw_company.py --generate-rule 2>/dev/null || true
+  fi
+}
+
+pip_install_client() {
+  PY="python3"
+  command -v python3 >/dev/null 2>&1 || PY="python"
+  if [[ -f scripts/requirements-openclaw-client.txt ]]; then
+    ${PY} -m pip install -r scripts/requirements-openclaw-client.txt
+  else
+    ${PY} -m pip install -r scripts/requirements-cursor-reply-watch.txt
+  fi
+}
+
+run_setup() {
+  cd "${INSTALL_ROOT}"
+  run_generate_rule
+  npm ci
+  pip_install_client
+}
+
+# --- pull-only ---
+if [[ "${PULL_ONLY}" -eq 1 ]]; then
+  if [[ -z "${REPO}" ]]; then
+    echo "--pull-only needs --repo or OPENCLAW_REPO_URL" >&2
+    exit 1
+  fi
+  ensure_repo_clone_or_pull
+  echo "[bootstrap] pull-only done → ${INSTALL_ROOT}"
+  exit 0
+fi
+
+# --- setup-only ---
+if [[ "${SETUP_ONLY}" -eq 1 ]]; then
+  if [[ ! -d "${INSTALL_ROOT}/.git" ]]; then
+    if [[ -z "${REPO}" ]]; then
+      echo "--setup-only needs --repo (or OPENCLAW_REPO_URL) when OPENCLAW_HOME is not cloned yet" >&2
+      exit 1
+    fi
+    ensure_repo_clone_or_pull
+  else
+    git -C "${INSTALL_ROOT}" fetch origin "${BRANCH}" --depth 1 || true
+    git -C "${INSTALL_ROOT}" checkout "${BRANCH}" || true
+    git -C "${INSTALL_ROOT}" pull --ff-only origin "${BRANCH}" || true
+  fi
+  run_setup
+  echo "[bootstrap] setup-only done (rules + npm ci + pip) → ${INSTALL_ROOT}"
+  exit 0
+fi
+
+# --- full client mode ---
 if [[ -z "${NGROK_URL}" ]]; then
-  echo "Required: --ngrok-url https://your-tunnel (or set nothing and fix this script)" >&2
+  echo "Full client mode requires --ngrok-url https://your-tunnel" >&2
+  echo "Or use --pull-only / --setup-only (see --help)" >&2
   exit 1
 fi
 if [[ -z "${REPO}" ]]; then
-  echo "Set OPENCLAW_REPO_URL or pass --repo https://github.com/you/openclaw.git" >&2
+  echo "Set OPENCLAW_REPO_URL or pass --repo" >&2
   exit 1
 fi
 
 NGROK_URL="${NGROK_URL%/}"
 
-mkdir -p "${INSTALL_ROOT}"
-if [[ ! -d "${INSTALL_ROOT}/.git" ]]; then
-  git clone --depth 1 --branch "${BRANCH}" "${REPO}" "${INSTALL_ROOT}" || {
-    git clone --depth 1 "${REPO}" "${INSTALL_ROOT}"
-    git -C "${INSTALL_ROOT}" checkout "${BRANCH}" || true
-  }
-else
-  git -C "${INSTALL_ROOT}" fetch origin "${BRANCH}" --depth 1 || true
-  git -C "${INSTALL_ROOT}" checkout "${BRANCH}" || true
-  git -C "${INSTALL_ROOT}" pull --ff-only origin "${BRANCH}" || true
-fi
-
+ensure_repo_clone_or_pull
 cd "${INSTALL_ROOT}"
 
-if command -v python3 >/dev/null 2>&1; then
-  python3 scripts/openclaw_company.py --generate-rule 2>/dev/null || true
-elif command -v python >/dev/null 2>&1; then
-  python scripts/openclaw_company.py --generate-rule 2>/dev/null || true
+if [[ "${NO_SETUP}" -eq 0 ]]; then
+  run_setup
+else
+  run_generate_rule
 fi
-
-npm ci
-
-PY="python3"
-command -v python3 >/dev/null 2>&1 || PY="python"
-${PY} -m pip install -r scripts/requirements-openclaw-client.txt
 
 ENV_FILE="${INSTALL_ROOT}/.env"
 if [[ ! -f "${ENV_FILE}" ]]; then
-  echo "[bootstrap] No .env in repo — copy from .env.example or create .env with PC_AGENT_SECRET matching your server." >&2
+  echo "[bootstrap] No .env — copy from .env.example; add PC_AGENT_SECRET for /voice." >&2
 fi
 
 upsert_env() {
