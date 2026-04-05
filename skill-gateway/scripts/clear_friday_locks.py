@@ -2,13 +2,17 @@
 """
 Clear Friday runtime locks after a hard kill (restart-local, stuck TTS, wedged music guard).
 
-Redis (same URL as ambient — FRIDAY_AMBIENT_REDIS_URL, default redis://127.0.0.1:6379):
-  friday:music:active   — friday-play session lease
-  friday:tts:lock       — ambient distributed TTS lock (string value)
-  friday:now_playing    — short-lived ambient hint
+Redis (same resolution as friday-speak.py: OPENCLAW_REDIS_URL, else FRIDAY_AMBIENT_REDIS_URL, else default):
+  friday:music:active            — friday-play session lease
+  friday:tts:lock              — distributed TTS lock
+  friday:tts:generation        — speak supersession counter
+  friday:tts:thinking_singleton — thinking narration singleton
+  friday:tts:last_call         — last TTS call hint (optional flush)
+  friday:now_playing           — short-lived ambient hint
 
 Temp files (%TEMP%):
-  friday-tts-active, friday-play.pid, friday-play-session.start, friday-ambient-speaking.txt
+  friday-tts-active, friday-thinking-singleton, friday-tts-generation,
+  friday-play.pid, friday-play-session.start, friday-ambient-speaking.txt
 
 Exit 0 always; prints what it did. Redis errors are non-fatal (stderr one line).
 """
@@ -37,15 +41,28 @@ if _ENV.exists():
 REDIS_KEYS = (
     "friday:music:active",
     "friday:tts:lock",
+    "friday:tts:generation",
+    "friday:tts:thinking_singleton",
+    "friday:tts:last_call",
     "friday:now_playing",
 )
 
 TEMP_FILES = (
     "friday-tts-active",
+    "friday-thinking-singleton",
+    "friday-tts-generation",
     "friday-play.pid",
     "friday-play-session.start",
     "friday-ambient-speaking.txt",
 )
+
+
+def _redis_url() -> str:
+    return (
+        os.environ.get("OPENCLAW_REDIS_URL", "").strip()
+        or os.environ.get("FRIDAY_AMBIENT_REDIS_URL", "").strip()
+        or "redis://127.0.0.1:6379"
+    )
 
 
 def main() -> int:
@@ -59,7 +76,7 @@ def main() -> int:
         except OSError as e:
             print(f"[clear-friday-locks] temp {name}: {e}", file=sys.stderr, flush=True)
 
-    url = os.environ.get("FRIDAY_AMBIENT_REDIS_URL", "").strip() or "redis://127.0.0.1:6379"
+    url = _redis_url()
     try:
         import redis  # type: ignore
 

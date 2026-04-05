@@ -7,6 +7,7 @@ or Cursor voice mode is not competed with by Friday.
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -18,6 +19,29 @@ def _env_bool(name: str, default: bool) -> bool:
     return v in ("1", "true", "yes", "on")
 
 
+def _foreground_exe_basename_darwin() -> str | None:
+    """Frontmost process name via AppleScript (requires automation permission on some setups)."""
+    try:
+        out = subprocess.check_output(
+            [
+                "osascript",
+                "-e",
+                'tell application "System Events" to get name of first process whose frontmost is true',
+            ],
+            text=True,
+            timeout=2,
+            stderr=subprocess.DEVNULL,
+        )
+        name = (out or "").strip().lower()
+        if not name:
+            return None
+        # Match Windows-style substring checks: "cursor" in "cursor"
+        base = name.replace(".app", "").replace(" ", "")
+        return base or name
+    except Exception:
+        return None
+
+
 def _defer_exe_hints() -> tuple[str, ...]:
     raw = os.environ.get("FRIDAY_DEFER_FOCUS_EXES", "").strip().lower()
     if not raw:
@@ -27,7 +51,9 @@ def _defer_exe_hints() -> tuple[str, ...]:
 
 
 def foreground_exe_basename() -> str | None:
-    """Lowercase basename of the foreground window's process (Windows only)."""
+    """Lowercase basename of the foreground app's process (Windows) or frontmost app name (macOS)."""
+    if sys.platform == "darwin":
+        return _foreground_exe_basename_darwin()
     if sys.platform != "win32":
         return None
     try:
@@ -66,7 +92,7 @@ def should_defer_voice_for_cursor() -> bool:
     True when Friday should not capture the mic — a configured app (default:
     Cursor) owns the foreground window. Ambient uses should_defer_ambient_for_cursor().
     """
-    if sys.platform != "win32":
+    if sys.platform not in ("win32", "darwin"):
         return False
     if not _env_bool("FRIDAY_DEFER_WHEN_CURSOR", True):
         return False

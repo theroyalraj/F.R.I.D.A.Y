@@ -24,6 +24,12 @@ Your skill endpoint must follow [Host a Custom Skill as a Web Service](https://d
 - **Claude Code** installed and working in a terminal (`claude` on PATH). The pc-agent defaults to **`--model haiku`** for faster replies; override with **`CLAUDE_MODEL`** (e.g. `sonnet`) or put **`--model …`** in **`CLAUDE_CLI_ARGS`**. Set **`CLAUDE_MODEL=inherit`** to skip injecting a model flag.
 - (Optional) **Google Cloud** OAuth for Gmail/Sheets in N8N; **Evolution API** for WhatsApp (`docker compose --profile whatsapp up -d`).
 
+## 2a) Optional: no N8N / embedded SQLite (macOS app style)
+
+- Set **`OPENCLAW_DIRECT_INTAKE=true`** on **skill-gateway** — Alexa and `/openclaw/trigger` call **pc-agent** `/task` directly, then POST **`/internal/last-result`** (same as the sample N8N workflow). Still set **`PC_AGENT_SECRET`** and **`N8N_WEBHOOK_SECRET`** to the **same** value for internal routes.
+- Set **`OPENCLAW_SQLITE_PATH`** on **pc-agent** (e.g. `~/.openclaw/openclaw.db`) to use embedded **SQLite** for perception + `openclaw_settings` instead of Docker Postgres.
+- Optional: **`~/.openclaw/config.json`** is merged into **`process.env`** after `.env` (wizard / portable installs).
+
 ## 2) Configure environment
 
 ```powershell

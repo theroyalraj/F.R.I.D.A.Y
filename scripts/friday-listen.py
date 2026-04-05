@@ -235,9 +235,18 @@ _speaking   = threading.Event()     # True while TTS audio is playing — mutes 
 _POST_SPEAK_COOLDOWN = 1.5          # seconds to keep mic muted after playback ends
 
 def _speak_fallback(text: str):
-    """Windows SAPI fallback when edge-tts is unavailable."""
+    """Offline TTS when edge-tts is unavailable: Windows SAPI or macOS say."""
     try:
         safe = text.replace("'", " ").replace('"', " ")[:300]
+        if sys.platform == "darwin":
+            voice = (os.environ.get("FRIDAY_MACOS_SAY_VOICE") or "").strip()
+            cmd = ["say"]
+            if voice:
+                cmd.extend(["-v", voice])
+            cmd.append(safe)
+            subprocess.run(cmd, capture_output=True, timeout=30)
+            log.info("speak OK (say fallback)")
+            return
         subprocess.run(
             ["powershell", "-NoProfile", "-Command",
              f"Add-Type -AssemblyName System.Speech; "
@@ -248,7 +257,7 @@ def _speak_fallback(text: str):
         )
         log.info("speak OK (SAPI fallback)")
     except Exception as e:
-        log.warning("speak SAPI fallback failed: %s", e)
+        log.warning("speak offline fallback failed: %s", e)
 
 def _wait_for_tts_clear(timeout: float = 45.0) -> None:
     """Block until no other friday-speak.py instance is playing audio."""
@@ -329,14 +338,22 @@ def _restart_ambient() -> None:
     """Kill all running ambient processes and start a fresh one."""
     try:
         import subprocess as sp
-        result = sp.run(
-            ["powershell", "-NoProfile", "-Command",
-             "Get-Process python* -ErrorAction SilentlyContinue | "
-             "ForEach-Object { $cmd=(Get-CimInstance Win32_Process -Filter \"ProcessId=$($_.Id)\" "
-             "-ErrorAction SilentlyContinue).CommandLine; "
-             "if($cmd -like '*friday-ambient*'){Stop-Process -Id $_.Id -Force} }"],
-            capture_output=True, timeout=10,
-        )
+        if sys.platform == "win32":
+            sp.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "Get-Process python* -ErrorAction SilentlyContinue | "
+                 "ForEach-Object { $cmd=(Get-CimInstance Win32_Process -Filter \"ProcessId=$($_.Id)\" "
+                 "-ErrorAction SilentlyContinue).CommandLine; "
+                 "if($cmd -like '*friday-ambient*'){Stop-Process -Id $_.Id -Force} }"],
+                capture_output=True,
+                timeout=10,
+            )
+        else:
+            sp.run(
+                ["pkill", "-f", "friday-ambient.py"],
+                capture_output=True,
+                timeout=10,
+            )
         time.sleep(0.5)
         sp.Popen(
             [sys.executable, str(root / "scripts" / "friday-ambient.py")],
@@ -382,7 +399,7 @@ def _put_ambient_settings_remote(body: dict) -> tuple[bool, str]:
     try:
         r = req_lib.put(f"{AGENT_URL}/settings/ambient", headers=h, json=body, timeout=12)
         if r.status_code == 503:
-            return False, "OpenClaw Postgres is not configured on pc-agent. Set OPENCLAW_DATABASE_URL and create table openclaw_settings."
+            return False, "OpenClaw DB is not configured on pc-agent. Set OPENCLAW_SQLITE_PATH or OPENCLAW_DATABASE_URL (and openclaw_settings)."
         if not r.ok:
             try:
                 err = r.json().get("error")

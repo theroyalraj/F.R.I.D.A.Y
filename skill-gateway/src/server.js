@@ -31,6 +31,8 @@ import {
   generateAiSummary,
 } from './alexaProactive.js';
 import { winTtsEnabled, speakWinTts } from './winTts.js';
+import { loadOpenclawUserConfig } from './userConfig.js';
+import { useDirectIntake, enqueueDirectToPcAgent } from './directIntake.js';
 import {
   fridaySpeakEnabled,
   speakFridayPy,
@@ -101,6 +103,7 @@ function scheduleStartupAfterWelcome(log, songGapMs) {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
+loadOpenclawUserConfig();
 
 const PORT = Number(process.env.PORT || 3848);
 const N8N_INTAKE_URL = process.env.N8N_INTAKE_URL || 'http://127.0.0.1:5678/webhook/friday-intake';
@@ -177,11 +180,20 @@ function runVerifier(req, res, next) {
   });
 }
 
-/** Public path for Lambda / single-tunnel setups: same host as /alexa, forwards to N8N webhook. */
+/** Public path for Lambda / single-tunnel setups: same host as /alexa, forwards to N8N or direct pc-agent. */
 app.post('/webhook/friday-intake', async (req, res) => {
   const t0 = Date.now();
   const secret = req.headers['x-openclaw-secret'];
   try {
+    if (useDirectIntake()) {
+      if (N8N_WEBHOOK_SECRET && secret !== N8N_WEBHOOK_SECRET) {
+        req.log.warn('webhook/friday-intake unauthorized (direct mode)');
+        return res.status(401).json({ error: 'Unauthorized' });
+      }
+      await enqueueDirectToPcAgent(req.body ?? {}, req.log, N8N_WEBHOOK_SECRET);
+      req.log.info({ directIntake: true, ms: Date.now() - t0 }, 'webhook friday-intake handled direct');
+      return res.status(202).json({ ok: true, direct: true });
+    }
     const r = await fetch(N8N_INTAKE_URL, {
       method: 'POST',
       headers: {
@@ -239,6 +251,17 @@ function enqueueN8n(payload, reqLog) {
     });
 }
 
+/** N8N workflow or direct pc-agent when OPENCLAW_DIRECT_INTAKE=true (macOS app / simple installs). */
+function enqueueIntake(payload, reqLog) {
+  if (useDirectIntake()) {
+    enqueueDirectToPcAgent(payload, reqLog, N8N_WEBHOOK_SECRET).catch((e) => {
+      reqLog.error({ err: String(e.message || e), correlationId: payload.correlationId }, 'direct intake threw');
+    });
+    return;
+  }
+  enqueueN8n(payload, reqLog);
+}
+
 /**
  * Curl / Postman: enqueue a PC task like Lambda→N8N without an Alexa skill envelope.
  * Header X-Openclaw-Secret = N8N_WEBHOOK_SECRET. Body: commandText (required), userId, locale, correlationId, …
@@ -272,7 +295,7 @@ app.post('/openclaw/trigger', (req, res) => {
         ? b.receivedAt.trim()
         : new Date().toISOString(),
   };
-  enqueueN8n(payload, req.log);
+  enqueueIntake(payload, req.log);
   res.status(202).json({
     ok: true,
     queued: true,
@@ -404,7 +427,7 @@ app.post('/alexa', runVerifier, async (req, res, next) => {
     const ackText = randomAckText();
     rememberLastSpoken(userId, ackText);
 
-    enqueueN8n(
+    enqueueIntake(
       {
         correlationId,
         source: 'alexa',
@@ -770,8 +793,11 @@ server = app.listen(PORT, () => {
       port: PORT,
       alexa: `POST http://127.0.0.1:${PORT}/alexa`,
       openclawTrigger: `POST http://127.0.0.1:${PORT}/openclaw/trigger (X-Openclaw-Secret + JSON commandText)`,
-      intakeProxy: `POST http://127.0.0.1:${PORT}/webhook/friday-intake → ${N8N_INTAKE_URL}`,
-      n8nIntake: N8N_INTAKE_URL,
+      intakeProxy: useDirectIntake()
+        ? `POST http://127.0.0.1:${PORT}/webhook/friday-intake → direct pc-agent (OPENCLAW_DIRECT_INTAKE)`
+        : `POST http://127.0.0.1:${PORT}/webhook/friday-intake → ${N8N_INTAKE_URL}`,
+      n8nIntake: useDirectIntake() ? 'disabled (direct)' : N8N_INTAKE_URL,
+      openclawDirectIntake: useDirectIntake(),
       alexaNotify: proactiveNotifyConfigured()
         ? `POST http://127.0.0.1:${PORT}/internal/alexa-notify`
         : undefined,

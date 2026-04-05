@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Friday · Voice Daemon</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/listen.css" />
+</head>
+<body class="state-offline">
+
+  <!-- Background layers -->
+  <div class="hex-bg"   aria-hidden="true"></div>
+  <div class="vignette" aria-hidden="true"></div>
+  <div class="scanlines" aria-hidden="true"></div>
+
+  <!-- HUD corner brackets -->
+  <div class="corner corner--tl" aria-hidden="true"></div>
+  <div class="corner corner--tr" aria-hidden="true"></div>
+  <div class="corner corner--bl" aria-hidden="true"></div>
+  <div class="corner corner--br" aria-hidden="true"></div>
+
+  <div class="layout" role="main">
+
+    <!-- ── Header ──────────────────────────────────────────────────── -->
+    <header>
+      <div class="brand">
+        <span class="brand-name">F · R · I · D · A · Y</span>
+        <span class="brand-sub">Voice Daemon Monitor &nbsp;//&nbsp; OpenClaw</span>
+      </div>
+
+      <div class="header-right">
+        <!-- Connection status -->
+        <div class="conn-badge" role="status" aria-live="polite">
+          <div class="conn-dot" id="connDot" aria-hidden="true"></div>
+          <span id="connLabel">OFFLINE</span>
+        </div>
+
+        <!-- Uptime -->
+        <div class="uptime-label" aria-label="Uptime">
+          UP <span id="uptime">--:--:--</span>
+        </div>
+
+        <!-- Server TTS voice picker -->
+        <div class="voice-picker-wrap" id="voicePickerWrap" style="display:none" aria-label="Server voice">
+          <span class="voice-picker-label">TTS</span>
+          <select class="hud-select" id="serverVoicePicker" aria-label="Select server TTS voice">
+            <option value="">Loading…</option>
+          </select>
+        </div>
+
+        <!-- Theme toggle -->
+        <button class="theme-btn" id="themeBtn" aria-label="Toggle dark/light theme">
+          Dark mode
+        </button>
+      </div>
+    </header>
+
+    <!-- ── Centre — orb + status ───────────────────────────────────── -->
+    <div class="center">
+
+      <!-- Orb -->
+      <div class="orb-wrap" aria-label="Voice status indicator">
+        <div class="ring ring-4" aria-hidden="true"></div>
+        <div class="ring ring-3" aria-hidden="true"></div>
+        <div class="ring ring-2" aria-hidden="true"></div>
+        <div class="ring ring-1" aria-hidden="true"></div>
+
+        <div
+          class="orb"
+          id="orbBtn"
+          role="button"
+          tabindex="0"
+          aria-label="Click to stop listening"
+          title="Click to stop listening"
+        >
+          <div class="orb-icon"      id="orbIcon"   aria-hidden="true">&#x2358;</div>
+          <div class="orb-muted-icon"               aria-hidden="true">⊘</div>
+          <div class="orb-stop-hint" id="orbStopHint" aria-hidden="true">■ STOP</div>
+        </div>
+      </div>
+
+      <!-- Status text -->
+      <div class="status-row" role="status" aria-live="polite">
+        <div class="status-text"   id="statusText">OFFLINE</div>
+        <div class="status-detail" id="statusDetail">Waiting for voice daemon…</div>
+      </div>
+
+      <!-- Waveform -->
+      <div class="wave" aria-hidden="true">
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+      </div>
+
+      <!-- Last command bar -->
+      <div class="heard-bar" id="heardBar" aria-label="Last spoken command">
+        <div class="heard-label">Last Command</div>
+        <div class="heard-text" id="heardText" aria-live="polite">—</div>
+      </div>
+    </div>
+
+    <!-- ── Chat feed ────────────────────────────────────────────────── -->
+    <aside class="feed-panel" aria-label="Conversation history">
+      <div class="feed-header">
+        <span class="feed-title">Conversation</span>
+        <span class="feed-count" id="feedCount" aria-live="polite">0 exchanges</span>
+      </div>
+      <div class="feed-scroll" id="feedScroll" role="log" aria-live="polite" aria-relevant="additions"></div>
+    </aside>
+
+    <!-- ── Footer ───────────────────────────────────────────────────── -->
+    <footer>
+      <div class="footer-item">
+        <span class="footer-label">Agent</span>
+        <span class="footer-val" id="footerAgent">—</span>
+      </div>
+      <div class="footer-item">
+        <span class="footer-label">TTS</span>
+        <span class="footer-val" id="footerVoice">—</span>
+      </div>
+      <div class="footer-item">
+        <span class="footer-label">Events</span>
+        <span class="footer-val" id="footerEvents">0</span>
+      </div>
+    </footer>
+
+  </div><!-- /.layout -->
+
+  <script src="/listen.js"></script>
+</body>
+</html>

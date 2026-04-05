@@ -31,8 +31,8 @@ After your internal thinking phase completes and before (or in parallel with) yo
 ### Template
 
 ```powershell
-# Single reasoning chunk — set FRIDAY_TTS_THINKING for singleton guard
-cd d:\code\openclaw; $env:FRIDAY_TTS_THINKING='1'; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "So looking at this, I think the issue is [insight], because [reason]. The approach I'd take is [plan]. One thing to be careful about is [risk]."
+# Single reasoning chunk — set FRIDAY_TTS_THINKING for singleton guard; PRIORITY=1 cuts through ambient like the ack
+cd d:\code\openclaw; $env:FRIDAY_TTS_PRIORITY='1'; $env:FRIDAY_TTS_THINKING='1'; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "So looking at this, I think the issue is [insight], because [reason]. The approach I'd take is [plan]. One thing to be careful about is [risk]."
 ```
 
 `block_until_ms: 0` — fires async alongside real work.
@@ -70,7 +70,7 @@ cd d:\code\openclaw; $env:FRIDAY_TTS_SESSION='subagent'; $env:FRIDAY_TTS_PRIORIT
 
 ```
 Message N:
-  ├── Shell: friday-speak.py "Got it…"                              ← ack (existing rule)
+  ├── Shell: FRIDAY_TTS_PRIORITY=1 friday-speak.py "Got it…"         ← ack (existing rule; pre-empts ambient)
   ├── Shell: FRIDAY_TTS_THINKING=1 friday-speak.py "So the issue…"  ← reasoning (THIS rule, singleton)
   ├── Read / Grep / Glob: actual work                               ← starts NOW, parallel
 ```

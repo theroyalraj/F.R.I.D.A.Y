@@ -15,9 +15,9 @@ Do NOT make it a sequential prerequisite that blocks work from starting. The spe
 
 ```
 Message N (single response):
-  ├── Shell: friday-speak.py "Got it…"      ← block_until_ms: 0  (no wait)
-  ├── Read: the relevant file               ← starts NOW, not after speak
-  └── Glob: find related files             ← starts NOW, not after speak
+  ├── Shell: friday-speak.py "Got it…" + PRIORITY=1  ← block_until_ms: 0  (pre-empts ambient / other TTS)
+  ├── Read: the relevant file                         ← starts NOW, not after speak
+  └── Glob: find related files                        ← starts NOW, not after speak
 ```
 
 This is zero sequential overhead. The voice fires async and work starts at the same time.
@@ -26,17 +26,18 @@ This is zero sequential overhead. The voice fires async and work starts at the s
 
 ```powershell
 # Speak acknowledgement — session voice is auto-loaded from .session-voice.json by friday-speak.py.
+# FRIDAY_TTS_PRIORITY=1 pre-empts friday-player, ambient TTS, and the Redis TTS lock so the ack is heard immediately.
 # If no session file exists, friday-speak.py auto-triggers pick-session-voice.py in the background.
 # NO separate pick-session-voice.py call needed — everything is one async fire-and-forget.
-cd d:\code\openclaw; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "Got it. [one sentence restatement of the task]."
+cd d:\code\openclaw; $env:FRIDAY_TTS_PRIORITY='1'; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "Got it. [one sentence restatement of the task]."
 ```
 
-Must have `block_until_ms: 0`. Can be in the same message as real work tool calls — that's the point.
+Must have `block_until_ms: 0`. **Must** set `FRIDAY_TTS_PRIORITY=1` on every acknowledgement (main Composer, not only subagents). Can be in the same message as real work tool calls — that's the point.
 
 ## Example — correct async batch
 
 ```
-Tool call 1: Shell friday-speak.py "Got it…"  block_until_ms: 0
+Tool call 1: Shell friday-speak.py + FRIDAY_TTS_PRIORITY=1 "Got it…"  block_until_ms: 0
 Tool call 2: Read d:\code\openclaw\some-file  (reads immediately, no wait)
 Tool call 3: Glob **/*.py                     (searches immediately, no wait)
 ```
@@ -55,14 +56,14 @@ cd d:\code\openclaw; $env:FRIDAY_TTS_SESSION='subagent'; $env:FRIDAY_TTS_PRIORIT
 
 `FRIDAY_TTS_PRIORITY=1` is **mandatory** for all subagent speak calls — it pre-empts any ambient TTS or competing lock so subagents are always heard instead of silently queuing behind other speech.
 
-The parent chat keeps using the main commands above **without** `FRIDAY_TTS_SESSION`.
+The parent Composer chat uses the main ack command above **without** `FRIDAY_TTS_SESSION`, but **with** `FRIDAY_TTS_PRIORITY=1` so acknowledgements cut through ambient and other playback the same way.
 
 ## If you have clarifying questions
 
 Speak the question out loud AND show it in your text reply. Still batch the voice call with any read/explore calls you can do speculatively:
 
 ```powershell
-cd d:\code\openclaw; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "Before I proceed — [question]?"
+cd d:\code\openclaw; $env:FRIDAY_TTS_PRIORITY='1'; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "Before I proceed — [question]?"
 ```
 
 ## Do NOT

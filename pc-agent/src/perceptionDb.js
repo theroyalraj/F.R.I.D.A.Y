@@ -1,11 +1,23 @@
 import crypto from 'node:crypto';
 import pg from 'pg';
+import {
+  sqliteBackendConfigured,
+  sqliteDbHealth,
+  sqliteInsertPerceptionCapture,
+  sqliteSearchPerceptionByVector,
+  sqliteListRecentCaptures,
+} from './perceptionSqlite.js';
 
 const EXPECTED_DIM = Number(process.env.OPENCLAW_EMBEDDING_DIM || 1536);
 
 let pool = null;
 
+export function usesSqliteBackend() {
+  return sqliteBackendConfigured();
+}
+
 export function perceptionDbConfigured() {
+  if (sqliteBackendConfigured()) return true;
   const u = (process.env.OPENCLAW_DATABASE_URL || '').trim();
   return Boolean(u);
 }
@@ -15,6 +27,7 @@ export function getExpectedEmbeddingDim() {
 }
 
 export function getPool() {
+  if (sqliteBackendConfigured()) return null;
   if (!perceptionDbConfigured()) return null;
   if (!pool) {
     pool = new pg.Pool({
@@ -27,11 +40,12 @@ export function getPool() {
 }
 
 export async function perceptionDbHealth() {
+  if (sqliteBackendConfigured()) return sqliteDbHealth();
   const p = getPool();
   if (!p) return { ok: false, reason: 'OPENCLAW_DATABASE_URL not set' };
   try {
     const r = await p.query('SELECT 1 AS ok');
-    return { ok: r.rows[0]?.ok === 1 };
+    return { ok: r.rows[0]?.ok === 1, backend: 'postgres' };
   } catch (e) {
     return { ok: false, reason: String(e.message || e) };
   }
@@ -50,17 +64,10 @@ function sha256Hex(buf) {
 
 /**
  * @param {object} row
- * @param {string} row.sourceType
- * @param {string} [row.rawText]
- * @param {string} [row.descriptionText]
- * @param {number[]} [row.embedding]
- * @param {object} [row.metadata]
- * @param {string} [row.imageMime]
- * @param {Buffer} [row.imageBytes]
- * @param {string} [row.mediaPath]
- * @param {string} [row.redisCacheKey]
  */
 export async function insertPerceptionCapture(row) {
+  if (sqliteBackendConfigured()) return sqliteInsertPerceptionCapture(row);
+
   const p = getPool();
   if (!p) throw new Error('Database not configured');
 
@@ -131,6 +138,8 @@ export async function insertPerceptionCapture(row) {
 
 /** @param {number[]} embedding */
 export async function searchPerceptionByVector(embedding, limit = 10) {
+  if (sqliteBackendConfigured()) return sqliteSearchPerceptionByVector(embedding, limit);
+
   const p = getPool();
   if (!p) throw new Error('Database not configured');
   const vec = toVectorLiteral(embedding);
@@ -147,6 +156,8 @@ export async function searchPerceptionByVector(embedding, limit = 10) {
 }
 
 export async function listRecentCaptures(limit = 20) {
+  if (sqliteBackendConfigured()) return sqliteListRecentCaptures(limit);
+
   const p = getPool();
   if (!p) throw new Error('Database not configured');
   const r = await p.query(

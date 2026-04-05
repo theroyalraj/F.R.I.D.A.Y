@@ -28,6 +28,7 @@ import { createSettingsRouter } from './settingsRoutes.js';
 import { createAutomationRouter } from './automationRoutes.js';
 import { createTodosRouter } from './todosRoutes.js';
 import { perceptionDbConfigured, perceptionDbHealth } from './perceptionDb.js';
+import { loadOpenclawUserConfig } from './userConfig.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, '../public');
@@ -49,6 +50,7 @@ function broadcastEvent(type, data = {}) {
 
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
+loadOpenclawUserConfig();
 
 const PORT = Number(process.env.PC_AGENT_PORT || 3847);
 
@@ -471,7 +473,8 @@ app.use('/voice', voiceRouter);
 app.get('/health', async (_req, res) => {
   const body = { ok: true, service: 'openclaw-pc-agent' };
   if (perceptionDbConfigured()) {
-    body.postgres = await perceptionDbHealth();
+    body.database = await perceptionDbHealth();
+    body.postgres = body.database;
   }
   res.json(body);
 });

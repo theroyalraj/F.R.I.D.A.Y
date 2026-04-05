@@ -1,0 +1,90 @@
+:root {
+  font-family: system-ui, 'Segoe UI', Roboto, sans-serif;
+  color: #e8e8ec;
+  background: #12131a;
+}
+
+body {
+  margin: 0;
+}
+
+.wizard {
+  max-width: 440px;
+  margin: 0 auto;
+  padding: 1.5rem;
+}
+
+header h1 {
+  margin: 0 0 0.25rem;
+  font-size: 1.5rem;
+}
+
+.muted {
+  color: #9898a8;
+  font-size: 0.9rem;
+}
+
+.small {
+  font-size: 0.82rem;
+}
+
+section h2 {
+  font-size: 1.1rem;
+  margin-top: 1.25rem;
+}
+
+label {
+  display: block;
+  margin: 0.75rem 0;
+  font-size: 0.88rem;
+}
+
+input {
+  display: block;
+  width: 100%;
+  margin-top: 0.35rem;
+  padding: 0.5rem 0.65rem;
+  border-radius: 8px;
+  border: 1px solid #2e3142;
+  background: #1a1c26;
+  color: inherit;
+  box-sizing: border-box;
+}
+
+.actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 1.25rem;
+}
+
+button {
+  flex: 1;
+  padding: 0.55rem 0.75rem;
+  border-radius: 8px;
+  border: none;
+  background: #4f6ad6;
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+button.secondary {
+  background: #2e3142;
+}
+
+.status {
+  margin-top: 1rem;
+  color: #9ad29a;
+}
+
+code {
+  font-size: 0.85em;
+  background: #1a1c26;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+}

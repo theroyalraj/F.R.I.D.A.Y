@@ -62,6 +62,7 @@ python skill-gateway/scripts/friday-speak.py "text to speak" &
 ```
 
 Env overrides (optional, set inline):
+- `FRIDAY_TTS_PRIORITY` — `1` / `true` pre-empts competing playback (use on **ack** and urgent lines so they are not buried under ambient TTS)
 - `FRIDAY_TTS_VOICE` — Edge TTS voice name (default: en-US-EmmaMultilingualNeural)
 - **`FRIDAY_TTS_VOICE_BLOCK`** — comma-separated Edge voice ids **never** to use; see repo root **`CLAUDE.md`** — do not suggest or set blocked voices in `.env`, scripts, or docs.
 - `FRIDAY_TTS_PRIORITY=1` — pre-empts ambient and competing TTS

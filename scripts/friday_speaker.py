@@ -72,6 +72,51 @@ def sanitise(text: str) -> str:
     return _strip_redacted(text)
 
 
+def thinking_tts_rate_for_length(
+    char_len: int,
+    *,
+    incremental: bool = False,
+    fixed_rate: str | None = None,
+) -> str:
+    """Edge-tts ``rate`` string for extended-thinking audio.
+
+    - If ``fixed_rate`` is non-empty, it wins (manual override from env).
+    - Otherwise: **faster** for short snippets (less waiting), **slower** for very
+      long monologues (easier to follow).
+    - When ``incremental`` is True (JSONL stream still growing; sentence chipped
+      off before the block is final), the rate is nudged **slower** so clipped
+      phrases do not rush past — “stuck” / in-flight stream pacing.
+
+    Edge accepts roughly -50% … +50%; we clamp to a conservative band.
+    """
+    if fixed_rate and fixed_rate.strip():
+        return fixed_rate.strip()
+    n = max(0, int(char_len))
+    # Piecewise: short → brisk, long → relaxed (slightly faster than real-time “performance”)
+    if n <= 200:
+        pct = 22.0
+    elif n <= 520:
+        t = (n - 200) / (520 - 200)
+        pct = 22.0 + t * (13.0 - 22.0)
+    elif n <= 1400:
+        t = (n - 520) / (1400 - 520)
+        pct = 13.0 + t * (5.0 - 13.0)
+    else:
+        t = min(1.0, (n - 1400) / 2400.0)
+        pct = 5.0 + t * (-4.5 - 5.0)
+    if incremental:
+        try:
+            bump = float(os.environ.get("FRIDAY_CURSOR_THINKING_INCREMENTAL_SLOW", "4").strip())
+        except ValueError:
+            bump = 4.0
+        pct -= bump
+    pct = max(-10.0, min(26.0, pct))
+    pct_int = round(pct)
+    if pct_int >= 0:
+        return f"+{pct_int}%"
+    return f"{pct_int}%"
+
+
 # ── Singleton speaker ─────────────────────────────────────────────────────────
 
 class FridaySpeaker:

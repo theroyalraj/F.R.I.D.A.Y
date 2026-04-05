@@ -1,4 +1,5 @@
-import { getPool, perceptionDbConfigured } from './perceptionDb.js';
+import { getPool, perceptionDbConfigured, usesSqliteBackend } from './perceptionDb.js';
+import { sqliteGetSetting, sqliteSetSetting } from './perceptionSqlite.js';
 
 function envFloat(name, fallback) {
   const v = (process.env[name] || '').split('#')[0].trim();
@@ -8,6 +9,9 @@ function envFloat(name, fallback) {
 
 /** @returns {Promise<string|null>} */
 export async function getSetting(key) {
+  if (usesSqliteBackend()) {
+    return await sqliteGetSetting(key);
+  }
   const p = getPool();
   if (!p) return null;
   const r = await p.query('SELECT value FROM openclaw_settings WHERE key = $1', [key]);
@@ -15,6 +19,10 @@ export async function getSetting(key) {
 }
 
 export async function setSetting(key, value) {
+  if (usesSqliteBackend()) {
+    await sqliteSetSetting(key, value);
+    return;
+  }
   const p = getPool();
   if (!p) throw new Error('Database not configured');
   await p.query(
@@ -73,9 +81,9 @@ export async function getAmbientMerged() {
  */
 export async function putAmbientPartial(body) {
   if (!perceptionDbConfigured()) {
-    throw new Error('OPENCLAW_DATABASE_URL not set');
+    throw new Error('OPENCLAW_DATABASE_URL or OPENCLAW_SQLITE_PATH not set');
   }
-  if (!getPool()) throw new Error('Database not configured');
+  if (!usesSqliteBackend() && !getPool()) throw new Error('Database not configured');
 
   const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
 

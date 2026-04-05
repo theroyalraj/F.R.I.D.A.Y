@@ -9,7 +9,10 @@ export function createSettingsRouter(authMiddleware) {
 
   r.get('/ambient', async (_req, res) => {
     if (!perceptionDbConfigured()) {
-      return res.status(503).json({ error: 'OPENCLAW_DATABASE_URL not set' });
+      return res.status(503).json({
+        error: 'Database not configured',
+        hint: 'Set OPENCLAW_SQLITE_PATH (embedded) or OPENCLAW_DATABASE_URL (Postgres).',
+      });
     }
     try {
       const merged = await getAmbientMerged();
@@ -21,7 +24,10 @@ export function createSettingsRouter(authMiddleware) {
 
   r.put('/ambient', async (req, res) => {
     if (!perceptionDbConfigured()) {
-      return res.status(503).json({ error: 'OPENCLAW_DATABASE_URL not set' });
+      return res.status(503).json({
+        error: 'Database not configured',
+        hint: 'Set OPENCLAW_SQLITE_PATH (embedded) or OPENCLAW_DATABASE_URL (Postgres).',
+      });
     }
     const b = req.body || {};
     try {

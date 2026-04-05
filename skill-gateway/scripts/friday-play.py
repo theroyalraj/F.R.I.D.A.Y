@@ -210,7 +210,7 @@ def play(mp3_path: Path):
     try:
         if MUSIC_DEVICE_HINT and platform.system() == "Windows":
             try:
-                from friday_win_audio import (
+                from friday_platform_audio import (
                     find_output_device_id,
                     get_default_output_id,
                     set_default_endpoint,
@@ -247,7 +247,7 @@ def play(mp3_path: Path):
         if switched_for_music and original_default_id:
             time.sleep(0.22)
             try:
-                from friday_win_audio import set_default_endpoint
+                from friday_platform_audio import set_default_endpoint
 
                 set_default_endpoint(original_default_id)
                 print("[friday-play] restored default output for TTS / other apps", flush=True)
@@ -259,7 +259,7 @@ def play(mp3_path: Path):
     finally:
         if switched_for_music and original_default_id:
             try:
-                from friday_win_audio import set_default_endpoint
+                from friday_platform_audio import set_default_endpoint
 
                 set_default_endpoint(original_default_id)
             except Exception:

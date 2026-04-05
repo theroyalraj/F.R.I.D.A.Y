@@ -25,18 +25,22 @@ Optional:
   FRIDAY_CURSOR_REPLY_VOICE — Edge voice id for main transcript TTS (see pick-session-voice --cursor-reply)
   CURSOR_TRANSCRIPTS_DIR — override path to agent-transcripts
 
-Thinking TTS pacing (sentence-by-sentence, avoids one rushed blob):
-  FRIDAY_CURSOR_THINKING_TTS_RATE — Edge rate for thinking only (default -5% vs repo default +7.5%)
-  FRIDAY_CURSOR_THINKING_PAUSE_MIN / FRIDAY_CURSOR_THINKING_PAUSE_MAX — seconds between sentences (default 0.35–0.85)
-  FRIDAY_CURSOR_THINKING_OPENER_CHANCE — 0–1 chance to prefix first sentence with a soft "Hmm / So —" style lead-in (default 0.35)
-  FRIDAY_CURSOR_THINKING_MAX_CHUNK_CHARS — merge/split target width (default 300)
+Thinking TTS pacing (batched sentences + sized chunks; avoids a firehose of tiny clips):
+  FRIDAY_CURSOR_THINKING_TTS_RATE — optional fixed Edge rate for thinking (when unset, rate is adaptive).
+    Thinking playback is **non-priority** so FRIDAY_TTS_PRIORITY=1 speaks pre-empt it.
+  FRIDAY_CURSOR_THINKING_INCREMENTAL_SLOW — extra percentage points to slow mid-stream chunks (default 2)
+  FRIDAY_CURSOR_THINKING_PAUSE_MIN / FRIDAY_CURSOR_THINKING_PAUSE_MAX — base seconds between intra-batch chunks (defaults 0.07–0.16; scaled by block size)
+  FRIDAY_CURSOR_THINKING_OPENER_CHANCE — 0–1 chance to prefix first chunk with a soft lead-in (default 0.35)
+  FRIDAY_CURSOR_THINKING_MAX_CHUNK_CHARS — merge/split target width (default 520)
+  FRIDAY_CURSOR_THINKING_MIN_BATCH_CHARS — incremental JSONL: accumulate at least this many chars before starting TTS (default 220)
+  FRIDAY_CURSOR_THINKING_MIN_CHUNK_MERGE_CHARS — merge adjacent pacing chunks smaller than this (default 90)
 
 JSONL thinking does not set FRIDAY_TTS_THINKING — that flag enables a separate singleton in friday-speak that
 drops audio when busy (e.g. live agent thinking narration). Watcher thinking only needs the global TTS lock.
 
 Incremental thinking (same line growing across JSONL updates):
   Thinking blocks may carry final/partial flags — we only speak immediately when final is true (or partial is explicitly false).
-  When flags are missing, we buffer and speak once after FRIDAY_CURSOR_THINKING_DEBOUNCE_SEC of no updates (default 0.85).
+  When flags are missing, we buffer and speak once after FRIDAY_CURSOR_THINKING_DEBOUNCE_SEC of no updates (default 0.65).
 
 Run:  python scripts/cursor-reply-watch.py
 """
@@ -81,6 +85,10 @@ POLL_ACTIVE_SEC = 0.15
 RESCAN_SEC = 10.0
 _ACTIVE_WINDOW_SEC = 5.0
 _SPOKEN_HASHES_MAX = 500
+
+# Monotonic counter: advances once per thinking block (per call to _speak_thinking_paced).
+# Ensures voice changes between spans/blocks, not between sentences within the same block.
+_thinking_pool_idx: int = 0
 
 
 def _env_bool(key: str, default: bool = True) -> bool:
@@ -411,6 +419,7 @@ def _speak_main(text: str) -> None:
     speaker.speak(
         text,
         session="cursor-reply",
+        priority=True,
         bypass_cursor_defer=True,
     )
 
@@ -583,33 +592,123 @@ def _split_thinking_into_chunks(text: str, *, max_chunk_chars: int) -> list[str]
     return [c for c in chunks if c.strip()]
 
 
-def _speak_thinking_paced(full_text: str) -> None:
-    """Speak extended thinking one sentence-sized chunk at a time with pauses (human pacing)."""
-    from friday_speaker import speaker
+def _merge_tiny_chunks(
+    chunks: list[str], *, min_chars: int, max_chars: int
+) -> list[str]:
+    """Merge adjacent split fragments so pacing does not emit dozens of sub‑sentence blips."""
+    if not chunks:
+        return []
+    out: list[str] = []
+    buf = ""
+    for c in chunks:
+        c = c.strip()
+        if not c:
+            continue
+        cand = f"{buf} {c}".strip() if buf else c
+        if not buf:
+            buf = c
+        elif len(cand) <= max_chars and (len(buf) < min_chars or len(c) < min_chars):
+            buf = cand
+        else:
+            out.append(buf)
+            buf = c
+    if buf:
+        out.append(buf)
+    return out
 
-    max_chars = int(_env_float("FRIDAY_CURSOR_THINKING_MAX_CHUNK_CHARS", 300))
-    max_chars = max(80, min(max_chars, 1200))
+
+def _thinking_pause_scale(full_len: int) -> float:
+    """Shorter thinking → tighter gaps between paced chunks (scaled × PAUSE_MIN/MAX)."""
+    n = max(0, int(full_len))
+    if n < 400:
+        return 0.50
+    if n < 900:
+        return 0.70
+    if n < 1600:
+        return 0.88
+    return 1.0
+
+
+def _speak_thinking_paced(
+    full_text: str,
+    *,
+    incremental: bool = False,
+    rate_basis_len: int | None = None,
+) -> None:
+    """Speak extended thinking one sentence-sized chunk at a time with pauses (human pacing).
+
+    ``rate_basis_len`` — when speaking an early sentence of a long still-growing block,
+    pass the **current total** character length of the block so adaptive rate stays slow
+    enough; defaults to ``len(full_text)`` (this batch only).
+    """
+    from friday_speaker import speaker, thinking_tts_rate_for_length
+
+    max_chars = int(_env_float("FRIDAY_CURSOR_THINKING_MAX_CHUNK_CHARS", 520))
+    max_chars = max(120, min(max_chars, 1600))
     chunks = _split_thinking_into_chunks(full_text, max_chunk_chars=max_chars)
+    min_merge = int(_env_float("FRIDAY_CURSOR_THINKING_MIN_CHUNK_MERGE_CHARS", 90))
+    min_merge = max(40, min(min_merge, max_chars))
+    chunks = _merge_tiny_chunks(chunks, min_chars=min_merge, max_chars=max_chars)
     if not chunks:
         return
 
-    thinking_rate = os.environ.get("FRIDAY_CURSOR_THINKING_TTS_RATE", "-5%").strip() or "-5%"
+    basis = rate_basis_len if rate_basis_len is not None else len(full_text)
+    basis = max(basis, len(full_text))
+
+    fixed = os.environ.get("FRIDAY_CURSOR_THINKING_TTS_RATE", "").strip() or None
+    thinking_rate = thinking_tts_rate_for_length(
+        basis, incremental=incremental, fixed_rate=fixed
+    )
+
+    # Dedicated thinking voice — env override → session file → None (falls back to subagent slot).
+    _thinking_voice_raw = os.environ.get("FRIDAY_TTS_THINKING_VOICE", "").strip()
+    if not _thinking_voice_raw:
+        try:
+            import json as _json_tv
+            _sv_tv = _json_tv.loads((_REPO_ROOT / ".session-voice.json").read_text(encoding="utf-8"))
+            _thinking_voice_raw = _sv_tv.get("thinking_voice", "").strip()
+        except Exception:
+            pass
+    _thinking_voice: str | None = _thinking_voice_raw if _thinking_voice_raw else None
+
+    # Per-block voice pool — voice changes between spans (different thread/call), not mid-block.
+    # All sentences within ONE call to this function share the same block voice.
+    global _thinking_pool_idx
+    _watcher_blocked = {v.strip() for v in os.environ.get("FRIDAY_TTS_VOICE_BLOCK", "").split(",") if v.strip()}
+    _watcher_blocked |= {"en-AU-WilliamNeural", "en-AU-WilliamMultilingualNeural", "en-GB-RyanNeural", "en-GB-ThomasNeural"}
+    _tv_pool_raw = os.environ.get("FRIDAY_CURSOR_THINKING_VOICE_POOL", "").strip()
+    _thinking_pool: list[str] = []
+    if _tv_pool_raw:
+        _thinking_pool = [v.strip() for v in _tv_pool_raw.split(",") if v.strip() and v.strip() not in _watcher_blocked]
+    if len(_thinking_pool) <= 1:
+        _thinking_pool = []  # need at least 2 voices to rotate; otherwise fall back to single voice
+
+    # Pick ONE voice for this entire block, advance counter for the next block/span.
+    if _thinking_pool:
+        _block_voice: str | None = _thinking_pool[_thinking_pool_idx % len(_thinking_pool)]
+        _thinking_pool_idx += 1
+    else:
+        _block_voice = _thinking_voice
 
     # Tiny single blip: blocking + same rate as paced path (no FRIDAY_TTS_THINKING — avoids singleton skip).
     if len(chunks) == 1 and len(chunks[0]) < 160:
         speaker.speak_blocking(
             chunks[0].strip(),
             session="subagent",
-            priority=True,
+            voice=_block_voice,
+            priority=False,
             bypass_cursor_defer=True,
             rate=thinking_rate,
         )
         return
 
-    pause_lo = _env_float("FRIDAY_CURSOR_THINKING_PAUSE_MIN", 0.35)
-    pause_hi = _env_float("FRIDAY_CURSOR_THINKING_PAUSE_MAX", 0.85)
+    pause_lo = _env_float("FRIDAY_CURSOR_THINKING_PAUSE_MIN", 0.07)
+    pause_hi = _env_float("FRIDAY_CURSOR_THINKING_PAUSE_MAX", 0.16)
     if pause_hi < pause_lo:
         pause_lo, pause_hi = pause_hi, pause_lo
+    pmul = _thinking_pause_scale(basis)
+    pause_lo *= pmul
+    pause_hi *= pmul
     opener_chance = _env_float("FRIDAY_CURSOR_THINKING_OPENER_CHANCE", 0.35)
     if opener_chance > 1.0:
         opener_chance = min(opener_chance / 100.0, 1.0)
@@ -621,10 +720,12 @@ def _speak_thinking_paced(full_text: str) -> None:
                 continue
             if i == 0 and random.random() < opener_chance:
                 c = random.choice(_THINKING_OPENERS) + c
+            # All chunks in this block use the same voice — voice only changes on a new block/span.
             speaker.speak_blocking(
                 c,
                 session="subagent",
-                priority=True,
+                voice=_block_voice,
+                priority=False,
                 bypass_cursor_defer=True,
                 rate=thinking_rate,
             )
@@ -632,7 +733,7 @@ def _speak_thinking_paced(full_text: str) -> None:
                 break
             gap = random.uniform(pause_lo, pause_hi)
             if c.rstrip().endswith("?"):
-                gap += random.uniform(0.12, 0.38)
+                gap += random.uniform(0.06, 0.18) * pmul
             time.sleep(gap)
 
     threading.Thread(target=run, daemon=True, name="cursor-thinking-tts").start()
@@ -694,20 +795,37 @@ def _content_hash(text: str) -> str:
 
 
 def _thinking_debounce_sec() -> float:
-    v = _env_float("FRIDAY_CURSOR_THINKING_DEBOUNCE_SEC", 0.85)
+    v = _env_float("FRIDAY_CURSOR_THINKING_DEBOUNCE_SEC", 0.65)
     return max(0.15, min(v, 30.0))
 
 
-def _thinking_speak_once(thinking_prose: str, spoken_hashes: set) -> None:
+def _thinking_min_batch_chars() -> int:
+    """Incremental stream: wait until at least this many characters of prose before TTS."""
+    v = _env_float("FRIDAY_CURSOR_THINKING_MIN_BATCH_CHARS", 220)
+    return max(60, min(int(v), 4000))
+
+
+def _thinking_speak_once(
+    thinking_prose: str,
+    spoken_hashes: set,
+    *,
+    incremental: bool = False,
+    rate_basis_len: int | None = None,
+) -> None:
     h = _content_hash(thinking_prose)
     if h in spoken_hashes:
         return
     spoken_hashes.add(h)
     print(
-        f"cursor-reply-watch: [thinking] speaking {len(thinking_prose)} chars (paced)",
+        f"cursor-reply-watch: [thinking] speaking {len(thinking_prose)} chars batched pacing "
+        f"(incremental={incremental})",
         flush=True,
     )
-    _speak_thinking_paced(thinking_prose)
+    _speak_thinking_paced(
+        thinking_prose,
+        incremental=incremental,
+        rate_basis_len=rate_basis_len,
+    )
 
 
 def _thinking_buffer_update(
@@ -728,9 +846,16 @@ def _thinking_buffer_update(
     spoken_len = st.get("thinking_spoken_len", 0)
 
     if prev and not thinking_prose.startswith(prev):
+        batch_prev = (st.pop("thinking_batch_buf", None) or "").strip()
         tail = prev[spoken_len:].strip()
-        if tail:
-            _thinking_speak_once(tail, spoken_hashes)
+        merged_prev = " ".join(x for x in (batch_prev, tail) if x).strip()
+        if merged_prev:
+            _thinking_speak_once(
+                merged_prev,
+                spoken_hashes,
+                incremental=True,
+                rate_basis_len=len(prev),
+            )
         st["thinking_spoken_len"] = 0
         spoken_len = 0
 
@@ -749,8 +874,21 @@ def _thinking_buffer_update(
     ready = parts[:-1]
     ready_text = " ".join(ready).strip()
     if ready_text:
-        _thinking_speak_once(ready_text, spoken_hashes)
-        st["thinking_spoken_len"] = spoken_len + len(unseen) - len(parts[-1])
+        min_b = _thinking_min_batch_chars()
+        batch = (st.get("thinking_batch_buf") or "").strip()
+        batch = f"{batch} {ready_text}".strip() if batch else ready_text
+        new_spoken = spoken_len + len(unseen) - len(parts[-1])
+        st["thinking_spoken_len"] = new_spoken
+        if len(batch) >= min_b:
+            _thinking_speak_once(
+                batch,
+                spoken_hashes,
+                incremental=True,
+                rate_basis_len=len(thinking_prose),
+            )
+            st["thinking_batch_buf"] = ""
+        else:
+            st["thinking_batch_buf"] = batch
 
     st["thinking_debounce_at"] = now + _thinking_debounce_sec()
 
@@ -759,12 +897,16 @@ def _thinking_clear_pending(st: dict) -> None:
     st.pop("thinking_pending", None)
     st.pop("thinking_debounce_at", None)
     st.pop("thinking_spoken_len", None)
+    st.pop("thinking_batch_buf", None)
 
 
 def _flush_thinking_debounce(st: dict, now: float) -> None:
     """If pending thinking has been idle long enough, speak remaining tail."""
     pend = (st.get("thinking_pending") or "").strip()
     if not pend:
+        batch = (st.pop("thinking_batch_buf", None) or "").strip()
+        if batch:
+            _thinking_speak_once(batch, st["spoken_hashes"], rate_basis_len=len(batch))
         _thinking_clear_pending(st)
         return
     dead = st.get("thinking_debounce_at")
@@ -772,9 +914,11 @@ def _flush_thinking_debounce(st: dict, now: float) -> None:
         return
     spoken_hashes = st["spoken_hashes"]
     spoken_len = st.get("thinking_spoken_len", 0)
+    batch = (st.pop("thinking_batch_buf", None) or "").strip()
     tail = pend[spoken_len:].strip()
-    if tail:
-        _thinking_speak_once(tail, spoken_hashes)
+    merged = " ".join(x for x in (batch, tail) if x).strip()
+    if merged:
+        _thinking_speak_once(merged, spoken_hashes, rate_basis_len=len(pend))
     _thinking_clear_pending(st)
 
 
@@ -923,10 +1067,14 @@ def main() -> None:
                                 if stream_kind == "final":
                                     spoken_len = st.get("thinking_spoken_len", 0)
                                     tail = thinking_prose[spoken_len:].strip()
+                                    batch = (st.pop("thinking_batch_buf", None) or "").strip()
+                                    merged = " ".join(x for x in (batch, tail) if x).strip()
                                     _thinking_clear_pending(st)
-                                    if tail:
+                                    if merged:
                                         _thinking_speak_once(
-                                            tail, spoken_hashes
+                                            merged,
+                                            spoken_hashes,
+                                            rate_basis_len=len(thinking_prose),
                                         )
                                 else:
                                     _thinking_buffer_update(
