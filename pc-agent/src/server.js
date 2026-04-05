@@ -26,6 +26,7 @@ import { openAiTtsApiKey, openAiTtsConfigured, synthesizeOpenAiMp3 } from './ope
 import { createPerceptionRouter } from './perceptionRoutes.js';
 import { createSettingsRouter } from './settingsRoutes.js';
 import { createAutomationRouter } from './automationRoutes.js';
+import { createIntegrationsRouter } from './integrationsRoutes.js';
 import { createTodosRouter } from './todosRoutes.js';
 import { createActionItemsRouter } from './actionItemsRoutes.js';
 import { perceptionDbConfigured, perceptionDbHealth } from './perceptionDb.js';
@@ -609,6 +610,7 @@ app.post('/task', authTaskOrUser, async (req, res, next) => {
 app.use('/perception', createPerceptionRouter(auth));
 app.use('/settings', createSettingsRouter(auth));
 app.use('/automation', createAutomationRouter(auth));
+app.use('/integrations', createIntegrationsRouter(authJwtOrAgentSecret(SECRET)));
 app.use('/todos', createTodosRouter(broadcastEvent));
 app.use('/action-items', createActionItemsRouter());
 

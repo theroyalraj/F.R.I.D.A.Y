@@ -125,7 +125,8 @@
       "Bash(powershell -Command \"Get-CimInstance Win32_Process -Filter ''ProcessId=60968'' | Select-Object CommandLine | Format-List\")",
       "Bash(powershell -Command \"Get-CimInstance Win32_Process -Filter ''ProcessId=60968'' | Select-Object ParentProcessId | Format-List\")",
       "Bash(powershell -Command \"Get-CimInstance Win32_Process -Filter ''ProcessId=60460'' | Select-Object ProcessId,Name,CommandLine | Format-List\")",
-      "Bash(powershell -Command \"Get-CimInstance Win32_Process -Filter \"\"CommandLine LIKE ''%start.mjs%''\"\" | Select-Object ProcessId,CommandLine | Format-List\")"
+      "Bash(powershell -Command \"Get-CimInstance Win32_Process -Filter \"\"CommandLine LIKE ''%start.mjs%''\"\" | Select-Object ProcessId,CommandLine | Format-List\")",
+      "Bash(taskkill //PID 60968 //F)"
     ]
   }
 }
