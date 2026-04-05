@@ -198,12 +198,6 @@ const SecurityScanPanel: React.FC<Props> = ({ authHeaders, theme, showToast, var
           Force full scan
         </button>
       </div>
-      {variant !== 'avatar' ? (
-        <p className={styles['sec-scan-hint']}>
-          First full npm audit each day uses a twenty four hour cache. High or critical issues add a pinned todo and
-          optional Windows notify.
-        </p>
-      ) : null}
     </div>
   ) : null;
 
