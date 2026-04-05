@@ -1987,6 +1987,16 @@
 
 .integrations-refresh:hover { border-color: rgba(138, 92, 246, 0.25); color: rgba(255, 255, 255, 0.7); }
 .integrations-refresh:disabled { opacity: 0.35; cursor: not-allowed; }
+.integrations-refresh-active {
+  background: rgba(138, 92, 246, 0.15);
+  border-color: rgba(138, 92, 246, 0.4);
+  color: rgba(138, 92, 246, 0.9);
+  animation: pulse-subtle 2s ease-in-out infinite;
+}
+@keyframes pulse-subtle {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.65; }
+}
 
 .integrations-error {
   font-size: 0.62rem;

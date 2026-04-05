@@ -11,7 +11,6 @@ import MiniNotifyOrb from './MiniNotifyOrb';
 import { IntegrationsRail } from './IntegrationsRail';
 import { PersonaRosterModal } from './PersonaRosterModal';
 import LaunchOverlay from './LaunchOverlay';
-import SessionSidebar from './SessionSidebar';
 import AnimatedAvatar from './AnimatedAvatar';
 import TopMusicDock from './TopMusicDock';
 import {
@@ -427,6 +426,13 @@ const FridayListenApp: React.FC = () => {
 
     // Parse @mentions
     const mentions = [...raw.matchAll(/@(\w+)/g)].map(m => m[1].toLowerCase());
+    const ROUTING_TAGS = new Set(['speak', 'cursor']);
+    const personaMention = mentions.find((m) => {
+      if (ROUTING_TAGS.has(m)) return false;
+      if (m in COMPANY_PERSONAS) return true;
+      if (personaCatalog && typeof personaCatalog === 'object' && m in personaCatalog) return true;
+      return false;
+    });
     const text = raw.replace(/@\w+\s*/g, '').trim() || raw;
 
     const conversationTail = bubblesToConversationTail(bubbles);
@@ -467,17 +473,32 @@ const FridayListenApp: React.FC = () => {
           ...(mentions.includes('cursor') ? { target: 'cursor' } : {}),
           ...(claudeModel ? { claudeModel } : {}),
           ...(conversationTail.length ? { conversationTail } : {}),
+          ...(personaMention
+            ? { assignedPersona: personaMention, taskAssigned: true }
+            : {}),
         }),
       });
       const data = await res.json();
       if (data.summary) {
-        addBubble({ type: 'friday', text: data.summary, ts: Date.now(), persona: getReplyPersona() });
+        const pk =
+          typeof data.replyPersonaKey === 'string' ? (data.replyPersonaKey as CompanyPersonaKey) : null;
+        const replyVoice =
+          typeof data.replyVoice === 'string' && data.replyVoice.trim() ? data.replyVoice.trim() : '';
+        const replyPersona =
+          pk && personaCatalog
+            ? mergePersona(pk, personaOverrides, replyVoice || currentVoice, personaCatalog)
+            : getReplyPersona();
+        addBubble({ type: 'friday', text: data.summary, ts: Date.now(), persona: replyPersona });
         if (alwaysSpeakViaUi || data.speakAsync !== false) {
           pendingJarvisSpeak = true;
           setConnectionStatus('speaking');
           fetch('/voice/speak-async', {
             method: 'POST', headers: { ...authHeaders() as Record<string, string> },
-            body: JSON.stringify({ text: data.summary }),
+            body: JSON.stringify({
+              text: data.summary,
+              ...(replyVoice ? { voice: replyVoice } : {}),
+              ...(pk ? { personaKey: pk } : {}),
+            }),
           }).catch(() => setConnectionStatus('listening'));
         }
       } else if (data.error) {
@@ -511,7 +532,21 @@ const FridayListenApp: React.FC = () => {
       }
       inputRef.current?.focus();
     }
-  }, [inputText, sending, bubbles, addBubble, setConnectionStatus, authHeaders, getReplyPersona, clearCelebrationOffer, claudeModel, alwaysSpeakViaUi]);
+  }, [
+    inputText,
+    sending,
+    bubbles,
+    addBubble,
+    setConnectionStatus,
+    authHeaders,
+    getReplyPersona,
+    clearCelebrationOffer,
+    claudeModel,
+    alwaysSpeakViaUi,
+    personaCatalog,
+    personaOverrides,
+    currentVoice,
+  ]);
 
   const onCelebrationPlay = useCallback(async () => {
     if (celebrationAskTimerRef.current) {
@@ -878,6 +913,27 @@ const FridayListenApp: React.FC = () => {
             </div>
           )}
 
+          {/* Sessions */}
+          <div className={styles['sessions-section']}>
+            <div className={styles['sessions-heading']}>Sessions</div>
+            {sessions.map(s => {
+              const ctxLabel = CTX[s.context] || { label: s.context, desc: '' };
+              const meta = vm(s.voice);
+              return (
+                <div key={s.context} className={styles['session-row']}>
+                  <span className={styles['session-icon']} style={{ color: meta.color }}>{meta.icon}</span>
+                  <div className={styles['session-details']}>
+                    <div className={styles['session-label']}>{ctxLabel.label}</div>
+                    <div className={styles['session-desc']}>{meta.shortName}</div>
+                  </div>
+                  <div className={styles['session-right']}>
+                    <span className={`${styles['session-status']} ${styles[`session-${s.status}`]}`} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
           {/* Team speaker + voice pool */}
           <div className={styles['voice-card']}>
             <div className={styles['voice-card-top']}>
@@ -938,33 +994,6 @@ const FridayListenApp: React.FC = () => {
               <option value="openrouter-free">OpenRouter free — simple chat only</option>
               <option value="inherit">CLI default — no dash dash model</option>
             </select>
-          </div>
-
-          {/* Sessions */}
-          <div className={styles['sessions-section']}>
-            <div className={styles['sessions-heading']}>Sessions</div>
-            {sessions.map(s => {
-              const meta = vm(s.voice);
-              const ctx = CTX[s.context] || { label: s.context, desc: '' };
-              const pk = inferPersonaKeyFromVoice(s.voice, personaCatalog);
-              const designation =
-                pk === 'custom' ? `${ctx.desc} · ${shortVoiceLabel(s.voice)}` : mergePersona(pk, personaOverrides, s.voice, personaCatalog).title;
-              return (
-                <div key={s.context} className={`${styles['session-row']} ${s.status === 'active' ? styles['session-active'] : ''}`}>
-                  <span className={styles['session-icon']} style={{ color: meta.color }}>{meta.icon}</span>
-                  <div className={styles['session-details']}>
-                    <span className={styles['session-ctx']}>{ctx.label}</span>
-                    <span className={styles['session-voice-name']}>
-                      {meta.shortName} · {designation}
-                    </span>
-                  </div>
-                  <div className={styles['session-right']}>
-                    <span className={`${styles['session-dot']} ${s.status === 'active' ? styles['dot-on'] : ''}`} />
-                    <span className={styles['session-ago']}>{timeAgo(s.last_used)}</span>
-                  </div>
-                </div>
-              );
-            })}
           </div>
         </div>
 
@@ -1158,21 +1187,6 @@ const FridayListenApp: React.FC = () => {
           peripheralSpeak={peripheralSpeak}
           speakingPersonaKey={speakingPersonaKey}
         />
-
-        {/* Voice Sessions Sidebar */}
-        {!isNarrow && (
-          <SessionSidebar
-            sessions={sessions}
-            currentVoice={currentVoice}
-            currentVoiceLabel={replyPersona.name}
-            currentVoiceIcon={curMeta.icon}
-            currentVoiceColor={curMeta.color}
-            currentVoiceDescription={replyPersona.personality || `${replyPersona.title} — ${replyPersona.name}`}
-            isLoading={sessionsLoading}
-            theme={theme}
-            authHeaders={authHeaders}
-          />
-        )}
       </div>
 
       <PersonaRosterModal

@@ -77,6 +77,8 @@ export const IntegrationsRail: React.FC<Props> = ({
   const [markedMails, setMarkedMails] = useState<MarkedMail>({});
   const [archivingMails, setArchivingMails] = useState<{ [uid: string]: boolean }>({});
   const [isDragging, setIsDragging] = useState(false);
+  const [lastGmailRefresh, setLastGmailRefresh] = useState<number>(Date.now());
+  const [gmailAutoRefresh, setGmailAutoRefresh] = useState(true);
   const gmailRef = useRef(gmail);
   gmailRef.current = gmail;
   const railRef = useRef<HTMLDivElement>(null);
@@ -194,6 +196,7 @@ export const IntegrationsRail: React.FC<Props> = ({
         hasMoreUnread: unread.length >= MAIL_BATCH,
         hasMoreRecent: recent.length >= MAIL_BATCH,
       });
+      setLastGmailRefresh(Date.now());
     } catch (e) {
       setGmail((g) => ({
         ...g,
@@ -334,6 +337,17 @@ export const IntegrationsRail: React.FC<Props> = ({
     return () => clearInterval(iv);
   }, [refreshAll]);
 
+  // Gmail auto-refresh every 10 seconds
+  useEffect(() => {
+    if (!gmailAutoRefresh || document.hidden) return;
+    const gmailInterval = setInterval(() => {
+      if (document.hidden) return;
+      refreshMail();
+      setLastGmailRefresh(Date.now());
+    }, 10000);
+    return () => clearInterval(gmailInterval);
+  }, [gmailAutoRefresh, refreshMail]);
+
   useEffect(() => {
     if (gmail.unread.length > 0) {
       setSelectedMail((cur) => {
@@ -435,8 +449,18 @@ export const IntegrationsRail: React.FC<Props> = ({
                 className={styles['integrations-refresh']}
                 onClick={() => refreshMail()}
                 disabled={gmail.loading}
+                title={`Last refreshed: ${new Date(lastGmailRefresh).toLocaleTimeString()}`}
               >
-                Refresh
+                {gmail.loading ? '⟳' : 'Refresh'}
+              </button>
+              <button
+                type="button"
+                className={`${styles['integrations-refresh']} ${gmailAutoRefresh ? styles['integrations-refresh-active'] : ''}`}
+                onClick={() => setGmailAutoRefresh(!gmailAutoRefresh)}
+                title={gmailAutoRefresh ? 'Auto-refresh ON (every 10s) — click to disable' : 'Auto-refresh OFF — click to enable'}
+                style={{ fontSize: '0.75rem' }}
+              >
+                {gmailAutoRefresh ? '⚡' : '⏸'}
               </button>
             </div>
             {gmail.error && (
