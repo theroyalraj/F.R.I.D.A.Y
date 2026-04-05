@@ -60,15 +60,63 @@ pip install redis anthropic psutil py-now-playing
 
 ## Quick Start
 
-### 1. Clone and install
+### 1. Clone or update the repo
 
 ```bash
 git clone https://github.com/theroyalraj/F.R.I.D.A.Y.git openclaw
 cd openclaw
-npm install
 ```
 
-### 2. Configure
+Already cloned:
+
+```bash
+cd openclaw
+git pull --ff-only
+```
+
+### 2. Set up the project (Node, Cursor rules, Python)
+
+From the repo root, install Node workspaces, regenerate **`.cursor/rules/openclaw-company.mdc`** from the Python registry, and install Python deps used by **`cursor-reply-watch`** and related scripts:
+
+**macOS / Linux / Git Bash**
+
+```bash
+npm ci
+python3 scripts/openclaw_company.py --generate-rule
+python3 -m pip install -r scripts/requirements-cursor-reply-watch.txt
+```
+
+**Windows (PowerShell)**
+
+```powershell
+npm ci
+python scripts/openclaw_company.py --generate-rule
+python -m pip install -r scripts/requirements-cursor-reply-watch.txt
+```
+
+Use `npm install` instead of `npm ci` if you do not have a lockfile workflow. For a **remote client machine** (split stack / mic + Cursor TTS only), if the repo includes `scripts/requirements-openclaw-client.txt`, also run:
+
+```bash
+python3 -m pip install -r scripts/requirements-openclaw-client.txt
+```
+
+**One-liner (after `cd` into the repo):**
+
+```bash
+npm ci && python3 scripts/openclaw_company.py --generate-rule && python3 -m pip install -r scripts/requirements-cursor-reply-watch.txt
+```
+
+**Same “rules + deps” flow via the published Gist** (syncs git, regenerates `.cursor/rules`, installs Node and pip — optional open Cursor on the repo folder):
+
+```bash
+curl -fsSL 'https://gist.githubusercontent.com/theroyalraj/d4ddf7b05d156271f9f3205e2cb101cb/raw/openclaw-client-bootstrap.sh' | bash -s -- --setup-only --home "$(pwd)" --open-cursor
+```
+
+Omit `--open-cursor` if you only want install. If bash reports **pipefail** / **invalid option**, insert `| tr -d '\r' |` before `bash`.
+
+Optional **Gist bootstrap** (full interactive menus): **`scripts/openclaw-client-bootstrap.sh`** — run `curl -fsSL 'https://gist.githubusercontent.com/theroyalraj/d4ddf7b05d156271f9f3205e2cb101cb/raw/openclaw-client-bootstrap.sh' | bash -s -- --interactive` (if you see a **pipefail** error, pipe through `tr -d '\r'` before `bash`). See [docs/setup.md](docs/setup.md) §10b. **Locked-down Mac (no install):** use the browser to your home server only — [docs/setup.md](docs/setup.md) §10c.
+
+### 3. Configure
 
 ```bash
 cp .env.example .env
@@ -78,7 +126,7 @@ cp .env.example .env
 #   ANTHROPIC_API_KEY=sk-ant-...   (for AI summaries + ambient)
 ```
 
-### 3. Start everything
+### 4. Start everything
 
 ```powershell
 npm run restart:local
@@ -86,7 +134,7 @@ npm run restart:local
 
 This reconciles Docker (n8n + Redis Insight), does **not** start or restart the Redis container, and starts the stack in one terminal. **By default it does not kill** anything on 3847/3848; if pc-agent and skill-gateway already pass `/health`, it exits. To **replace** a stuck stack, use `npm run restart:force`. Start Redis once with `docker compose up -d redis` if it is not already running.
 
-### 4. Verify
+### 5. Verify
 
 ```
 http://127.0.0.1:3848/health   → skill-gateway

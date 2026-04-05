@@ -1,0 +1,2 @@
+# Bash must be LF only (curl | bash breaks with CRLF: "invalid option nameipefail").
+*.sh text eol=lf
