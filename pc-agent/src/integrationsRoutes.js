@@ -13,34 +13,21 @@ import { getKeyPoolSnapshot, validateAllKeys } from './openRouterKeyPool.js';
 // Gmail Redis caching (2-minute TTL)
 const GMAIL_CACHE_KEY = 'openclaw:integrations:gmail:snapshot';
 const GMAIL_CACHE_TTL_SEC = 120; // 2 minutes
-let _redisClient = null;
 
 function _redisUrl() {
   return (process.env.OPENCLAW_REDIS_URL || '').trim() || 'redis://127.0.0.1:6379';
 }
 
-async function _getRedisClient() {
-  if (_redisClient?.isOpen) return _redisClient;
-  const c = createClient({
-    url: _redisUrl(),
-    socket: { connectTimeout: 1500, reconnectStrategy: false },
-  });
-  c.on('error', () => {});
-  try {
-    await c.connect();
-    _redisClient = c;
-    return _redisClient;
-  } catch {
-    try { await c.quit(); } catch { }
-    return null;
-  }
-}
-
 async function getCachedGmail() {
   try {
-    const rc = await _getRedisClient();
-    if (!rc) return null;
-    const cached = await rc.get(GMAIL_CACHE_KEY);
+    const c = createClient({
+      url: _redisUrl(),
+      socket: { connectTimeout: 800, reconnectStrategy: false },
+    });
+    c.on('error', () => {});
+    await c.connect();
+    const cached = await c.get(GMAIL_CACHE_KEY);
+    await c.quit();
     return cached ? JSON.parse(cached) : null;
   } catch (e) {
     // Silently ignore cache errors
@@ -50,9 +37,14 @@ async function getCachedGmail() {
 
 async function setCachedGmail(data) {
   try {
-    const rc = await _getRedisClient();
-    if (!rc) return;
-    await rc.setEx(GMAIL_CACHE_KEY, GMAIL_CACHE_TTL_SEC, JSON.stringify(data));
+    const c = createClient({
+      url: _redisUrl(),
+      socket: { connectTimeout: 800, reconnectStrategy: false },
+    });
+    c.on('error', () => {});
+    await c.connect();
+    await c.setEx(GMAIL_CACHE_KEY, GMAIL_CACHE_TTL_SEC, JSON.stringify(data));
+    await c.quit();
   } catch (e) {
     // Silently ignore cache errors
   }
