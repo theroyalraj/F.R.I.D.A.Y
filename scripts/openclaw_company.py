@@ -100,8 +100,8 @@ PERSONAS: dict[str, dict[str, str]] = {
         "title": "Director of Presence",
         "voice": "en-US-MichelleNeural",
         "rate": "",
-        "personality": "Warm check-ins when the room has been quiet; invites interaction without nagging.",
-        "daemon_role": "`friday-silence-watch.py` — gentle check-in if no TTS for a long idle window",
+        "personality": "Context-aware presence: remembers recent Cursor threads, speaks natural check-ins via AI, tone steered by Listen UI sliders.",
+        "daemon_role": "`friday-silence-watch.py` — AI-driven silence nudges with transcript context; voice and personality from Redis / UI",
     },
 }
 

@@ -44,7 +44,7 @@ import { buildMusicPlaySsePayload } from './musicVisualSse.js';
 import { createAuthRouter } from './authRoutes.js';
 import { createOrganizationRouter } from './organizationRoutes.js';
 import { authJwtOrAgentSecret } from './authMiddleware.js';
-import { ensureAuthSchema } from './ensureAuthSchema.js';
+import { ensureAuthSchema, ensureAiGenerationLogSchema } from './ensureAuthSchema.js';
 import { registerDeferredOpenRouterEmitter } from './deferredOpenRouter.js';
 import { refreshModelPool } from './openRouterModelPool.js';
 import {
@@ -858,7 +858,7 @@ app.post('/task', authTaskOrUser, async (req, res, next) => {
 });
 
 app.use('/perception', createPerceptionRouter(auth));
-app.use('/settings', createSettingsRouter(auth));
+app.use('/settings', createSettingsRouter(auth, broadcastEvent));
 app.use('/automation', createAutomationRouter(auth));
 app.use('/integrations', createIntegrationsRouter(authJwtOrAgentSecret(SECRET)));
 app.use('/todos', createTodosRouter(broadcastEvent, SECRET));
@@ -930,6 +930,8 @@ async function bootstrap() {
     );
     process.exit(1);
   }
+
+  await ensureAiGenerationLogSchema(rootLogger);
 
   server = app.listen(PORT, BIND, () => {
     // Jarvis-style startup banner

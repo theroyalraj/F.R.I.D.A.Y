@@ -1118,6 +1118,58 @@
   border-radius: 999px; font-size: 0.5rem; text-transform: uppercase; cursor: pointer;
 }
 
+/* ── ECHO silence watcher panel ───────────────────────────── */
+.echo-panel-wrap { position: relative; z-index: 30; }
+.echo-panel-toggle {
+  background: rgba(236, 72, 153, 0.08); border: 1px solid rgba(236, 72, 153, 0.2);
+  color: rgba(251, 207, 232, 0.75); padding: 3px 9px; border-radius: 999px;
+  font-size: 0.5rem; font-weight: 600; text-transform: uppercase; cursor: pointer;
+}
+.echo-panel-toggle:hover { background: rgba(236, 72, 153, 0.14); }
+.echo-panel {
+  position: absolute; right: 0; top: calc(100% + 4px); width: min(320px, 92vw);
+  background: rgba(18, 18, 28, 0.98); border: 1px solid rgba(236, 72, 153, 0.15);
+  border-radius: 10px; padding: 10px 12px; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  z-index: 100;
+}
+.echo-panel-light { background: rgba(255, 255, 255, 0.98); border-color: rgba(0, 0, 0, 0.08); box-shadow: 0 8px 30px rgba(0, 0, 0, 0.12); }
+.echo-panel-hint { font-size: 0.5rem; line-height: 1.45; color: rgba(255, 255, 255, 0.28); margin-bottom: 8px; }
+.echo-panel-light .echo-panel-hint { color: rgba(0, 0, 0, 0.32); }
+.echo-panel-label {
+  display: block; font-size: 0.45rem; letter-spacing: 0.06em; text-transform: uppercase;
+  color: rgba(255, 200, 230, 0.35); margin-top: 6px; margin-bottom: 2px;
+}
+.echo-panel-light .echo-panel-label { color: rgba(0, 0, 0, 0.32); }
+.echo-slider { width: 100%; accent-color: #ec4899; margin-bottom: 2px; }
+.echo-slider-hint { font-size: 0.48rem; color: rgba(255, 255, 255, 0.22); margin: 0 0 4px 0; line-height: 1.3; }
+.echo-panel-light .echo-slider-hint { color: rgba(0, 0, 0, 0.35); }
+.echo-timing-row { display: flex; gap: 10px; margin-top: 8px; flex-wrap: wrap; }
+.echo-timing-row .echo-panel-label { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 100px; }
+.echo-num {
+  margin-top: 2px; padding: 4px 6px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.25); color: rgba(255, 255, 255, 0.85); font-size: 0.65rem;
+}
+.echo-panel-light .echo-num { background: #fff; border-color: rgba(0, 0, 0, 0.1); color: #1a1a2e; }
+.echo-select {
+  width: 100%; padding: 5px 6px; border-radius: 6px; font-size: 0.55rem;
+  background: rgba(0, 0, 0, 0.3); border: 1px solid rgba(255, 255, 255, 0.08); color: rgba(255, 255, 255, 0.85);
+}
+.echo-panel-light .echo-select { background: #fff; border-color: rgba(0, 0, 0, 0.1); color: #1a1a2e; }
+.echo-panel-actions { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+.echo-btn {
+  background: linear-gradient(135deg, rgba(236, 72, 153, 0.15), rgba(167, 139, 250, 0.1));
+  border: 1px solid rgba(236, 72, 153, 0.2); color: rgba(251, 207, 232, 0.85);
+  padding: 4px 10px; border-radius: 999px; font-size: 0.5rem; font-weight: 600; text-transform: uppercase; cursor: pointer;
+}
+.echo-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.echo-btn-secondary {
+  background: transparent; border: 1px solid rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.35); padding: 4px 10px; border-radius: 999px;
+  font-size: 0.5rem; text-transform: uppercase; cursor: pointer;
+}
+.light .echo-panel-toggle { background: rgba(236, 72, 153, 0.08); border-color: rgba(236, 72, 153, 0.2); color: rgba(157, 23, 77, 0.75); }
+.light .echo-btn-secondary { border-color: rgba(0, 0, 0, 0.08); color: rgba(0, 0, 0, 0.45); }
+
 /* ── Light ─────────────────────────────────────────────────── */
 .light { background: #f8f9fc; color: #1a1a2e; }
 .light .glow-blob { opacity: 0.04; }
@@ -1187,6 +1239,9 @@
 .light .speak-style-chip { color: rgba(0, 0, 0, 0.55); background: rgba(0, 0, 0, 0.02); border-color: rgba(0, 0, 0, 0.04); }
 .light .speak-style-label { color: rgba(0, 0, 0, 0.25); }
 .light .speak-style-textarea { background: #fff; border-color: rgba(0, 0, 0, 0.06); color: #1a1a2e; }
+.light .echo-panel-hint { color: rgba(0, 0, 0, 0.3); }
+.light .echo-panel-label { color: rgba(0, 0, 0, 0.25); }
+.light .echo-slider-hint { color: rgba(0, 0, 0, 0.35); }
 .light .toast-container .voice-toast { background: rgba(255, 255, 255, 0.97); border-color: rgba(0, 0, 0, 0.06); color: rgba(0, 0, 0, 0.55); box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1); }
 
 .footer { display: none; }

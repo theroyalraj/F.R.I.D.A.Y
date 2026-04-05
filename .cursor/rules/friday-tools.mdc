@@ -145,6 +145,7 @@ Base: `http://127.0.0.1:3847`
 | GET  | `/voice/ping` | Health / TTS provider info |
 | GET  | `/voice/stream` | SSE stream of voice events |
 | GET  | `/friday` | Web UI |
+| GET/PUT | `/settings/echo` | ECHO silence watcher: personality sliders, idle or rearm seconds, Edge voice — persists to DB and Redis `openclaw:echo:config` for `friday-silence-watch.py` |
 
 ---
 

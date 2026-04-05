@@ -1,6 +1,7 @@
 import express from 'express';
 import { perceptionDbConfigured } from './perceptionDb.js';
 import { getAmbientMerged, putAmbientPartial } from './settingsDb.js';
+import { getEchoMerged, putEchoPartial } from './echoSettings.js';
 import {
   getVoiceAgentPersonasMerged,
   putVoiceAgentPersonaPatch,
@@ -8,7 +9,11 @@ import {
   SETTINGS_KEY,
 } from './voiceAgentPersona.js';
 
-export function createSettingsRouter(authMiddleware) {
+/**
+ * @param {import('express').RequestHandler} authMiddleware
+ * @param {{ (type: string, data?: object): void } | undefined} broadcastEvent — SSE fan-out (e.g. echo_personality_changed)
+ */
+export function createSettingsRouter(authMiddleware, broadcastEvent) {
   const r = express.Router();
   r.use(express.json({ limit: '32kb' }));
   r.use(authMiddleware);
@@ -109,6 +114,38 @@ export function createSettingsRouter(authMiddleware) {
       res.json({ ok: true, ...merged });
     } catch (e) {
       res.status(500).json({ error: String(e.message || e) });
+    }
+  });
+
+  /** ECHO (silence watcher): personality sliders, timing, Edge voice — Redis mirror for Python. */
+  r.get('/echo', async (_req, res) => {
+    try {
+      const merged = await getEchoMerged();
+      res.json(merged);
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e.message || e) });
+    }
+  });
+
+  r.put('/echo', async (req, res) => {
+    const b = req.body && typeof req.body === 'object' ? req.body : {};
+    try {
+      const out = await putEchoPartial(b);
+      if (typeof broadcastEvent === 'function') {
+        broadcastEvent('echo_personality_changed', {
+          humor: out.humor,
+          warmth: out.warmth,
+          directness: out.directness,
+          curiosity: out.curiosity,
+          formality: out.formality,
+          idleSec: out.idleSec,
+          rearmSec: out.rearmSec,
+          voice: out.voice,
+        });
+      }
+      res.json(out);
+    } catch (e) {
+      res.status(400).json({ ok: false, error: String(e.message || e) });
     }
   });
 

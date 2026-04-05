@@ -5,6 +5,7 @@ import { useSSEStream } from '../hooks/useSSEStream';
 import { useUptime } from '../hooks/useUptime';
 import ToastContainer from './Toast';
 import SpeakStylePanel from './SpeakStylePanel';
+import EchoPersonalityPanel from './EchoPersonalityPanel';
 import SpeakConfirmModal from './SpeakConfirmModal';
 import VoiceSiriOverlay from './VoiceSiriOverlay';
 import MiniNotifyOrb from './MiniNotifyOrb';
@@ -280,6 +281,7 @@ const FridayListenApp: React.FC = () => {
     if (event.type === 'sse_disconnected') postEvent('daemon_disconnect');
     else if (event.type === 'sse_connected') postEvent('daemon_start', 'Voice daemon online.');
     else if (event.type === 'speak_style_changed') window.dispatchEvent(new CustomEvent('openclaw:speak-style-changed'));
+    else if (event.type === 'echo_personality_changed') window.dispatchEvent(new CustomEvent('openclaw:echo-personality-changed'));
     else if (event.type === 'voice_changed') {
       const ev = event as { voice?: string; text?: string };
       const v = typeof ev.voice === 'string' && ev.voice ? ev.voice : (ev.text || '');
@@ -703,6 +705,7 @@ const FridayListenApp: React.FC = () => {
             {theme === 'dark' ? '\u2600\uFE0F' : '\uD83C\uDF19'}
           </button>
           <SpeakStylePanel showToast={showToast} />
+          <EchoPersonalityPanel showToast={showToast} edgeVoices={edgeVoices} theme={theme} />
         </div>
       </div>
 
