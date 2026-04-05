@@ -25,6 +25,11 @@ Env variables (in .env):
   FRIDAY_WIN_NOTIFY_IGNORE       comma-separated app patterns to skip
   FRIDAY_WIN_NOTIFY_VOICE        TTS voice override (blank = session voice)
   FRIDAY_WIN_NOTIFY_PRIORITY     TTS priority for generic apps (default 0)
+  FRIDAY_WIN_NOTIFY_CURSOR_DONE_SPEAK  true/false — speak Cursor agent-done toasts (default true)
+  OPENCLAW_REPO_ROOT             optional absolute path to the OpenClaw checkout — when set, Sentinel TTS appends a speakable code-root hint (same var as Security and Argus code scans)
+  FRIDAY_WIN_NOTIFY_TODO         true/false — when true, create a Listen todo if title or body matches FRIDAY_WIN_NOTIFY_TODO_KEYWORDS (default off)
+  FRIDAY_WIN_NOTIFY_TODO_KEYWORDS optional comma-separated phrases (substring match, case-insensitive); default list if unset
+  FRIDAY_MAIL_SPEAK_SNIP_CHARS / FRIDAY_WIN_NOTIFY_MAIL_SNIP_CHARS  max chars of snippet after sender (default 120); used with gmail-watch too
   OPENCLAW_DATABASE_URL          PostgreSQL connection string (required)
 
 Run:
@@ -35,6 +40,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import platform
+import re
 import socket
 import sqlite3
 import subprocess
@@ -53,6 +60,8 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from mail_speech_short import build_mail_from_snippet, clean_mail_noise
 
 # ── .env loader ──────────────────────────────────────────────────────────────
 _ENV_FILE = _REPO_ROOT / ".env"
@@ -82,11 +91,48 @@ DATABASE_URL    = os.environ.get("OPENCLAW_DATABASE_URL", "").strip()
 PC_AGENT_URL    = os.environ.get("PC_AGENT_URL", "http://127.0.0.1:3847").rstrip("/")
 PC_AGENT_SECRET = os.environ.get("PC_AGENT_SECRET", "").strip()
 MACHINE_ID      = socket.gethostname()
+CURSOR_DONE_SPEAK = os.environ.get("FRIDAY_WIN_NOTIFY_CURSOR_DONE_SPEAK", "true").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+    "off",
+)
 
 _DND_KEY = "openclaw:dnd"
 
-# Notification dedup window in seconds
-_DEDUP_WINDOW_SEC = 15
+
+def _path_to_speakable(path: str) -> str:
+    """Turn a filesystem path into plain English for TTS (no backslashes or symbols)."""
+    try:
+        p = Path(path).expanduser().resolve()
+    except Exception:
+        p = Path(path)
+    s = str(p).replace("\\", "/")
+    if len(s) >= 2 and s[1] == ":":
+        drive = s[0].lower()
+        rest = s[2:].strip("/")
+        if not rest:
+            return f"{drive} colon root"
+        segs = [x for x in rest.split("/") if x]
+        return f"{drive} colon slash " + " slash ".join(segs)
+    segs = [x for x in s.split("/") if x]
+    return " slash ".join(segs) if segs else "root"
+
+
+def _sentinel_repo_spoken_suffix() -> str:
+    """Append when OPENCLAW_REPO_ROOT is set so voice cues match Listen Security scan root."""
+    raw = os.environ.get("OPENCLAW_REPO_ROOT", "").strip()
+    if not raw:
+        return ""
+    try:
+        sp = _path_to_speakable(raw)
+        return f" Your OpenClaw code root is {sp}."
+    except Exception:
+        return ""
+
+
+# Notification dedup window in seconds — same content suppressed for 10 minutes
+_DEDUP_WINDOW_SEC = 600
 
 # How often (polls) to purge expired dedup rows from PostgreSQL
 _DEDUP_CLEANUP_EVERY = 150  # every 5 minutes at 2s poll
@@ -113,6 +159,8 @@ _WPN_DB = (
 
 # ── App name mapping ──────────────────────────────────────────────────────────
 _NAME_MAP: list[tuple[str, str]] = [
+    ("mail.google.com",     "Gmail"),
+    ("mailgoogle",          "Gmail"),
     ("com.whatsapp",        "WhatsApp"),
     ("whatsapp",            "WhatsApp"),
     ("org.telegram",        "Telegram"),
@@ -153,6 +201,144 @@ def _is_messaging(primary_id: str) -> bool:
     return any(k in pid for k in _MESSAGING_IDS)
 
 
+def _is_gmail_or_chrome_mail(primary_id: str, app: str) -> bool:
+    """Chrome / PWA Gmail toasts often use PrimaryId containing mail.google.com."""
+    pid = (primary_id or "").lower()
+    a = (app or "").lower()
+    return (
+        a == "gmail"
+        or "mail.google" in pid
+        or "gmail" in pid
+    )
+
+
+def _is_chrome_family_app(app: str, primary_id: str) -> bool:
+    """Friendly name is often 'Google Chrome', not exactly 'chrome'."""
+    a = (app or "").lower()
+    pid = (primary_id or "").lower()
+    if a == "chrome" or "google chrome" in a or (a.endswith("chrome") and len(a) < 32):
+        return True
+    if "chrome" in pid and "anysphere" not in pid and "cursor" not in pid:
+        return True
+    return False
+
+
+def _is_mail_like_toast_text(title: str, body: str) -> bool:
+    blob = f"{title} {body}".lower()
+    if "mail.google" in blob or "gmail.com" in blob or "gmail" in blob:
+        return True
+    if "@" in blob and "." in blob:
+        return True
+    return False
+
+
+def _is_chrome_gmail_surface(primary_id: str, app: str, title: str, body: str) -> bool:
+    """Gmail in Chrome: app id may be Google Chrome; toast text may embed 'Chrome:' inside title."""
+    if _is_gmail_or_chrome_mail(primary_id, app):
+        return True
+    blob_raw = f"{title} {body}"
+    if not _is_chrome_family_app(app, primary_id):
+        return False
+    blob = blob_raw.lower()
+    if "mail.google" in blob or "gmail" in blob:
+        return True
+    if "@" in blob:
+        return True
+    return False
+
+
+def _clean_toast_text(s: str) -> str:
+    """Alias for shared cleaner (toast title/body)."""
+    return clean_mail_noise(s)
+
+
+def _build_win_notify_speech(app: str, title: str, body: str, primary_id: str) -> str:
+    """Spoken line: Gmail or Chrome-mail gets sender plus short snippet — never 'Chrome: … mail.google.com'."""
+    ct = clean_mail_noise(title)
+    cb = clean_mail_noise(body)
+    if _is_chrome_gmail_surface(primary_id, app, title, body):
+        return build_mail_from_snippet(ct, cb)
+    # Chrome tab mail but PrimaryId missed mail.google (encoding / split toasts)
+    if _is_chrome_family_app(app, primary_id) and _is_mail_like_toast_text(title, body):
+        return build_mail_from_snippet(ct, cb)
+    if ct and cb and cb.lower() != ct.lower():
+        return f"{app}: {ct}. {cb}"
+    return f"{app}: {ct or cb}"
+
+
+def _env_bool(key: str, default: bool) -> bool:
+    v = os.environ.get(key, "").strip().lower()
+    if not v:
+        return default
+    if v in ("0", "false", "no", "off"):
+        return False
+    if v in ("1", "true", "yes", "on"):
+        return True
+    return default
+
+
+_DEFAULT_TODO_KW = (
+    "action required,please review,follow up,urgent,reminder:,todo:,task:,"
+    "needs your,approval,asap,overdue,deadline,fyi:,response needed,"
+    "can you check,could you,please check,check it for me,check this"
+)
+
+
+def _maybe_add_todo_from_notify(app: str, title: str, body: str, primary_id: str) -> None:
+    """Optional POST /todos when keywords match (Bearer PC_AGENT_SECRET)."""
+    if not _env_bool("FRIDAY_WIN_NOTIFY_TODO", False):
+        return
+    if not PC_AGENT_SECRET:
+        return
+    combined = f"{title} {body}".lower()
+    raw = os.environ.get("FRIDAY_WIN_NOTIFY_TODO_KEYWORDS", "").strip()
+    kws = [k.strip().lower() for k in (raw or _DEFAULT_TODO_KW).split(",") if k.strip()]
+    if not any(k in combined for k in kws):
+        return
+    ct = _clean_toast_text(title)
+    cb = _clean_toast_text(body)
+    if not ct and not cb:
+        return
+    todo_title = (ct or "Notification")[:220]
+    detail = (cb or "")[:500]
+    if _is_chrome_gmail_surface(primary_id, app, title, body) or _is_gmail_or_chrome_mail(primary_id, app):
+        tline = f"Mail: {todo_title}"
+    else:
+        tline = f"{app}: {todo_title}"
+    _post_json(
+        f"{PC_AGENT_URL}/todos",
+        {
+            "title": tline,
+            "detail": detail,
+            "priority": "medium",
+            "source": "win_notify",
+            "pinned": False,
+            "silentRemind": False,
+        },
+        secret=PC_AGENT_SECRET,
+    )
+
+
+def _notify_tts_priority(primary_id: str, app: str) -> str:
+    """Priority 1 pre-empts ambient TTS for messaging and Gmail site notifications."""
+    if _is_messaging(primary_id) or _is_gmail_or_chrome_mail(primary_id, app):
+        return "1"
+    return GENERIC_PRIORITY
+
+
+def _is_cursor_agent_toast(primary_id: str, app: str) -> bool:
+    """Windows may use varying PrimaryId strings for Cursor / Anysphere."""
+    pid = (primary_id or "").lower()
+    a = (app or "").lower()
+    if "anysphere.cursor" in pid:
+        return True
+    if a == "cursor":
+        return True
+    if "anysphere" in pid and "cursor" in pid:
+        return True
+    return False
+
+
 def _should_include(app_name: str, primary_id: str) -> bool:
     combined = (app_name + " " + primary_id).lower()
     if IGNORE_PATTERNS and any(p in combined for p in IGNORE_PATTERNS):
@@ -162,28 +348,53 @@ def _should_include(app_name: str, primary_id: str) -> bool:
     return True
 
 
+def _xml_local_tag(tag: str) -> str:
+    """Strip XML namespace so {http://...}text matches 'text'."""
+    if not tag:
+        return ""
+    if tag[0] == "{":
+        return tag.split("}", 1)[-1]
+    return tag
+
+
 def _parse_toast_xml(payload: bytes | str) -> tuple[str, str]:
     """Return (title, body) from a toast XML payload."""
     try:
         text = payload.decode("utf-8", errors="replace") if isinstance(payload, bytes) else payload
         root = ET.fromstring(text)
         texts: list[str] = []
-        for visual in root.iter("visual"):
-            for binding in visual.iter("binding"):
-                for elem in binding.iter("text"):
-                    t = (elem.text or "").strip()
-                    if t:
-                        texts.append(t)
+        # Windows toast XML often uses default namespaces; iter('text') misses {ns}text.
+        for elem in root.iter():
+            if _xml_local_tag(elem.tag) != "text":
+                continue
+            t = (elem.text or "").strip()
+            if t:
+                texts.append(t)
         if not texts:
-            for elem in root.iter("text"):
-                t = (elem.text or "").strip()
+            # Regex fallback for malformed or unusual bindings
+            for m in re.finditer(r"<text\b[^>]*>([^<]*)</text>", text, re.IGNORECASE):
+                t = (m.group(1) or "").strip()
                 if t:
                     texts.append(t)
         title = texts[0] if texts else ""
-        body  = " ".join(texts[1:]) if len(texts) > 1 else ""
+        body = " ".join(texts[1:]) if len(texts) > 1 else ""
         return title, body
     except Exception:
         return "", ""
+
+
+def _fallback_toast_plaintext(payload: bytes | str) -> str:
+    """If XML parsing yields nothing, strip tags so we still get a spoken line."""
+    try:
+        raw = payload.decode("utf-8", errors="replace") if isinstance(payload, bytes) else str(payload)
+        raw = raw[:8000]
+        plain = re.sub(r"<[^>]+>", " ", raw)
+        plain = re.sub(r"\s+", " ", plain).strip()
+        if len(plain) > 220:
+            plain = plain[:217] + "…"
+        return plain
+    except Exception:
+        return ""
 
 
 def _content_hash(app: str, title: str, body: str) -> str:
@@ -222,8 +433,10 @@ def _post_json(url: str, payload: dict, secret: str = "") -> None:
         print(f"[win-notify] POST {url} failed: {exc}", flush=True)
 
 
-def _speak(app: str, title: str, body: str, priority: str = "0") -> None:
-    speech = f"{app}: {title}" + (f" {body}" if body and body != title else "")
+def _speak(app: str, title: str, body: str, priority: str = "0", primary_id: str = "") -> None:
+    speech = _build_win_notify_speech(app, title, body, primary_id)
+    if len(speech) > 500:
+        speech = speech[:497] + "…"
 
     # Emit win_notify SSE event to UI (no DND check — always show in UI)
     _post_json(
@@ -241,7 +454,12 @@ def _speak(app: str, title: str, body: str, priority: str = "0") -> None:
     if PC_AGENT_SECRET:
         _post_json(
             f"{PC_AGENT_URL}/voice/speak-async",
-            {"text": speech, "channel": "winnotify", "personaKey": "dexter"},
+            {
+                "text": speech,
+                "channel": "winnotify",
+                "personaKey": "dexter",
+                "priority": 1,
+            },
             secret=PC_AGENT_SECRET,
         )
         return
@@ -265,6 +483,76 @@ def _speak(app: str, title: str, body: str, priority: str = "0") -> None:
         )
     except Exception as exc:
         print(f"[win-notify] speak error: {exc}", flush=True)
+
+
+def _speak_cursor_agent_done(title: str, body: str) -> None:
+    """TTS for Cursor done — Sentinel persona; does not duplicate win_notify SSE."""
+    if not CURSOR_DONE_SPEAK:
+        return
+    if _is_dnd():
+        print("[win-notify] DND on — skipping Cursor done speech", flush=True)
+        return
+    t = (title or "").strip()
+    b = (body or "").strip()
+    parts = ["Sentinel here. Your Cursor agent reports done."]
+    if t:
+        parts.append(t)
+    if b and b != t:
+        parts.append(b)
+    speech = " ".join(parts)
+    suffix = _sentinel_repo_spoken_suffix()
+    if suffix:
+        if len(speech) + len(suffix) <= 500:
+            speech += suffix
+        elif len(suffix) < 500:
+            speech = (speech[: 500 - len(suffix) - 1] + "…") + suffix
+    if len(speech) > 500:
+        speech = speech[:497] + "…"
+
+    if PC_AGENT_SECRET:
+        _post_json(
+            f"{PC_AGENT_URL}/voice/speak-async",
+            {
+                "text": speech,
+                "channel": "cursor_done",
+                "personaKey": "sentinel",
+                "priority": 1,
+            },
+            secret=PC_AGENT_SECRET,
+        )
+        return
+
+    if not _SPEAK_SCRIPT.exists():
+        print(f"[win-notify] speak script not found: {_SPEAK_SCRIPT}", flush=True)
+        return
+    env = os.environ.copy()
+    env["FRIDAY_TTS_PRIORITY"] = "1"
+    env["FRIDAY_TTS_BYPASS_CURSOR_DEFER"] = "true"
+    env["FRIDAY_TTS_SPEAK_CHANNEL"] = "cursor_done"
+    env["FRIDAY_TTS_SPEAK_PERSONA"] = "sentinel"
+    if NOTIFY_VOICE:
+        env["FRIDAY_TTS_VOICE"] = NOTIFY_VOICE
+    else:
+        try:
+            from openclaw_company import friday_speak_env_for_persona
+
+            env.update(friday_speak_env_for_persona("sentinel", priority=True))
+        except Exception:
+            env["FRIDAY_TTS_USE_SESSION_STICKY_VOICE"] = "false"
+    kwargs: dict = {}
+    if platform.system() == "Windows":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        subprocess.Popen(
+            [sys.executable, str(_SPEAK_SCRIPT), speech],
+            env=env,
+            cwd=str(_REPO_ROOT),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            **kwargs,
+        )
+    except Exception as exc:
+        print(f"[win-notify] Cursor done speak error: {exc}", flush=True)
 
 
 # ── PostgreSQL helpers ────────────────────────────────────────────────────────
@@ -468,12 +756,15 @@ def _watch_loop() -> None:
                 title, body = _parse_toast_xml(payload)
                 app = _friendly_name(pid)
 
-                if not title and not body:
-                    last_order = max(last_order, order)
-                    continue
-
-                # Special: Cursor agent "Done" toasts — bypass IGNORE, emit SSE, no speech.
-                if "anysphere.cursor" in pid.lower() or app == "Cursor":
+                # Cursor agent-done: handle before empty title/body skip (namespaced / adaptive XML often parses empty).
+                if _is_cursor_agent_toast(pid, app):
+                    if not title and not body:
+                        fb = _fallback_toast_plaintext(payload)
+                        title = fb or "Task finished"
+                    cd_hash = _content_hash("cursor_agent_done", title, body or "")
+                    if _is_duplicate(pg, cd_hash):
+                        last_order = max(last_order, order)
+                        continue
                     _post_json(
                         f"{PC_AGENT_URL}/voice/event",
                         {
@@ -484,7 +775,18 @@ def _watch_loop() -> None:
                         },
                         secret=PC_AGENT_SECRET,
                     )
-                    print(f"[win-notify] [Cursor done] {title!r}", flush=True)
+                    _record_dedup(pg, cd_hash, "Cursor")
+                    _record_history(pg, "Cursor", title, body or "", "1")
+                    print(
+                        f"[win-notify] [Cursor done] {title!r}"
+                        + (f" — {body!r}" if body else ""),
+                        flush=True,
+                    )
+                    _speak_cursor_agent_done(title, body or "")
+                    last_order = max(last_order, order)
+                    continue
+
+                if not title and not body:
                     last_order = max(last_order, order)
                     continue
 
@@ -497,7 +799,7 @@ def _watch_loop() -> None:
                     last_order = max(last_order, order)
                     continue
 
-                priority = "1" if _is_messaging(pid) else GENERIC_PRIORITY
+                priority = _notify_tts_priority(pid, app)
 
                 print(
                     f"[win-notify] [{app}] {title!r}"
@@ -505,7 +807,8 @@ def _watch_loop() -> None:
                     flush=True,
                 )
 
-                _speak(app, title, body, priority=priority)
+                _speak(app, title, body, priority=priority, primary_id=pid)
+                _maybe_add_todo_from_notify(app, title, body, pid)
                 _record_dedup(pg, chash, app)
                 _record_history(pg, app, title, body, priority)
 

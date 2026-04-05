@@ -186,6 +186,34 @@ const FridayListenApp: React.FC = () => {
     try { return localStorage.getItem(LS_ALWAYS_SPEAK) === 'true'; } catch { return false; }
   });
 
+  /** Server-owned strings from GET /voice/speak-style (snarky launch line, speak-confirm intro, etc.) */
+  const [listenUi, setListenUi] = useState<{ launchLine: string; speakConfirmIntro: string } | null>(null);
+
+  const refreshListenUi = useCallback(async () => {
+    try {
+      const r = await fetch('/voice/speak-style', { headers: authHeaders() });
+      const d = (await r.json()) as {
+        ok?: boolean;
+        listenUi?: { launchLine: string; speakConfirmIntro: string };
+      };
+      if (d.ok && d.listenUi?.launchLine) setListenUi(d.listenUi);
+    } catch {
+      /* ignore */
+    }
+  }, [authHeaders]);
+
+  useEffect(() => {
+    void refreshListenUi();
+  }, [refreshListenUi]);
+
+  useEffect(() => {
+    const h = () => {
+      void refreshListenUi();
+    };
+    window.addEventListener('openclaw:speak-style-changed', h);
+    return () => window.removeEventListener('openclaw:speak-style-changed', h);
+  }, [refreshListenUi]);
+
   const toggleAlwaysSpeak = useCallback(() => {
     setAlwaysSpeakViaUi((prev) => {
       const next = !prev;
@@ -997,7 +1025,10 @@ const FridayListenApp: React.FC = () => {
   return (
     <div className={`${styles.app} ${theme === 'light' ? styles.light : ''}`}>
       {launchOverlayVisible && (
-        <LaunchOverlay onFadeComplete={() => setLaunchOverlayVisible(false)} />
+        <LaunchOverlay
+          onFadeComplete={() => setLaunchOverlayVisible(false)}
+          launchLine={listenUi?.launchLine}
+        />
       )}
       <VoiceSiriOverlay
         open={connectionStatus === 'speaking' && !peripheralSpeak}
@@ -1429,55 +1460,15 @@ const FridayListenApp: React.FC = () => {
                   )}
                   <div className={styles['msg-content']}>
                     {isFriday && (
-                      <>
-                        <span className={styles['msg-sender']}>{b.persona?.name || 'Friday'}</span>
-                        {b.persona && (
-                          <>
-                            <div className={styles['msg-persona-meta']}>
-                              <span>{b.persona.title}</span>
-                              <span className={styles['msg-persona-dot']}>·</span>
-                              <span>
-                                Voice {shortVoiceLabel(b.persona.voice)}
-                                {b.persona.voice ? ` (${b.persona.voice})` : ''}
-                              </span>
-                            </div>
-                            {b.persona.personality ? (
-                              <div className={styles['msg-persona-desc']}>{b.persona.personality}</div>
-                            ) : null}
-                          </>
-                        )}
-                      </>
+                      <span className={styles['msg-sender']}>{b.persona?.name || 'Friday'}</span>
                     )}
                     {isError && (
-                      <>
-                        <span className={styles['msg-sender']} style={{ color: '#ff4d6a' }}>
-                          {b.persona?.name ? `${b.persona.name} (error)` : 'Error'}
-                        </span>
-                        {b.persona ? (
-                          <div className={styles['msg-persona-meta']}>
-                            <span>{b.persona.title}</span>
-                            <span className={styles['msg-persona-dot']}>·</span>
-                            <span>Voice {shortVoiceLabel(b.persona.voice)}</span>
-                          </div>
-                        ) : null}
-                      </>
+                      <span className={styles['msg-sender']} style={{ color: '#ff4d6a' }}>
+                        {b.persona?.name ? `${b.persona.name} (error)` : 'Error'}
+                      </span>
                     )}
                     {isUser && (
-                      <>
-                        <span className={styles['msg-sender']}>{b.persona?.name || 'You'}</span>
-                        {b.persona ? (
-                          <>
-                            <div className={styles['msg-persona-meta']}>
-                              <span>{b.persona.title}</span>
-                              <span className={styles['msg-persona-dot']}>·</span>
-                              <span>{b.persona.voice}</span>
-                            </div>
-                            {b.persona.personality ? (
-                              <div className={styles['msg-persona-desc']}>{b.persona.personality}</div>
-                            ) : null}
-                          </>
-                        ) : null}
-                      </>
+                      <span className={styles['msg-sender']}>{b.persona?.name || 'You'}</span>
                     )}
                     <div className={styles['msg-bubble']}>{b.text}</div>
                     <span className={styles['msg-time']}>{formatTime(b.ts)}</span>
