@@ -1,16 +1,19 @@
 ---
-description: Do not restart the OpenClaw stack (gateway, agent, restart-local) unless the user explicitly asks
+description: Never kill or force-replace the OpenClaw stack unless the user explicitly asks to kill or full-restart
 alwaysApply: true
 ---
 
-# Never restart OpenClaw (agent policy)
+# Never kill OpenClaw (agent policy)
 
-Unless the user **clearly and explicitly** requests it (e.g. "restart OpenClaw", "restart now", "restart the stack", "run restart-local", "npm run restart:local"):
+**Default `npm run restart:local` is safe:** it does **not** kill pc-agent, skill-gateway, or listeners on **3847** / **3848**.
 
-- **Do not** run `scripts/restart-local.ps1`, `npm run restart:local`, `npm run restart:skip`, or equivalent PowerShell `Start-Process` / shell flows whose purpose is to bounce the stack.
-- **Do not** kill listeners on ports **3847** or **3848** to force a restart.
-- **Do not** tell the user they "must restart" as a substitute for doing it yourself in chat — explain what to run only if they ask how to restart.
+Unless the user **clearly and explicitly** asks to **kill**, **force replace**, or **full restart** the stack (e.g. "restart OpenClaw", "kill and restart", "restart:force", "npm run restart:force", "ForceKill"):
+
+- **Do not** run `npm run restart:force`, `restart-local.ps1 -ForceKill`, or any flow that **frees ports 3847/3848** or **Stop-Process**es the gateway/agent/voice stack.
+- **Do not** run plain `npm run restart:local` to "fix" things unless the user asked for a restart — safe restart exits if already healthy and never kills by default.
+- **Do not** kill listeners on ports **3847** or **3848** manually (e.g. `taskkill`, `Stop-Process` on PIDs holding those ports).
+- **Do not** tell the user they "must restart" as a substitute for doing it yourself — explain what to run only if they ask how to restart.
 
 **Still allowed:** editing code, `.env`, workflows, Docker files, docs; running tests, linters, one-off `curl` health checks, `clear_friday_locks.py`, or other tools that do **not** stop or respawn the gateway and pc-agent.
 
-**If a change requires a restart to take effect:** say so in text and let the **user** restart when they choose, unless they have already asked you to restart in this turn or the immediate prior instruction.
+**If a change requires a process restart to take effect:** say so in text and let the **user** run the command when they choose, unless they have already asked you to restart or force-kill in this turn or the immediate prior instruction.

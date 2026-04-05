@@ -171,11 +171,15 @@ def post_event(event_type: str, text: str = ""):
     """Fire-and-forget POST to pc-agent so the web UI stays in sync."""
     def _send():
         try:
+            h = {"ngrok-skip-browser-warning": "1"}
+            bh = _agent_bearer_headers()
+            if bh:
+                h["Authorization"] = bh["Authorization"]
             req_lib.post(
                 f"{AGENT_URL}/voice/event",
                 json={"type": event_type, "text": text},
                 timeout=2,
-                headers={"ngrok-skip-browser-warning": "1"},
+                headers=h,
             )
         except Exception:
             pass   # never block the audio loop
@@ -255,6 +259,15 @@ def _try_answer_music_scheduler_offer(text: str, lower: str) -> bool:
         if time.time() > float(data.get("deadline", 0)):
             _MUSIC_OFFER_FILE.unlink(missing_ok=True)
             return False
+        roa = data.get("response_open_at")
+        if roa is not None:
+            try:
+                roa_f = float(roa)
+            except (TypeError, ValueError):
+                roa_f = 0.0
+            # -1 = scheduler still speaking / post-prompt gap; ignore mic until reopened (0 = open).
+            if roa_f < 0 or (roa_f > 0 and time.time() < roa_f):
+                return False
     except Exception:
         return False
 
@@ -644,11 +657,15 @@ def try_handle_ambient_frequency(text: str) -> bool:
 # ── PC-agent command ───────────────────────────────────────────────────────────
 def send_command(text: str) -> str:
     try:
+        h = {"ngrok-skip-browser-warning": "1"}
+        bh = _agent_bearer_headers()
+        if bh:
+            h["Authorization"] = bh["Authorization"]
         r = req_lib.post(
             f"{AGENT_URL}/voice/command",
             json={"text": text, "userId": "friday-mic-daemon", "source": "voice"},
             timeout=120,
-            headers={"ngrok-skip-browser-warning": "1"},
+            headers=h,
         )
         r.raise_for_status()
         j = r.json()

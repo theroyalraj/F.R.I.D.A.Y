@@ -26,6 +26,7 @@ Env vars (all optional — reads .env):
   FRIDAY_MUSIC_ASK_BEFORE_PLAY true = speak a prompt and wait for mic yes/no before playing
                                  (recommended true — avoids surprise music when the scheduler fires)
   FRIDAY_MUSIC_ASK_WAIT_SEC    seconds to wait for an answer (default: 90)
+  FRIDAY_MUSIC_ASK_POST_PROMPT_SEC  seconds of silence after the ask TTS before yes/no counts (default: 5)
   FRIDAY_PLAY_SECONDS          per-song play duration (default: 28)
   FRIDAY_PLAY_VOLUME           ffplay volume 0-100 (default: 70)
 """
@@ -147,6 +148,17 @@ def _ask_wait_sec() -> float:
     return 90.0
 
 
+def _ask_post_prompt_sec() -> float:
+    """Seconds after ask TTS finishes before friday-listen may record yes/no (and before scheduler polls)."""
+    raw = os.environ.get("FRIDAY_MUSIC_ASK_POST_PROMPT_SEC", "").strip().split("#")[0].strip()
+    if raw:
+        try:
+            return max(0.0, min(float(raw), 120.0))
+        except ValueError:
+            pass
+    return 5.0
+
+
 _MUSIC_ASK_PROMPTS = (
     "Fancy a bit of noise? I had {song} lined up — say yes if you want it, or no if you're heads-down.",
     "Vibe check — mind if I put on {song}? Yes or no, your call.",
@@ -223,11 +235,18 @@ def _run_ask_then_maybe_play() -> None:
     if not song:
         return
     wait_sec = _ask_wait_sec()
-    deadline = time.time() + wait_sec
+    post_prompt = _ask_post_prompt_sec()
+    # response_open_at=-1: listen ignores yes/no until we reopen after TTS + post-prompt gap.
+    hold_deadline = time.time() + max(wait_sec, 300.0) + post_prompt + 120.0
     try:
         MUSIC_OFFER_FILE.write_text(
             json.dumps(
-                {"deadline": deadline, "song": song, "wait_sec": wait_sec},
+                {
+                    "deadline": hold_deadline,
+                    "song": song,
+                    "wait_sec": wait_sec,
+                    "response_open_at": -1.0,
+                },
                 indent=None,
             ),
             encoding="utf-8",
@@ -238,8 +257,26 @@ def _run_ask_then_maybe_play() -> None:
         return
 
     prompt = _offer_prompt(song)
-    log.info("Music ask — waiting up to %.0fs for yes/no (friday-listen): %s", wait_sec, song)
+    log.info("Music ask — prompt then %.0fs gap, then up to %.0fs for yes/no: %s", post_prompt, wait_sec, song)
     _speak_ask(prompt)
+    if post_prompt > 0:
+        time.sleep(post_prompt)
+    deadline = time.time() + wait_sec
+    try:
+        MUSIC_OFFER_FILE.write_text(
+            json.dumps(
+                {
+                    "deadline": deadline,
+                    "song": song,
+                    "wait_sec": wait_sec,
+                    "response_open_at": 0.0,
+                },
+                indent=None,
+            ),
+            encoding="utf-8",
+        )
+    except OSError as e:
+        log.warning("Could not reopen music offer file: %s", e)
 
     result = _wait_for_music_offer_result(deadline)
     if result == "yes":

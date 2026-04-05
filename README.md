@@ -84,7 +84,7 @@ cp .env.example .env
 npm run restart:local
 ```
 
-This reconciles Docker (n8n + Redis Insight), does **not** start or restart the Redis container, kills stale gateway/agent processes, and starts both Node servers with hot-reload. Start Redis once with `docker compose up -d redis` if it is not already running.
+This reconciles Docker (n8n + Redis Insight), does **not** start or restart the Redis container, and starts the stack in one terminal. **By default it does not kill** anything on 3847/3848; if pc-agent and skill-gateway already pass `/health`, it exits. To **replace** a stuck stack, use `npm run restart:force`. Start Redis once with `docker compose up -d redis` if it is not already running.
 
 ### 4. Verify
 
@@ -101,8 +101,10 @@ http://127.0.0.1:3848/friday   → Friday web UI
 
 | Command | What it does |
 |---|---|
-| `npm run restart:local` | Full restart: Docker → kill old ports → start both servers |
-| `npm run restart:skip` | Restart without Docker; skips port kill if servers are healthy |
+| `npm run restart:local` | Safe start: Docker (optional) → **no port kills** → `start.mjs` if ports free or stack unhealthy |
+| `npm run restart:skip` | Same as `restart:local` but skips Docker compose |
+| `npm run restart:force` | **Explicit kill:** frees 3847/3848, stops auxiliary Python daemons, then starts stack |
+| `npm run restart:force:skip-docker` | `restart:force` without Docker compose |
 | `npm run voice:daemon` | Start mic listening daemon (`friday-listen.py`) |
 | `npm run start:ambient` | Start ambient intelligence (`friday-ambient.py`) |
 | `npm run test:notify` | Smoke-test Alexa proactive notification (gateway must be running) |
@@ -277,7 +279,7 @@ openclaw/
 ├── scripts/
 │   ├── friday-ambient.py   Ambient intelligence brain
 │   ├── friday-listen.py    Mic voice daemon
-│   └── restart-local.ps1   Full local restart script
+│   └── restart-local.ps1   Local stack launcher (safe by default; `-ForceKill` for full replace)
 ├── skill/                  Alexa skill interaction model
 ├── alexa-lambda-python/    Optional AWS Lambda bridge
 ├── n8n/                    n8n workflow exports

@@ -32,7 +32,7 @@ Your skill endpoint must follow [Host a Custom Skill as a Web Service](https://d
 
 ### OpenClaw Postgres (`openclaw-postgres`, port **5433**)
 
-- **`npm run restart:local`** brings up **`openclaw-postgres`** with **n8n** and **redis-insight** (Redis itself stays under your control per script policy).
+- **`npm run restart:local`** (safe default: no port kills) brings up **`openclaw-postgres`** with **n8n** and **redis-insight** (Redis itself stays under your control per script policy). Use **`npm run restart:force`** when you need to replace listeners on **3847**/**3848**.
 - Set **`OPENCLAW_DATABASE_URL`** (e.g. `postgresql://openclaw:openclaw@127.0.0.1:5433/openclaw`) for **perception**, **runtime settings**, **todos / reminders**, and **action tracker** tables.
 - Init scripts under **`docker/postgres/init/`** run on **first** container create. If your volume already existed, apply new SQL manually, e.g.  
   `Get-Content docker/postgres/init/03-action-tracker.sql | docker compose exec -T openclaw-postgres psql -U openclaw -d openclaw`

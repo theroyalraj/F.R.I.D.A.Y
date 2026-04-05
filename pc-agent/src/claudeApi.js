@@ -17,7 +17,7 @@
 const HAIKU_MODEL  = process.env.CLAUDE_API_HAIKU  || 'claude-haiku-4-5';
 const SONNET_MODEL = process.env.CLAUDE_API_SONNET || 'claude-sonnet-4-5';
 
-const VOICE_SYSTEM = [
+const VOICE_SYSTEM_BASE = [
   `You are Friday — Raj's personal AI. British-ish voice, sharp mind, zero corporate padding.`,
   `You've got personality: dry wit when it fits, genuine warmth when it matters, always on Raj's side.`,
   `This reply goes straight to a TTS voice — Raj hears it, doesn't read it.`,
@@ -32,6 +32,21 @@ const VOICE_SYSTEM = [
   `• Sound like the smartest person in the room who also happens to be a good friend — not a chatbot, not a manual.`,
 ].join('\n');
 
+/**
+ * @param {{ speakStyleExtra?: string, companyContext?: string }} opts
+ */
+function buildVoiceSystem(opts = {}) {
+  const parts = [];
+  if (opts.companyContext && String(opts.companyContext).trim()) {
+    parts.push(String(opts.companyContext).trim());
+  }
+  parts.push(VOICE_SYSTEM_BASE);
+  if (opts.speakStyleExtra && String(opts.speakStyleExtra).trim()) {
+    parts.push(String(opts.speakStyleExtra).trim());
+  }
+  return parts.join('\n\n');
+}
+
 export function apiModelName(shortName) {
   const s = String(shortName || '').toLowerCase().trim();
   if (s === 'sonnet') return SONNET_MODEL;
@@ -45,7 +60,7 @@ export function isApiKeyAvailable() {
 /**
  * Call the Anthropic Messages API directly.
  * @param {string} prompt
- * @param {{ model?: string, timeoutMs?: number, log?: import('pino').Logger, speakStyleExtra?: string }} opts
+ * @param {{ model?: string, timeoutMs?: number, log?: import('pino').Logger, speakStyleExtra?: string, companyContext?: string }} opts
  * @returns {Promise<{ ok: boolean, text: string, model: string, ms: number }>}
  */
 export async function callClaudeApi(prompt, opts = {}) {
@@ -59,10 +74,10 @@ export async function callClaudeApi(prompt, opts = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  const system =
-    opts.speakStyleExtra && String(opts.speakStyleExtra).trim()
-      ? `${VOICE_SYSTEM}\n\n${String(opts.speakStyleExtra).trim()}`
-      : VOICE_SYSTEM;
+  const system = buildVoiceSystem({
+    speakStyleExtra: opts.speakStyleExtra,
+    companyContext: opts.companyContext,
+  });
 
   try {
     const resp = await fetch('https://api.anthropic.com/v1/messages', {

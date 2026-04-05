@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Clear Friday runtime locks after a hard kill (restart-local, stuck TTS, wedged music guard).
+Clear Friday runtime locks after a hard kill (restart:force, stuck TTS, wedged music guard).
 
 Redis (same resolution as friday-speak.py: OPENCLAW_REDIS_URL, else FRIDAY_AMBIENT_REDIS_URL, else default):
   friday:music:active            — friday-play session lease

@@ -66,6 +66,7 @@ log = logging.getLogger("friday-notify-followup")
 
 USER_DISPLAY = (os.environ.get("FRIDAY_USER_NAME", "Raj") or "Raj").strip() or "Raj"
 AGENT_URL = os.environ.get("PC_AGENT_URL", "http://127.0.0.1:3847").rstrip("/")
+PC_AGENT_SECRET = (os.environ.get("PC_AGENT_SECRET") or "").strip()
 LANGUAGE = os.environ.get("LISTEN_LANGUAGE", "en-US")
 LISTEN_SEC = float(os.environ.get("FRIDAY_NOTIFY_LISTEN_SEC", "10").split("#")[0].strip() or "10")
 MIC_INDEX_RAW = os.environ.get("LISTEN_DEVICE_INDEX")
@@ -215,13 +216,20 @@ def record_after_prompt(mic_idx: int | None) -> np.ndarray | None:
     return np.concatenate(chunks)
 
 
+def _agent_voice_headers() -> dict:
+    h = {"ngrok-skip-browser-warning": "1"}
+    if PC_AGENT_SECRET:
+        h["Authorization"] = f"Bearer {PC_AGENT_SECRET}"
+    return h
+
+
 def send_command(text: str) -> str:
     try:
         r = req_lib.post(
             f"{AGENT_URL}/voice/command",
             json={"text": text, "userId": "friday-notify-followup", "source": "voice"},
             timeout=120,
-            headers={"ngrok-skip-browser-warning": "1"},
+            headers=_agent_voice_headers(),
         )
         r.raise_for_status()
         j = r.json()

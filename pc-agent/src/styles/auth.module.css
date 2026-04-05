@@ -1,0 +1,155 @@
+.authWrap {
+  min-height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem 1rem;
+  background: radial-gradient(ellipse 120% 80% at 50% 20%, rgba(167, 139, 250, 0.12), transparent),
+    var(--fr-bg, #05060a);
+}
+
+.card {
+  width: 100%;
+  max-width: 420px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(167, 139, 250, 0.25);
+  border-radius: 16px;
+  padding: 2rem 1.75rem;
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.35);
+}
+
+.light .card {
+  background: rgba(255, 255, 255, 0.92);
+  border-color: rgba(167, 139, 250, 0.35);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.08);
+}
+
+.title {
+  font-size: 1.35rem;
+  font-weight: 600;
+  margin-bottom: 0.35rem;
+  color: var(--fr-text, #f4f4f8);
+}
+
+.light .title {
+  color: #111827;
+}
+
+.sub {
+  font-size: 0.875rem;
+  opacity: 0.75;
+  margin-bottom: 1.5rem;
+  color: var(--fr-text, #f4f4f8);
+}
+
+.light .sub {
+  color: #374151;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-bottom: 1rem;
+}
+
+.field label {
+  font-size: 0.8rem;
+  font-weight: 500;
+  opacity: 0.9;
+}
+
+.field input,
+.field textarea {
+  font: inherit;
+  padding: 0.65rem 0.75rem;
+  border-radius: 10px;
+  border: 1px solid rgba(167, 139, 250, 0.35);
+  background: rgba(0, 0, 0, 0.35);
+  color: var(--fr-text, #f4f4f8);
+}
+
+.light .field input,
+.light .field textarea {
+  background: #fff;
+  color: #111827;
+  border-color: #d1d5db;
+}
+
+.field textarea {
+  min-height: 88px;
+  resize: vertical;
+}
+
+.err {
+  font-size: 0.85rem;
+  color: #fb7185;
+  margin-bottom: 0.75rem;
+}
+
+.actions {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-top: 1.25rem;
+}
+
+.btn {
+  font: inherit;
+  font-weight: 600;
+  padding: 0.65rem 1.2rem;
+  border-radius: 10px;
+  border: none;
+  cursor: pointer;
+  background: linear-gradient(135deg, #a78bfa, #38bdf8);
+  color: #0a0a0f;
+}
+
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.btnGhost {
+  background: transparent;
+  color: var(--fr-text, #f4f4f8);
+  border: 1px solid rgba(167, 139, 250, 0.45);
+}
+
+.light .btnGhost {
+  color: #374151;
+}
+
+.linkBtn {
+  background: none;
+  border: none;
+  color: #38bdf8;
+  cursor: pointer;
+  font: inherit;
+  text-decoration: underline;
+  padding: 0;
+}
+
+.steps {
+  font-size: 0.8rem;
+  opacity: 0.7;
+  margin-bottom: 1rem;
+}
+
+.bannerMember {
+  font-size: 0.9rem;
+  padding: 0.75rem 1rem;
+  border-radius: 10px;
+  background: rgba(56, 189, 248, 0.12);
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  margin-bottom: 1rem;
+}
+
+.loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100%;
+  color: var(--fr-text, #f4f4f8);
+  font-size: 1rem;
+}

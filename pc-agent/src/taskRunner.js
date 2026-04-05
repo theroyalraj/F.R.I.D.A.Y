@@ -5,6 +5,7 @@ import { callClaudeApi, isApiKeyAvailable } from './claudeApi.js';
 import { inferClaudeModelForTask, isAutoModelEnabled } from './claudeRouter.js';
 import { sanitizeClaudeModel } from './claudeModel.js';
 import { getSpeakStyle, buildSpeakStyleInstruction } from './speakStyle.js';
+import { getCachedCompanyContextString } from './companyDb.js';
 
 // Sources that need fast conversational responses — use direct API, not CLI
 const FAST_SOURCES = new Set(['mic-daemon', 'voice', 'friday-mic-daemon', 'whatsapp', 'ui']);
@@ -16,6 +17,8 @@ function shouldApplySpeakStyle(source, replyChannel) {
 
 /**
  * Shared command path for Alexa→N8N→/task and Jarvis voice UI→/voice/command.
+ * @param {object} [options]
+ * @param {string|null} [options.orgId] — from JWT; loads org company profile for Claude/TTS context
  */
 export async function runTask(body, reqLog, options = {}) {
   const { text, userId, correlationId, action, app, claudeModel: rawModel, source } = body || {};
@@ -121,6 +124,15 @@ export async function runTask(body, reqLog, options = {}) {
     }
   }
 
+  let companyContext = '';
+  if (options.orgId) {
+    try {
+      companyContext = await getCachedCompanyContextString(options.orgId);
+    } catch {
+      /* DB down or SQLite backend — skip org context */
+    }
+  }
+
   if (!claudeModel && isAutoModelEnabled()) {
     const inferred = inferClaudeModelForTask(t);
     if (inferred) {
@@ -145,6 +157,7 @@ export async function runTask(body, reqLog, options = {}) {
         timeoutMs: apiTimeoutMs,
         log:       reqLog,
         speakStyleExtra,
+        companyContext,
       });
       reqLog.info({ mode: 'api', ok: result.ok, ms: result.ms, model: result.model }, 'task done');
       return {
@@ -161,7 +174,7 @@ export async function runTask(body, reqLog, options = {}) {
     { mode: 'cli', timeoutMs: TIMEOUT, claudeModel: claudeModel || undefined, replyChannel },
     'invoking claude cli',
   );
-  const claude = await runClaude(t, TIMEOUT, { claudeModel, replyChannel, speakStyleExtra });
+  const claude = await runClaude(t, TIMEOUT, { claudeModel, replyChannel, speakStyleExtra, companyContext });
   const summary = claude.out || claude.err || 'No output';
   reqLog.info(
     {

@@ -126,7 +126,7 @@ npm run start:cursor-reply
 python scripts/cursor-reply-watch.py
 ```
 
-`npm run restart:local` / `scripts/start.mjs` starts this watcher when any of `FRIDAY_CURSOR_SPEAK_REPLY`, `FRIDAY_CURSOR_SPEAK_SUBAGENT_REPLY`, or `FRIDAY_CURSOR_SPEAK_THINKING` is active after narration gating (thinking stays on with narration by default). Set all channels off to skip.
+`npm run restart:local` (safe, no port kills) / `scripts/start.mjs` starts this watcher when any of `FRIDAY_CURSOR_SPEAK_REPLY`, `FRIDAY_CURSOR_SPEAK_SUBAGENT_REPLY`, or `FRIDAY_CURSOR_SPEAK_THINKING` is active after narration gating (thinking stays on with narration by default). Set all channels off to skip. To replace a stuck stack: `npm run restart:force`.
 
 Requires `chat_id` in repo `.session-voice.json` (from normal `pick-session-voice.py` / Composer use). Optional silent seed: set `FRIDAY_PICK_SESSION_NO_WELCOME=true` when invoking pick-session-voice once.
 

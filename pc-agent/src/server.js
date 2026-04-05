@@ -31,6 +31,10 @@ import { createActionItemsRouter } from './actionItemsRoutes.js';
 import { perceptionDbConfigured, perceptionDbHealth } from './perceptionDb.js';
 import { loadOpenclawUserConfig } from './userConfig.js';
 import { getSpeakStyle, setSpeakStyle, buildSpeakStyleInstruction } from './speakStyle.js';
+import { createAuthRouter } from './authRoutes.js';
+import { createOrganizationRouter } from './organizationRoutes.js';
+import { authJwtOrAgentSecret } from './authMiddleware.js';
+import { ensureAuthSchema } from './ensureAuthSchema.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, '../public');
@@ -168,16 +172,18 @@ app.use((req, res, next) => {
 function shouldIgnoreRequestLog(req) {
   const p = req.path || '';
   return (
-    p === '/health' ||
-    p === '/friday' ||
-    p === '/friday/listen' ||
-    p === '/jarvis' ||
-    p === '/voice/ping' ||
-    p === '/voice/stream' ||
-    p === '/favicon.svg' ||
-    p === '/favicon.ico' ||
-    p.startsWith('/todos')
-  );
+      p === '/health' ||
+      p === '/friday' ||
+      p === '/friday/listen' ||
+      p === '/jarvis' ||
+      p === '/voice/ping' ||
+      p === '/voice/stream' ||
+      p === '/favicon.svg' ||
+      p === '/favicon.ico' ||
+      p.startsWith('/todos') ||
+      p.startsWith('/auth/') ||
+      p.startsWith('/organization/')
+    );
 }
 
 app.use(
@@ -218,6 +224,14 @@ function auth(req, res, next) {
   next();
 }
 
+/** User JWT or PC_AGENT_SECRET — for /task and /voice (daemons, N8N, Listen UI). */
+function authTaskOrUser(req, res, next) {
+  return authJwtOrAgentSecret(SECRET)(req, res, next);
+}
+
+app.use('/auth', createAuthRouter());
+app.use('/organization', createOrganizationRouter());
+
 /** Friday voice API: CORS + explicit JSON ping (works behind ngrok, curl, monitors; ?query no longer breaks logging). */
 const voiceRouter = express.Router();
 
@@ -233,6 +247,12 @@ voiceRouter.use((req, res, next) => {
     return res.sendStatus(204);
   }
   next();
+});
+
+voiceRouter.use((req, res, next) => {
+  if (req.method === 'HEAD' && req.path === '/ping') return next();
+  if (req.method === 'GET' && (req.path === '/ping' || req.path === '/stream')) return next();
+  return authTaskOrUser(req, res, next);
 });
 
 function ttsProviderLabel() {
@@ -276,7 +296,8 @@ voiceRouter.head('/ping', (_req, res) => {
 
 voiceRouter.post('/command', async (req, res, next) => {
   try {
-    const out = await runTask(req.body, req.log);
+    const orgId = req.user?.orgId ?? null;
+    const out = await runTask(req.body, req.log, { orgId });
     res.status(out.status).json(out.json);
     if (out.json?.ok) playDoneSong(req.log);
   } catch (e) {
@@ -575,9 +596,10 @@ app.get('/jarvis', (_req, res) => {
   res.redirect(302, '/friday');
 });
 
-app.post('/task', auth, async (req, res, next) => {
+app.post('/task', authTaskOrUser, async (req, res, next) => {
   try {
-    const out = await runTask(req.body, req.log);
+    const orgId = req.user?.orgId ?? null;
+    const out = await runTask(req.body, req.log, { orgId });
     res.status(out.status).json(out.json);
   } catch (e) {
     next(e);
@@ -639,36 +661,50 @@ function shutdown(signal) {
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 
-server = app.listen(PORT, BIND, () => {
-  // Jarvis-style startup banner
-  process.stdout.write(
-    '\n\x1b[35m╔══════════════════════════════════════════════════════════════╗\x1b[0m\n' +
-    '\x1b[35m║\x1b[0m  \x1b[1;37m░░  F · R · I · D · A · Y  —  OpenClaw PC Agent      ░░\x1b[0m  \x1b[35m║\x1b[0m\n' +
-    '\x1b[35m║\x1b[0m  \x1b[90mVoice UI  ·  Claude  ·  Edge TTS  ·  All Systems Go\x1b[0m       \x1b[35m║\x1b[0m\n' +
-    '\x1b[35m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n\n',
-  );
+async function bootstrap() {
+  try {
+    await ensureAuthSchema(rootLogger);
+  } catch (e) {
+    rootLogger.fatal(
+      { err: String(e.message || e) },
+      'ensureAuthSchema failed — run docker/postgres/init/04-auth-company.sql and 05-multitenant-org.sql on your DB, or fix OPENCLAW_DATABASE_URL',
+    );
+    process.exit(1);
+  }
 
-  rootLogger.info(
-    {
-      bind: `${BIND}:${PORT}`,
-      voiceUi: `http://127.0.0.1:${PORT}/friday`,
-      voicePing: `http://127.0.0.1:${PORT}/voice/ping`,
-      tts: ttsProviderLabel(),
-      ttsVoice: ttsProviderLabel() === 'edge' ? edgeTtsVoice() : undefined,
-      bindNote: BIND === '0.0.0.0' ? 'all-interfaces' : 'loopback',
-      logLevel: process.env.LOG_LEVEL || 'default',
-      logDir: process.env.OPENCLAW_LOG_DIR || null,
-      nodeEnv: process.env.NODE_ENV || 'development',
-    },
-    'pc-agent listening',
-  );
+  server = app.listen(PORT, BIND, () => {
+    // Jarvis-style startup banner
+    process.stdout.write(
+      '\n\x1b[35m╔══════════════════════════════════════════════════════════════╗\x1b[0m\n' +
+      '\x1b[35m║\x1b[0m  \x1b[1;37m░░  F · R · I · D · A · Y  —  OpenClaw PC Agent      ░░\x1b[0m  \x1b[35m║\x1b[0m\n' +
+      '\x1b[35m║\x1b[0m  \x1b[90mVoice UI  ·  Claude  ·  Edge TTS  ·  All Systems Go\x1b[0m       \x1b[35m║\x1b[0m\n' +
+      '\x1b[35m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n\n',
+    );
 
-  broadcastEvent('server_start', { text: 'PC Agent online. All systems go.' });
-  // Restore the last API session voice from Redis so it survives restarts
-  restoreSessionVoiceFromRedis().catch(() => {});
-  speakStartup();
-});
-server.on('error', (err) => {
-  rootLogger.fatal({ err }, 'server listen error');
-  process.exit(1);
-});
+    rootLogger.info(
+      {
+        bind: `${BIND}:${PORT}`,
+        voiceUi: `http://127.0.0.1:${PORT}/friday`,
+        voicePing: `http://127.0.0.1:${PORT}/voice/ping`,
+        tts: ttsProviderLabel(),
+        ttsVoice: ttsProviderLabel() === 'edge' ? edgeTtsVoice() : undefined,
+        bindNote: BIND === '0.0.0.0' ? 'all-interfaces' : 'loopback',
+        logLevel: process.env.LOG_LEVEL || 'default',
+        logDir: process.env.OPENCLAW_LOG_DIR || null,
+        nodeEnv: process.env.NODE_ENV || 'development',
+      },
+      'pc-agent listening',
+    );
+
+    broadcastEvent('server_start', { text: 'PC Agent online. All systems go.' });
+    // Restore the last API session voice from Redis so it survives restarts
+    restoreSessionVoiceFromRedis().catch(() => {});
+    speakStartup();
+  });
+  server.on('error', (err) => {
+    rootLogger.fatal({ err }, 'server listen error');
+    process.exit(1);
+  });
+}
+
+bootstrap();

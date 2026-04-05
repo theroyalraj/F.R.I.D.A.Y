@@ -14,3 +14,4 @@ data/*.db
 data/*.db-*
 data/perception/
 .session-voice.json
+pc-agent/tmp-signup-body.json

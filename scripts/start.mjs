@@ -26,9 +26,13 @@ function pythonChildForScripts() {
   return process.platform === 'win32' ? 'pythonw' : 'python3';
 }
 
-/** When set (e.g. by restart-local.ps1 -NoKill), do not kill listeners on 3847/3848 before spawn. */
+/** When set, do not kill listeners on 3847/3848 before spawn (default for safe restart-local). */
 const NO_FREE_PORTS = ['1', 'true', 'yes'].includes(
-  String(process.env.OPENCLAW_NO_FREE_PORTS || '').toLowerCase()
+  String(process.env.OPENCLAW_NO_FREE_PORTS || '').toLowerCase(),
+);
+/** Opt-in: kill processes listening on 3847/3848 before spawn (restart-local.ps1 -ForceKill sets this). */
+const FREE_PORTS_ON_START = ['1', 'true', 'yes'].includes(
+  String(process.env.OPENCLAW_FREE_PORTS_ON_START || '').toLowerCase(),
 );
 
 /**
@@ -281,11 +285,15 @@ function freePort(port) {
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 async function main() {
-  if (!NO_FREE_PORTS) {
+  if (NO_FREE_PORTS) {
+    process.stdout.write(`${C.warn}[openclaw] OPENCLAW_NO_FREE_PORTS set — not clearing ports 3847/3848${C.reset}\n`);
+  } else if (FREE_PORTS_ON_START) {
     freePort(3848);
     freePort(3847);
   } else {
-    process.stdout.write(`${C.warn}[openclaw] OPENCLAW_NO_FREE_PORTS set — not clearing ports 3847/3848${C.reset}\n`);
+    process.stdout.write(
+      `${C.warn}[openclaw] Not clearing ports 3847/3848 (default). Set OPENCLAW_FREE_PORTS_ON_START=1 or use npm run restart:force to replace listeners.${C.reset}\n`,
+    );
   }
 
   process.stdout.write(`${C.warn}

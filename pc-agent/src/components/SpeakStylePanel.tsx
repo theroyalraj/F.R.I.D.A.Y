@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import { useAuth } from '../contexts/AuthContext';
 import styles from '../styles/listen.module.css';
 
 export type SpeakStyleState = {
@@ -22,13 +23,14 @@ const DEFAULT_LOCAL: SpeakStyleState = {
 const SpeakStylePanel: React.FC<{ showToast: (m: string, t?: 'info' | 'error' | 'success') => void }> = ({
   showToast,
 }) => {
+  const { authHeaders } = useAuth();
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [style, setStyle] = useState<SpeakStyleState>(DEFAULT_LOCAL);
 
   const load = useCallback(async () => {
     try {
-      const r = await fetch('/voice/speak-style');
+      const r = await fetch('/voice/speak-style', { headers: authHeaders() });
       const d = await r.json();
       if (d.ok && d.style) {
         setStyle({
@@ -43,7 +45,7 @@ const SpeakStylePanel: React.FC<{ showToast: (m: string, t?: 'info' | 'error' | 
     } catch {
       /* ignore */
     }
-  }, []);
+  }, [authHeaders]);
 
   useEffect(() => {
     load();
@@ -60,7 +62,7 @@ const SpeakStylePanel: React.FC<{ showToast: (m: string, t?: 'info' | 'error' | 
     try {
       const r = await fetch('/voice/speak-style', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { ...authHeaders() as Record<string, string> },
         body: JSON.stringify(style),
       });
       const d = await r.json();

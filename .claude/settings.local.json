@@ -117,7 +117,15 @@
       "Bash(curl -s http://127.0.0.1:3847/voice/status)",
       "Bash(python -c \"import sys,json; print\\(json.dumps\\(json.load\\(sys.stdin\\), indent=2\\)\\)\")",
       "Bash(curl -s -X POST http://127.0.0.1:3847/voice/set-voice -H \"Content-Type: application/json\" -d '{\"\"voice\"\":\"\"en-US-EmmaMultilingualNeural\"\"}')",
-      "Bash(grep -rn \"upload\\\\|file\\\\|multipart\\\\|FormData\" D:/code/openclaw/pc-agent/src --include=*.js)"
+      "Bash(grep -rn \"upload\\\\|file\\\\|multipart\\\\|FormData\" D:/code/openclaw/pc-agent/src --include=*.js)",
+      "mcp__Claude_Preview__preview_start",
+      "Bash(taskkill //PID 59400 //F)",
+      "Bash(wmic process:*)",
+      "Bash(tasklist //FI \"PID eq 60968\" //V)",
+      "Bash(powershell -Command \"Get-CimInstance Win32_Process -Filter ''ProcessId=60968'' | Select-Object CommandLine | Format-List\")",
+      "Bash(powershell -Command \"Get-CimInstance Win32_Process -Filter ''ProcessId=60968'' | Select-Object ParentProcessId | Format-List\")",
+      "Bash(powershell -Command \"Get-CimInstance Win32_Process -Filter ''ProcessId=60460'' | Select-Object ProcessId,Name,CommandLine | Format-List\")",
+      "Bash(powershell -Command \"Get-CimInstance Win32_Process -Filter \"\"CommandLine LIKE ''%start.mjs%''\"\" | Select-Object ProcessId,CommandLine | Format-List\")"
     ]
   }
 }

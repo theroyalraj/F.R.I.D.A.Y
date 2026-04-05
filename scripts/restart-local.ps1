@@ -1,31 +1,39 @@
 <#
 .SYNOPSIS
-  Restart OpenClaw stack - kills old processes, handles Docker, then runs
-  ALL services (gateway / agent / voice daemon) in THIS terminal window.
-  Close / Ctrl+C the terminal and everything stops.
+  Start or refresh the OpenClaw stack in THIS terminal.
+
+  **Default (safe):** does **not** kill pc-agent, skill-gateway, voice daemon, or listeners on
+  3847/3848. If both services already respond on /health, exits. If ports are in use but
+  unhealthy, exits with a message (no automatic kill).
+
+.PARAMETER ForceKill
+  **Explicit only:** stop ffplay/friday-player, free ports 3847/3848 (taskkill listeners),
+  stop auxiliary Python daemons (listen, ambient, cursor-reply-watch, SAGE OCR, music,
+  stray friday-speak), then start. Use when you truly want to replace a stuck stack.
 
 .PARAMETER SkipDocker
-  Skip Docker steps; only free ports and start Node/Python services.
-
-.PARAMETER NoKill
-  Do not stop ffplay, friday-play, voice daemon, or free ports 3847/3848.
-  If gateway + agent already respond on /health, exits without starting anything.
-  Otherwise starts via start.mjs with OPENCLAW_NO_FREE_PORTS so existing listeners are not killed.
+  Skip Docker compose up for postgres / n8n / redis-insight.
 
 .EXAMPLE
   pwsh -File scripts/restart-local.ps1
   pwsh -File scripts/restart-local.ps1 -SkipDocker
-  pwsh -File scripts/restart-local.ps1 -SkipDocker -NoKill
+  pwsh -File scripts/restart-local.ps1 -ForceKill
+  pwsh -File scripts/restart-local.ps1 -SkipDocker -ForceKill
 #>
 param(
   [switch] $SkipDocker,
-  [switch] $NoKill
+  [switch] $ForceKill
 )
 
 $ErrorActionPreference = 'Continue'
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 
-# -- 1. Kill anything on our ports (full restart only) -----------------------
+function Test-PortListen {
+  param([int] $Port)
+  $c = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+  return $null -ne $c
+}
+
 function Stop-ListenersOnPort {
   param([int[]] $Ports)
   foreach ($port in $Ports) {
@@ -59,17 +67,15 @@ function Test-OpenClawHealthy {
 Write-Host ""
 Write-Host "=== OpenClaw restart ===" -ForegroundColor Yellow
 
-if ($NoKill) {
-  Write-Host "NoKill: skipping OpenClaw process kills and port frees." -ForegroundColor Cyan
-} else {
-  # -- 0. Stop any playing song / TTS ------------------------------------------
+if ($ForceKill) {
+  Write-Host "ForceKill: stopping playback, freeing 3847/3848, stopping auxiliary Python daemons..." -ForegroundColor Magenta
+
   $ffplayProcs = @(Get-Process -Name ffplay -ErrorAction SilentlyContinue)
   if ($ffplayProcs.Count -gt 0) {
     $ffplayProcs | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
     Write-Host "  killed $($ffplayProcs.Count) ffplay process(es) (song/TTS stopped)"
   }
 
-  # friday-speak uses a renamed ffplay executable on Windows
   $fridayPlayer = @(Get-Process -Name 'friday-player' -ErrorAction SilentlyContinue)
   if ($fridayPlayer.Count -gt 0) {
     $fridayPlayer | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
@@ -85,10 +91,6 @@ if ($NoKill) {
 
   $pidFile = Join-Path $env:TEMP "friday-play.pid"
   if (Test-Path $pidFile) { Remove-Item $pidFile -Force -ErrorAction SilentlyContinue }
-
-  # Do not scan-kill all node processes matching server.js/start.mjs — that also hits
-  # Docker Desktop, other IDEs, and unrelated apps. Local OpenClaw listeners are
-  # stopped via the port free step below.
 
   Write-Host "Freeing ports 3848 and 3847..."
   Stop-ListenersOnPort @(3848, 3847)
@@ -135,18 +137,27 @@ if ($NoKill) {
       Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
       Write-Host "  killed stray TTS process (PID $($_.ProcessId))"
     }
-
-  # Redis + temp files — stale friday:tts:lock or friday-tts-active can block all TTS after a crash
-  $clearLocks = Join-Path $root 'skill-gateway\scripts\clear_friday_locks.py'
-  if (Test-Path $clearLocks) {
-    Write-Host 'Clearing Friday Redis locks + temp TTS files...'
-    & python $clearLocks
+}
+else {
+  Write-Host "Safe mode (default): no kills on 3847/3848 or OpenClaw Python daemons." -ForegroundColor Cyan
+  Write-Host "Full replace: npm run restart:force   or   -ForceKill" -ForegroundColor DarkGray
+  if (Test-OpenClawHealthy) {
+    Write-Host "OpenClaw already running (pc-agent + skill-gateway /health OK). Not starting another stack in this terminal." -ForegroundColor Green
+    exit 0
+  }
+  if ((Test-PortListen -Port 3847) -or (Test-PortListen -Port 3848)) {
+    Write-Warning "Ports 3847 or 3848 are in use but /health did not pass."
+    Write-Host "Stop those processes yourself, or run: npm run restart:force" -ForegroundColor Yellow
+    exit 1
   }
 }
 
-# -- 3. Docker (optional) ----------------------------------------------------
-# Policy: never start, stop, or restart the Redis container from this script (no cache bounce,
-# no n8n disconnect storm). Ensure Redis is up yourself: docker compose up -d redis
+$clearLocks = Join-Path $root 'skill-gateway\scripts\clear_friday_locks.py'
+if (Test-Path $clearLocks) {
+  Write-Host 'Clearing Friday Redis locks + temp TTS files...'
+  & python $clearLocks
+}
+
 if ($SkipDocker) {
   Write-Host "Skipping Docker (-SkipDocker)."
 }
@@ -161,25 +172,19 @@ else {
   Pop-Location
 }
 
-# -- 4. NoKill: if core HTTP services already healthy, skip spawn -------------
-if ($NoKill -and (Test-OpenClawHealthy)) {
-  Write-Host "OpenClaw already running (pc-agent + skill-gateway /health OK). Not starting another stack in this terminal." -ForegroundColor Green
-  exit 0
-}
-
-if ($NoKill) {
-  Write-Host "Core services not healthy - starting stack without freeing ports..." -ForegroundColor Yellow
-}
-
-# -- 5. Launch all services in THIS terminal via start.mjs -------------------
 Write-Host ""
 Write-Host "Starting services in this terminal (Ctrl+C stops everything)..." -ForegroundColor Yellow
 Write-Host ""
 
 Set-Location $root
-if ($NoKill) {
-  $env:OPENCLAW_NO_FREE_PORTS = '1'
-} else {
-  Remove-Item Env:\OPENCLAW_NO_FREE_PORTS -ErrorAction SilentlyContinue
+Remove-Item Env:\OPENCLAW_NO_FREE_PORTS -ErrorAction SilentlyContinue
+Remove-Item Env:\OPENCLAW_FREE_PORTS_ON_START -ErrorAction SilentlyContinue
+
+if ($ForceKill) {
+  $env:OPENCLAW_FREE_PORTS_ON_START = '1'
 }
+else {
+  $env:OPENCLAW_NO_FREE_PORTS = '1'
+}
+
 node scripts/start.mjs

@@ -224,17 +224,37 @@ _RE_LONE_SYMBOLS = re.compile(r"[_={}()\[\]|\\`<>@#$%^&*~]+")
 # Lines that are mostly symbols/numbers after cleaning
 _RE_ALPHANUM = re.compile(r"[a-zA-Z]")
 # AI model name patterns — e.g. "claude-sonnet-4-5", "gpt-4o", "gemini-pro",
-# "claude-4.6-sonnet-medium-thinking", "llama-3-70b-instruct", "deepseek-v3"
-# Matched as a complete line (stripped) or as a standalone token in a line.
+# "claude-4.6-sonnet-medium-thinking", "opus 4.6", "Gemini 1.5 Pro",
+# "llama-3-70b-instruct", "deepseek-v3".
+# Lines are matched as a whole (stripped). Spaces are allowed for display names like "opus 4.6".
+_MODEL_FAMILY = (
+    r"claude|gpt|gemini|llama|mistral|mixtral|qwen|deepseek|phi|falcon|"
+    r"o1|o3|o4|command|titan|haiku|sonnet|opus|flash|thinking"
+)
+# Full-line match: entire line is a model name (with optional version/tier suffix)
 _RE_MODEL_NAME_LINE = re.compile(
-    r"^(claude|gpt|gemini|llama|mistral|mixtral|qwen|deepseek|phi|falcon|"
-    r"o1|o3|o4|o\d|command|titan|nova|haiku|sonnet|opus|flash|pro|ultra|"
-    r"thinking|fast-of-n)[\w.\-/:]*$",
+    r"^(" + _MODEL_FAMILY + r")[\w.\-/: ]*$",
     re.IGNORECASE,
 )
+# Inline token match: model family word followed by version/tier tokens
 _RE_MODEL_NAME_TOKEN = re.compile(
-    r"\b(claude|gpt|gemini|llama|mistral|mixtral|qwen|deepseek|phi|falcon)"
-    r"[-\s][\w.\-]{2,}",
+    r"\b(" + _MODEL_FAMILY + r")[\s\-][\w.\-]{2,}",
+    re.IGNORECASE,
+)
+# Known Cursor UI chrome strings that should never be spoken (exact or prefix match)
+_UI_CHROME = re.compile(
+    r"^("
+    r"Agent|Ask|Edit|Chat|Composer|Settings|Files|Search|Source Control|"
+    r"Extensions|Run and Debug|Explorer|Timeline|Outline|Problems|Output|"
+    r"Terminal|Debug Console|Ports|Comments|Notifications|No Notifications|"
+    r"Auto-run|Auto run|Max Request|Context|Add context|@ Mention|"
+    r"Summarize|Summarise|Restore|Attach|Include|Exclude|Filter|"
+    r"New Chat|New Conversation|New Thread|Send|Stop|Cancel|Retry|Regenerate|"
+    r"Copy|Paste|Clear|Reset|Undo|Redo|Open|Close|Save|"
+    r"Normal mode|Agent mode|Ask mode|Plan mode|"
+    r"Thinking\.\.\.|Generating\.\.\.|Loading\.\.\.|Streaming\.\.\.|"
+    r"Press Enter|Ctrl\+|Cmd\+|Alt\+|Shift\+"
+    r").*$",
     re.IGNORECASE,
 )
 
@@ -252,14 +272,19 @@ def _scrub_for_speech(text: str) -> str:
             return ""  # likely an identifier — drop
         return f"{a} {b}"
     s = _RE_UNDERSCORE_WORD.sub(_snake_sub, s)
+    # Remove model name tokens (e.g. "claude-sonnet-4-5", "gpt-4o") mid-sentence
+    s = _RE_MODEL_NAME_TOKEN.sub("", s)
     # Remove lone symbols
     s = _RE_LONE_SYMBOLS.sub(" ", s)
     # Collapse whitespace
     s = re.sub(r"[ \t]{2,}", " ", s)
-    # Remove lines with no alphabetic content at all
+    # Drop lines that are UI chrome, model names, or lack alphabetic content
     lines_out = [
         l.strip() for l in s.splitlines()
-        if l.strip() and len(_RE_ALPHANUM.findall(l)) >= 3
+        if l.strip()
+        and not _RE_MODEL_NAME_LINE.match(l.strip())
+        and not _UI_CHROME.match(l.strip())
+        and len(_RE_ALPHANUM.findall(l)) >= 3
     ]
     s = " ".join(lines_out)
     s = re.sub(r"\s{2,}", " ", s).strip()
@@ -353,7 +378,12 @@ def _find_cursor_hwnd(title_sub: str):
     return result[0] if result else None
 
 
-def _capture_hwnd_region(hwnd: int, right_pct: float):
+def _capture_hwnd_region(hwnd: int, right_pct: float, skip_top_pct: float = 0.0, skip_bottom_pct: float = 0.0):
+    """Capture rightmost right_pct% of the window, optionally skipping top/bottom fractions.
+
+    skip_top_pct / skip_bottom_pct are percentages of total window height (0–40).
+    Use them to exclude the Cursor chat header and model-selector footer from the OCR crop.
+    """
     import mss
     from PIL import Image
     try:
@@ -370,7 +400,15 @@ def _capture_hwnd_region(hwnd: int, right_pct: float):
     h = max(1, bottom - top)
     pct = max(5.0, min(right_pct, 100.0))
     crop_w = max(80, int(w * (pct / 100.0)))
-    region = {"left": int(left + (w - crop_w)), "top": int(top), "width": crop_w, "height": h}
+    skip_t = max(0, int(h * (max(0.0, min(skip_top_pct, 40.0)) / 100.0)))
+    skip_b = max(0, int(h * (max(0.0, min(skip_bottom_pct, 40.0)) / 100.0)))
+    crop_h = max(80, h - skip_t - skip_b)
+    region = {
+        "left": int(left + (w - crop_w)),
+        "top": int(top + skip_t),
+        "width": crop_w,
+        "height": crop_h,
+    }
     with mss.mss() as sct:
         shot = sct.grab(region)
         return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
@@ -401,14 +439,17 @@ def main() -> None:
         sage_ocr_master_enabled,
     )
 
-    title_sub  = os.environ.get("FRIDAY_CURSOR_THINKING_OCR_TITLE", "Cursor").strip()
-    interval   = max(0.05, _env_float("FRIDAY_CURSOR_THINKING_OCR_INTERVAL_SEC", 0.1))
-    right_pct  = max(5.0, min(100.0, _env_float("FRIDAY_CURSOR_THINKING_OCR_RIGHT_PCT", 35.0)))
-    min_delta  = max(4, int(_env_float("FRIDAY_CURSOR_THINKING_OCR_MIN_DELTA", 20.0)))
-    lang       = (os.environ.get("FRIDAY_CURSOR_THINKING_OCR_LANG", "en") or "en").strip()
-    sum_gap    = max(1.0, _env_float("FRIDAY_CURSOR_THINKING_OCR_SUMMARY_GAP", 2.5))
-    idle_sec   = max(0.5, _env_float("FRIDAY_CURSOR_THINKING_OCR_IDLE_SEC", 1.8))
-    hash_px    = max(18, int(_env_float("FRIDAY_CURSOR_THINKING_OCR_HASH_PX", 36)))
+    title_sub      = os.environ.get("FRIDAY_CURSOR_THINKING_OCR_TITLE", "Cursor").strip()
+    interval       = max(0.05, _env_float("FRIDAY_CURSOR_THINKING_OCR_INTERVAL_SEC", 0.1))
+    right_pct      = max(5.0, min(100.0, _env_float("FRIDAY_CURSOR_THINKING_OCR_RIGHT_PCT", 35.0)))
+    min_delta      = max(4, int(_env_float("FRIDAY_CURSOR_THINKING_OCR_MIN_DELTA", 20.0)))
+    lang           = (os.environ.get("FRIDAY_CURSOR_THINKING_OCR_LANG", "en") or "en").strip()
+    sum_gap        = max(1.0, _env_float("FRIDAY_CURSOR_THINKING_OCR_SUMMARY_GAP", 2.5))
+    idle_sec       = max(0.5, _env_float("FRIDAY_CURSOR_THINKING_OCR_IDLE_SEC", 1.8))
+    hash_px        = max(18, int(_env_float("FRIDAY_CURSOR_THINKING_OCR_HASH_PX", 36)))
+    # Vertical crop: skip the top N% (title bar / chat header) and bottom N% (model selector / input box)
+    skip_top_pct   = max(0.0, min(40.0, _env_float("FRIDAY_CURSOR_THINKING_OCR_SKIP_TOP_PCT", 5.0)))
+    skip_bottom_pct = max(0.0, min(40.0, _env_float("FRIDAY_CURSOR_THINKING_OCR_SKIP_BOTTOM_PCT", 15.0)))
 
     if not args.once and not sage_ocr_master_enabled():
         print("sage: off — set FRIDAY_SAGE_ENABLED=true or FRIDAY_CURSOR_THINKING_OCR=true", flush=True)
@@ -427,14 +468,16 @@ def main() -> None:
         hwnd = _find_cursor_hwnd(title_sub)
         if not hwnd:
             print("sage: no Cursor window", file=sys.stderr); sys.exit(2)
-        img = _capture_hwnd_region(hwnd, right_pct)
+        img = _capture_hwnd_region(hwnd, right_pct, skip_top_pct, skip_bottom_pct)
         if img is None:
             print("sage: capture failed", file=sys.stderr); sys.exit(3)
         print(_normalize_ocr(_ocr_pil(img, lang)))
         return
 
     print(
-        f"sage: interval={interval}s right={right_pct}% idle={idle_sec}s sum_gap={sum_gap}s voice={_sp.get('voice')}",
+        f"sage: interval={interval}s right={right_pct}% "
+        f"skip_top={skip_top_pct}% skip_bottom={skip_bottom_pct}% "
+        f"idle={idle_sec}s sum_gap={sum_gap}s voice={_sp.get('voice')}",
         flush=True,
     )
 
@@ -469,7 +512,7 @@ def main() -> None:
             time.sleep(interval)
             continue
 
-        img = _capture_hwnd_region(hwnd, right_pct)
+        img = _capture_hwnd_region(hwnd, right_pct, skip_top_pct, skip_bottom_pct)
         if img is None:
             time.sleep(interval)
             continue

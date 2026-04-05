@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react';
+import { useAuth } from '../contexts/AuthContext';
 import { useVoiceApp } from '../contexts/VoiceAppContext';
 import { useSSEStream } from '../hooks/useSSEStream';
 import { useUptime } from '../hooks/useUptime';
@@ -62,6 +63,7 @@ const FridayListenApp: React.FC = () => {
     edgeVoices, currentVoice, setCurrentVoice,
     bubbles, addBubble, showToast, setUptime,
   } = useVoiceApp();
+  const { authHeaders } = useAuth();
 
   const [inputText, setInputText] = useState('');
   const [sending, setSending] = useState(false);
@@ -78,19 +80,19 @@ const FridayListenApp: React.FC = () => {
 
   // Fetch voices
   useEffect(() => {
-    fetch('/voice/voices').then(r => r.json())
+    fetch('/voice/voices', { headers: authHeaders() }).then(r => r.json())
       .then(d => { if (d.voices) setEdgeVoices(d.voices); if (d.active) setCurrentVoice(d.active); })
       .catch(() => {});
-  }, [setEdgeVoices, setCurrentVoice]);
+  }, [setEdgeVoices, setCurrentVoice, authHeaders]);
 
   // Poll sessions
   useEffect(() => {
-    const poll = () => fetch('/voice/status').then(r => r.json())
+    const poll = () => fetch('/voice/status', { headers: authHeaders() }).then(r => r.json())
       .then(d => { if (d.ok) setSessions(d.contexts || []); }).catch(() => {});
     poll();
     const iv = setInterval(poll, 5000);
     return () => clearInterval(iv);
-  }, []);
+  }, [authHeaders]);
 
   // SSE
   useSSEStream((event) => {
@@ -143,7 +145,7 @@ const FridayListenApp: React.FC = () => {
     // If @speak — just speak the text directly
     if (mentions.includes('speak')) {
       fetch('/voice/speak-async', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { ...authHeaders() as Record<string, string> },
         body: JSON.stringify({ text }),
       }).then(() => {
         addBubble({ type: 'friday', text: `\uD83D\uDD0A Speaking: "${text}"`, ts: Date.now() });
@@ -157,7 +159,7 @@ const FridayListenApp: React.FC = () => {
     setConnectionStatus('processing');
     try {
       const res = await fetch('/voice/command', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { ...authHeaders() as Record<string, string> },
         body: JSON.stringify({
           text,
           source: mentions.includes('cursor') ? 'cursor-ui' : 'ui',
@@ -170,7 +172,7 @@ const FridayListenApp: React.FC = () => {
         addBubble({ type: 'friday', text: data.summary, ts: Date.now() });
         // Auto-speak response
         fetch('/voice/speak-async', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          method: 'POST', headers: { ...authHeaders() as Record<string, string> },
           body: JSON.stringify({ text: data.summary }),
         }).catch(() => {});
       } else if (data.error) {
@@ -183,7 +185,7 @@ const FridayListenApp: React.FC = () => {
       setConnectionStatus('listening');
       inputRef.current?.focus();
     }
-  }, [inputText, sending, addBubble, setConnectionStatus]);
+  }, [inputText, sending, addBubble, setConnectionStatus, authHeaders]);
 
   // Input handling with @mention detection
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -232,7 +234,7 @@ const FridayListenApp: React.FC = () => {
   const handleVoiceChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const v = e.target.value;
     setCurrentVoice(v);
-    fetch('/voice/set-voice', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ voice: v }) })
+    fetch('/voice/set-voice', { method: 'POST', headers: { ...authHeaders() as Record<string, string> }, body: JSON.stringify({ voice: v }) })
       .then(() => showToast(`Voice: ${vm(v).shortName}`, 'success')).catch(() => {});
   };
 
