@@ -98,7 +98,7 @@ See `friday-thinking-sounds.mdc` for the full phrase pools. The table below show
 | Found something important | Only if the finding changes the plan | "Okay, I see the issue." |
 | About to edit a file | Only on long multi-file edits; skip for single quick edits | "Updating the narrate rule now." |
 | Running a command / install | Only if the command takes 10+ seconds | "Kicking the install off." |
-| Waiting on a slow process | Only after 20+ seconds of silence | "Still on it, hang tight." |
+| Waiting on a slow process | Only after 10+ seconds of silence | "Still on it, hang tight." |
 | Spawning a subagent | Always (these are meaningful events) | "Spinning up an agent for that." |
 | **Task complete** | **Always — mandatory verbose spoken summary** | See above |
 
