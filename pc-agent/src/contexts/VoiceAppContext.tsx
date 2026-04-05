@@ -114,6 +114,10 @@ export interface VoiceAppContextType {
   /** Live feed of Windows toast notifications from win-notify-watch. */
   winNotifications: WinNotification[];
   dismissWinNotification: (id: string) => void;
+  /** Cursor agent "Done" notifications from win-notify-watch cursor_agent_done events. */
+  cursorDoneNotifications: CursorDoneNotification[];
+  dismissCursorDone: (id: string) => void;
+  clearAllCursorDone: () => void;
 }
 
 export interface WinNotification {

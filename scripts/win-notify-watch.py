@@ -472,6 +472,22 @@ def _watch_loop() -> None:
                     last_order = max(last_order, order)
                     continue
 
+                # Special: Cursor agent "Done" toasts — bypass IGNORE, emit SSE, no speech.
+                if "anysphere.cursor" in pid.lower() or app == "Cursor":
+                    _post_json(
+                        f"{PC_AGENT_URL}/voice/event",
+                        {
+                            "type": "cursor_agent_done",
+                            "task": title,
+                            "detail": body,
+                            "ts": int(time.time()),
+                        },
+                        secret=PC_AGENT_SECRET,
+                    )
+                    print(f"[win-notify] [Cursor done] {title!r}", flush=True)
+                    last_order = max(last_order, order)
+                    continue
+
                 if not _should_include(app, pid):
                     last_order = max(last_order, order)
                     continue

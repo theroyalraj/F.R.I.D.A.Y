@@ -13,7 +13,7 @@ import { PersonaRosterModal } from './PersonaRosterModal';
 import LaunchOverlay from './LaunchOverlay';
 import SessionSidebar from './SessionSidebar';
 import AnimatedAvatar from './AnimatedAvatar';
-// import TopMusicDock from './TopMusicDock';
+import TopMusicDock from './TopMusicDock';
 import {
   COMPANY_PERSONAS,
   SPEAKING_PERSONA_ORDER,
@@ -713,8 +713,8 @@ const FridayListenApp: React.FC = () => {
           </div>
           <span className={styles['top-meta']}>UP {uptime}</span>
         </div>
-        {/* Music search bar - disabled for now */}
-        {/* <div className={styles['top-music-slot']}>
+        {/* Music search bar */}
+        <div className={styles['top-music-slot']}>
           <TopMusicDock
             theme={theme}
             musicOrbCaption={musicOrbCaption}
@@ -722,7 +722,7 @@ const FridayListenApp: React.FC = () => {
             authHeaders={authHeaders}
             showToast={showToast}
           />
-        </div> */}
+        </div>
         <div className={styles['top-right']}>
           {isNarrow && (
             <button
