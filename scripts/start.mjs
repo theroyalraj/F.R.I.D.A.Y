@@ -80,9 +80,17 @@ function readFridayActionTrackerFromDotEnv() {
   return envBool('FRIDAY_TRACKER_ENABLED', true);
 }
 
-/** Windows OCR loop over Cursor window — optional live “thinking” speech. */
-function readCursorThinkingOcrFromDotEnv() {
+/** SAGE (Head of Research) — OCR + JSONL-gated thinking speech. */
+function readSageOcrFromDotEnv() {
+  const raw = String(process.env.FRIDAY_SAGE_ENABLED || '').trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(raw)) return true;
+  if (['0', 'false', 'no', 'off'].includes(raw)) return false;
   return envBool('FRIDAY_CURSOR_THINKING_OCR', false);
+}
+
+/** ARGUS — the all-seeing watcher. Reminds user when Claude has pending file edits. */
+function readArgusFromDotEnv() {
+  return envBool('FRIDAY_ARGUS_ENABLED', true);
 }
 
 /** Cursor JSONL → TTS: on if reply and/or thinking toggle is on, unless live narration suppresses it. */
@@ -118,7 +126,8 @@ const C = {
   agent:    '\x1b[32m',   // green
   listener: '\x1b[35m',   // magenta
   cursor:   '\x1b[95m',   // bright magenta — Composer reply TTS
-  thinkocr: '\x1b[94m',   // bright blue — Cursor window OCR thinking
+  sage:     '\x1b[94m',   // bright blue — SAGE (thinking OCR)
+  argus:    '\x1b[93m',   // bright yellow — ARGUS pending-accept watcher
   ambient:  '\x1b[96m',   // bright cyan
   music:    '\x1b[93m',   // bright yellow
   warn:     '\x1b[33m',
@@ -282,7 +291,7 @@ async function main() {
   process.stdout.write(`${C.warn}
   ╔══════════════════════════════════════════════════╗
   ║          OpenClaw  —  All Services               ║
-  ║ gateway :3848 │ agent :3847 │ mic │ Composer TTS ║
+  ║ gateway :3848 │ agent :3847 │ mic │ Jarvis + team ║
   ╚══════════════════════════════════════════════════╝
 ${C.reset}\n`);
 
@@ -319,9 +328,15 @@ ${C.reset}\n`);
   }
 
   const thinkingOcrScript = path.join(ROOT, 'scripts', 'cursor-thinking-ocr.py');
-  if (readCursorThinkingOcrFromDotEnv() && existsSync(thinkingOcrScript)) {
-    log('thinkocr', 'Cursor thinking OCR daemon will start in 1.2 s...');
-    await start('thinkocr', 'python', ['scripts/cursor-thinking-ocr.py'], { delayMs: 1200 });
+  if (readSageOcrFromDotEnv() && existsSync(thinkingOcrScript)) {
+    log('sage', 'SAGE (Head of Research) thinking OCR will start in 1.2 s...');
+    await start('sage', 'python', ['scripts/cursor-thinking-ocr.py'], { delayMs: 1200 });
+  }
+
+  const argusScript = path.join(ROOT, 'scripts', 'argus.py');
+  if (readArgusFromDotEnv() && existsSync(argusScript)) {
+    log('argus', 'ARGUS (pending-accept watcher) will start in 1.5 s...');
+    await start('argus', 'python', ['scripts/argus.py'], { delayMs: 1500 });
   }
 
   const ambientOn =

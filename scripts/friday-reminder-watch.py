@@ -24,6 +24,10 @@ import urllib.error
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
 _ENV_FILE = _REPO_ROOT / ".env"
 if _ENV_FILE.exists():
     for _line in _ENV_FILE.read_text(encoding="utf-8").splitlines():
@@ -45,13 +49,18 @@ WINDOW_SEC = max(30, int(os.environ.get("FRIDAY_REMINDER_WINDOW_SEC", "120")))
 
 def _speak(text: str) -> None:
     if not _SPEAK_SCRIPT.exists():
-        print(f"[reminder-watch] would speak: {text}", flush=True)
+        print(f"[harper] would speak: {text}", flush=True)
         return
-    env = {
-        **os.environ,
-        "FRIDAY_TTS_PRIORITY": "1",
-        "FRIDAY_TTS_BYPASS_CURSOR_DEFER": "true",
-    }
+    try:
+        from openclaw_company import friday_speak_env_for_persona
+
+        env = {**os.environ, **friday_speak_env_for_persona("harper", priority=True)}
+    except Exception:
+        env = {
+            **os.environ,
+            "FRIDAY_TTS_PRIORITY": "1",
+            "FRIDAY_TTS_BYPASS_CURSOR_DEFER": "true",
+        }
     kwargs: dict = {}
     if platform.system() == "Windows":
         kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -62,9 +71,9 @@ def _speak(text: str) -> None:
             env=env,
             **kwargs,
         )
-        print(f"[reminder-watch] spoke: {text[:120]}", flush=True)
+        print(f"[harper] spoke: {text[:120]}", flush=True)
     except Exception as exc:
-        print(f"[reminder-watch] speak failed: {exc}", file=sys.stderr)
+        print(f"[harper] speak failed: {exc}", file=sys.stderr)
 
 
 def _get_reminders() -> list[dict]:
@@ -109,21 +118,21 @@ def _check_due_reminders() -> None:
         if due <= horizon:
             title = r.get("title", "Reminder")
             due_nat = r.get("dueNatural", "")
-            text = f"Reminder: {title}."
+            text = f"Harper here, your executive assistant. Reminder: {title}."
             if due_nat:
                 text += f" This was due {due_nat}."
             _speak(text)
             _fire_reminder(r["id"])
-            print(f"[reminder-watch] fired reminder: {title}", flush=True)
+            print(f"[harper] fired reminder: {title}", flush=True)
 
 
 def main() -> None:
-    print(f"[reminder-watch] starting — polling every {POLL_SEC}s, window={WINDOW_SEC}s | {PC_AGENT_URL}", flush=True)
+    print(f"[harper] Harper (Executive Assistant) starting — poll every {POLL_SEC}s | {PC_AGENT_URL}", flush=True)
     while True:
         try:
             _check_due_reminders()
         except KeyboardInterrupt:
-            print("[reminder-watch] stopped.", flush=True)
+            print("[harper] stopped.", flush=True)
             sys.exit(0)
         except Exception as exc:
             print(f"[reminder-watch] error: {exc}", file=sys.stderr)

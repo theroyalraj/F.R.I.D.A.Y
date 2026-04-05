@@ -4,6 +4,10 @@
  * Reminder routes are registered BEFORE /:id so PATCH /reminders/... is not captured as :id.
  */
 
+import path from 'node:path';
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { spawn } from 'node:child_process';
 import express from 'express';
 import {
   getTodos,
@@ -16,6 +20,62 @@ import {
   deleteReminder,
 } from './todosDb.js';
 import { markLinkedActionItemsDone, actionItemsDbAvailable } from './actionItemsDb.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const SPEAK_SCRIPT = path.resolve(__dirname, '../../skill-gateway/scripts/friday-speak.py');
+
+const PRIORITY_ORDER = { high: 0, medium: 1, low: 2 };
+
+function buildRemindText(todos, userName) {
+  const name = (userName || '').trim();
+  const undone = todos.filter((t) => !t.done);
+  if (!undone.length) {
+    return name ? `All clear, ${name} — no pending tasks right now.` : 'All clear — no pending tasks right now.';
+  }
+  undone.sort((a, b) => (PRIORITY_ORDER[a.priority] ?? 1) - (PRIORITY_ORDER[b.priority] ?? 1));
+  const groups = { high: [], medium: [], low: [] };
+  for (const t of undone) {
+    const p = ['high', 'medium', 'low'].includes(t.priority) ? t.priority : 'medium';
+    groups[p].push(t.title);
+  }
+  const parts = [];
+  const intro = name
+    ? `${name}, you have ${undone.length} task${undone.length === 1 ? '' : 's'} pending.`
+    : `You have ${undone.length} task${undone.length === 1 ? '' : 's'} pending.`;
+  parts.push(intro);
+  if (groups.high.length) {
+    parts.push(`High priority: ${groups.high.join(', ')}.`);
+  }
+  if (groups.medium.length) {
+    parts.push(`Medium priority: ${groups.medium.join(', ')}.`);
+  }
+  if (groups.low.length) {
+    parts.push(`Low priority: ${groups.low.join(', ')}.`);
+  }
+  return parts.join(' ');
+}
+
+function spawnRemindSpeak(text, log) {
+  if (!existsSync(SPEAK_SCRIPT)) {
+    log?.warn('remind: friday-speak.py not found — skipping TTS');
+    return;
+  }
+  const child = spawn('python', [SPEAK_SCRIPT, text], {
+    env: {
+      ...process.env,
+      FRIDAY_TTS_PRIORITY: '1',
+      FRIDAY_TTS_BYPASS_CURSOR_DEFER: 'true',
+    },
+    detached: true,
+    stdio: ['ignore', 'ignore', 'pipe'],
+    windowsHide: true,
+  });
+  child.stderr?.on('data', (buf) => {
+    const line = buf.toString().trim();
+    if (line) log?.warn({ fridaySpeak: line }, 'todos/remind speak stderr');
+  });
+  child.unref();
+}
 
 export function createTodosRouter(broadcastFn) {
   const router = express.Router();
@@ -69,6 +129,44 @@ export function createTodosRouter(broadcastFn) {
       if (!deleted) return res.status(404).json({ error: 'Reminder not found' });
       broadcast('reminder_deleted', { id });
       res.json({ ok: true, id });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  // ── Remind (highest-priority TTS announcement) ────────────────────────────
+  // POST /todos/remind   — speaks all pending todos ordered high → medium → low.
+  // Optional body: { "limit": 10 }  (default: all undone tasks)
+  // Optional body: { "priority": "high" }  (filter to a single priority tier)
+  // No auth required — same open policy as the rest of /todos.
+
+  router.post('/remind', async (req, res, next) => {
+    try {
+      const limitRaw = parseInt(req.body?.limit ?? '0', 10);
+      const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 0;
+      const priorityFilter = typeof req.body?.priority === 'string' ? req.body.priority.toLowerCase() : null;
+
+      let todos = await getTodos();
+
+      if (priorityFilter && ['high', 'medium', 'low'].includes(priorityFilter)) {
+        todos = todos.filter((t) => t.priority === priorityFilter);
+      }
+
+      const undone = todos.filter((t) => !t.done);
+      undone.sort((a, b) => (PRIORITY_ORDER[a.priority] ?? 1) - (PRIORITY_ORDER[b.priority] ?? 1));
+      const subset = limit ? undone.slice(0, limit) : undone;
+
+      const userName = process.env.FRIDAY_USER_NAME || '';
+      const text = buildRemindText(subset.length ? subset : [], userName);
+
+      spawnRemindSpeak(text, req.log);
+
+      res.json({
+        ok: true,
+        spoken: text,
+        count: subset.length,
+        todos: subset,
+      });
     } catch (e) {
       next(e);
     }

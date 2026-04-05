@@ -14,6 +14,8 @@ Temp files (%TEMP%):
   friday-tts-active, friday-thinking-singleton, friday-tts-generation,
   friday-play.pid, friday-play-session.start, friday-ambient-speaking.txt
 
+  --music-only   only friday-play / music Redis keys + play pid files (does not clear TTS locks)
+
 Exit 0 always; prints what it did. Redis errors are non-fatal (stderr one line).
 """
 
@@ -38,7 +40,7 @@ if _ENV.exists():
         if k and k not in os.environ:
             os.environ[k] = v
 
-REDIS_KEYS = (
+REDIS_KEYS_FULL = (
     "friday:music:active",
     "friday:tts:lock",
     "friday:tts:generation",
@@ -47,13 +49,23 @@ REDIS_KEYS = (
     "friday:now_playing",
 )
 
-TEMP_FILES = (
+REDIS_KEYS_MUSIC_ONLY = (
+    "friday:music:active",
+    "friday:now_playing",
+)
+
+TEMP_FILES_FULL = (
     "friday-tts-active",
     "friday-thinking-singleton",
     "friday-tts-generation",
     "friday-play.pid",
     "friday-play-session.start",
     "friday-ambient-speaking.txt",
+)
+
+TEMP_FILES_MUSIC_ONLY = (
+    "friday-play.pid",
+    "friday-play-session.start",
 )
 
 
@@ -66,8 +78,14 @@ def _redis_url() -> str:
 
 
 def main() -> int:
+    music_only = "--music-only" in sys.argv
+    redis_keys = REDIS_KEYS_MUSIC_ONLY if music_only else REDIS_KEYS_FULL
+    temp_names = TEMP_FILES_MUSIC_ONLY if music_only else TEMP_FILES_FULL
+    if music_only:
+        print("[clear-friday-locks] mode=music-only (TTS locks left intact)", flush=True)
+
     td = Path(tempfile.gettempdir())
-    for name in TEMP_FILES:
+    for name in temp_names:
         p = td / name
         try:
             if p.exists():
@@ -82,7 +100,7 @@ def main() -> int:
 
         r = redis.Redis.from_url(url, decode_responses=True)
         r.ping()
-        for k in REDIS_KEYS:
+        for k in redis_keys:
             n = r.delete(k)
             if n:
                 print(f"[clear-friday-locks] Redis DEL {k}", flush=True)

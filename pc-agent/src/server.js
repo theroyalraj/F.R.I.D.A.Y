@@ -30,6 +30,7 @@ import { createTodosRouter } from './todosRoutes.js';
 import { createActionItemsRouter } from './actionItemsRoutes.js';
 import { perceptionDbConfigured, perceptionDbHealth } from './perceptionDb.js';
 import { loadOpenclawUserConfig } from './userConfig.js';
+import { getSpeakStyle, setSpeakStyle, buildSpeakStyleInstruction } from './speakStyle.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, '../public');
@@ -134,8 +135,6 @@ function speakStartup() {
       FRIDAY_TTS_VOICE:  process.env.FRIDAY_TTS_VOICE  || 'en-US-EmmaMultilingualNeural',
       FRIDAY_TTS_DEVICE: process.env.FRIDAY_TTS_DEVICE || 'default',
       FRIDAY_TTS_BYPASS_CURSOR_DEFER: 'true',
-      // Priority clears any stale TTS file/Redis lock left over from a previous process
-      // that was killed mid-speech (e.g. during server restart) — guarantees audio works immediately.
       FRIDAY_TTS_PRIORITY: '1',
       ...delivery,
     },
@@ -258,6 +257,7 @@ function sendVoicePing(_req, res) {
       tts: {
         provider,
         endpoint: '/voice/tts',
+        speakStyle: '/voice/speak-style',
         piper: piperConfigured(),
         edge: edgeTtsConfigured(),
         openai: openAiTtsConfigured(),
@@ -296,7 +296,6 @@ voiceRouter.post('/speak-async', (req, res) => {
     return res.status(503).json({ error: 'friday-speak.py not found', hint: 'Install skill-gateway scripts.' });
   }
 
-  // Fire-and-forget: spawn async, return immediately
   const delivery = greetingTtsRatePitch();
   const child = spawn('python', [SPEAK_SCRIPT, text], {
     env: {
@@ -304,7 +303,6 @@ voiceRouter.post('/speak-async', (req, res) => {
       FRIDAY_TTS_VOICE:  process.env.FRIDAY_TTS_VOICE  || 'en-US-EmmaMultilingualNeural',
       FRIDAY_TTS_DEVICE: process.env.FRIDAY_TTS_DEVICE || 'default',
       FRIDAY_TTS_PRIORITY: '1',
-      // Always audible: listen UI and integrations use this for assistant replies (Cursor focus must not mute).
       FRIDAY_TTS_BYPASS_CURSOR_DEFER: 'true',
       ...delivery,
     },
@@ -313,7 +311,6 @@ voiceRouter.post('/speak-async', (req, res) => {
     windowsHide: true,
   });
 
-  // Log errors but don't block response
   child.stderr?.on('data', (buf) => {
     const line = buf.toString().trim();
     if (line) req.log?.warn({ fridaySpeak: line }, '/voice/speak-async stderr');
@@ -469,6 +466,55 @@ voiceRouter.post('/set-voice', (req, res) => {
   res.json({ ok: true, active });
 });
 
+/** Global speak mood toggles + custom prompt (Redis). */
+voiceRouter.get('/speak-style', async (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    const style = await getSpeakStyle();
+    res.json({
+      ok: true,
+      style,
+      promptPreview: buildSpeakStyleInstruction(style) || null,
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: String(err.message || err) });
+  }
+});
+
+voiceRouter.post('/speak-style', async (req, res) => {
+  try {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const allowed = ['funny', 'snarky', 'bored', 'dry', 'warm', 'customPrompt'];
+    const patch = {};
+    for (const k of allowed) {
+      if (Object.prototype.hasOwnProperty.call(body, k)) {
+        if (k === 'customPrompt') {
+          patch[k] = typeof body[k] === 'string' ? body[k] : '';
+        } else {
+          patch[k] = Boolean(body[k]);
+        }
+      }
+    }
+    if (Object.keys(patch).length === 0) {
+      return res.status(400).json({
+        error: 'No valid fields. Send { funny, snarky, bored, dry, warm, customPrompt }.',
+      });
+    }
+    const style = await setSpeakStyle(patch);
+    broadcastEvent('speak_style_changed', { style });
+    res.json({
+      ok: true,
+      style,
+      promptPreview: buildSpeakStyleInstruction(style) || null,
+    });
+  } catch (err) {
+    if (err.code === 'REDIS_DOWN') {
+      return res.status(503).json({ ok: false, error: String(err.message || err) });
+    }
+    res.status(500).json({ ok: false, error: String(err.message || err) });
+  }
+});
+
 app.use('/voice', voiceRouter);
 
 app.get('/health', async (_req, res) => {
@@ -520,14 +566,10 @@ app.get('/friday/listen', (_req, res) => {
   }
 });
 
-// Serve React app assets from dist/ if available
-app.get('/listen*', (req, res, next) => {
-  const assetPath = path.join(reactDistDir, req.path);
-  if (existsSync(assetPath) && !assetPath.includes('listen.html')) {
-    return res.sendFile(assetPath);
-  }
-  next();
-});
+// Serve React app static assets (JS, CSS, etc.) from dist/
+if (existsSync(reactDistDir)) {
+  app.use(express.static(reactDistDir, { index: false }));
+}
 
 app.get('/jarvis', (_req, res) => {
   res.redirect(302, '/friday');

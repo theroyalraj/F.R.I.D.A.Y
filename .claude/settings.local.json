@@ -102,7 +102,22 @@
       "Bash(npm run:*)",
       "Bash(grep -l \"friday-speak\\\\|FRIDAY_TTS\\\\|voice\\\\|speak\\\\|narrat\\\\|audio\" /d/code/openclaw/.cursor/rules/*.mdc)",
       "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://127.0.0.1:3847/friday/listen)",
-      "Bash(npx tsc:*)"
+      "Bash(npx tsc:*)",
+      "Bash(npx vite:*)",
+      "Bash(powershell -Command \"Get-CimInstance Win32_Process -Filter \"\"Name=''''node.exe''''\"\" | Select-Object ProcessId, CommandLine | Format-Table -AutoSize -Wrap\")",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://127.0.0.1:3847/listen.js)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://127.0.0.1:3847/health)",
+      "Bash(curl -s -o /dev/null -w \"HTTP %{http_code} - %{size_download} bytes\" http://127.0.0.1:3847/index.css)",
+      "Bash(powershell -Command \"Get-CimInstance Win32_Process -Filter \"\"Name=''node.exe''\"\" | Where-Object { $_.CommandLine -match ''pc-agent'' } | Select-Object ProcessId, CommandLine\")",
+      "Bash(taskkill //PID 62844 //F)",
+      "Bash(powershell -Command \"Get-CimInstance Win32_Process -Filter \"\"Name=''node.exe''\"\" | Where-Object { $_.CommandLine -match ''pc-agent'' } | Select-Object ProcessId\")",
+      "Bash(curl -s http://127.0.0.1:3847/voice/voices)",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); [print\\(f''''{v[voice]}: label={v.get\\(label,NONE\\)}''''\\) for v in d[''''voices''''][:3]]\")",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(json.dumps\\(d[''''voices''''][0], indent=2\\)\\)\")",
+      "Bash(curl -s http://127.0.0.1:3847/voice/status)",
+      "Bash(python -c \"import sys,json; print\\(json.dumps\\(json.load\\(sys.stdin\\), indent=2\\)\\)\")",
+      "Bash(curl -s -X POST http://127.0.0.1:3847/voice/set-voice -H \"Content-Type: application/json\" -d '{\"\"voice\"\":\"\"en-US-EmmaMultilingualNeural\"\"}')",
+      "Bash(grep -rn \"upload\\\\|file\\\\|multipart\\\\|FormData\" D:/code/openclaw/pc-agent/src --include=*.js)"
     ]
   }
 }

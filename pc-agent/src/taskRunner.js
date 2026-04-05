@@ -4,9 +4,15 @@ import { runClaude } from './claude.js';
 import { callClaudeApi, isApiKeyAvailable } from './claudeApi.js';
 import { inferClaudeModelForTask, isAutoModelEnabled } from './claudeRouter.js';
 import { sanitizeClaudeModel } from './claudeModel.js';
+import { getSpeakStyle, buildSpeakStyleInstruction } from './speakStyle.js';
 
 // Sources that need fast conversational responses — use direct API, not CLI
-const FAST_SOURCES = new Set(['mic-daemon', 'voice', 'friday-mic-daemon', 'whatsapp']);
+const FAST_SOURCES = new Set(['mic-daemon', 'voice', 'friday-mic-daemon', 'whatsapp', 'ui']);
+
+function shouldApplySpeakStyle(source, replyChannel) {
+  if (replyChannel === 'alexa' || replyChannel === 'voice') return true;
+  return FAST_SOURCES.has(String(source || '').toLowerCase());
+}
 
 /**
  * Shared command path for Alexa→N8N→/task and Jarvis voice UI→/voice/command.
@@ -105,6 +111,16 @@ export async function runTask(body, reqLog, options = {}) {
     return { status: 400, json: { error: 'Missing text' } };
   }
 
+  let speakStyleExtra = '';
+  if (shouldApplySpeakStyle(src, replyChannel)) {
+    try {
+      const st = await getSpeakStyle();
+      speakStyleExtra = buildSpeakStyleInstruction(st);
+    } catch {
+      /* ignore */
+    }
+  }
+
   if (!claudeModel && isAutoModelEnabled()) {
     const inferred = inferClaudeModelForTask(t);
     if (inferred) {
@@ -128,6 +144,7 @@ export async function runTask(body, reqLog, options = {}) {
         model:     apiModel,
         timeoutMs: apiTimeoutMs,
         log:       reqLog,
+        speakStyleExtra,
       });
       reqLog.info({ mode: 'api', ok: result.ok, ms: result.ms, model: result.model }, 'task done');
       return {
@@ -144,7 +161,7 @@ export async function runTask(body, reqLog, options = {}) {
     { mode: 'cli', timeoutMs: TIMEOUT, claudeModel: claudeModel || undefined, replyChannel },
     'invoking claude cli',
   );
-  const claude = await runClaude(t, TIMEOUT, { claudeModel, replyChannel });
+  const claude = await runClaude(t, TIMEOUT, { claudeModel, replyChannel, speakStyleExtra });
   const summary = claude.out || claude.err || 'No output';
   reqLog.info(
     {

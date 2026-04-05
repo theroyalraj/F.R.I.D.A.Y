@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-friday-action-tracker.py — Cross-channel action tracker: Gmail + WhatsApp (Evolution),
-Claude extraction, Postgres dedup, friendly spoken reminders on a fixed interval.
+friday-action-tracker.py — **DEXTER** (Lead Engineer): cross-channel action tracker
+(Gmail + WhatsApp via Evolution), Claude extraction, Postgres dedup, spoken briefings on a fixed interval.
 
 Env (see .env):
   FRIDAY_TRACKER_ENABLED       master switch (default true when script runs)
@@ -19,6 +19,16 @@ Env (see .env):
 CLI:
   python scripts/friday-action-tracker.py --once              one cycle then exit
   python scripts/friday-action-tracker.py --once --skip-ingestion   only check-in + briefing (no Gmail/WhatsApp fetch)
+  python scripts/friday-action-tracker.py --once --skip-ingestion --gateway-cron
+      spoken briefing only — no mic prompt (treat as yes); for skill-gateway node-cron
+
+Env (briefing / cron):
+  FRIDAY_TRACKER_RUN_BRIEFING_IN_LOOP   default true — set false when skill-gateway runs FRIDAY_BRIEFING_GATEWAY_CRON
+  FRIDAY_BRIEFING_GATEWAY_CRON          set in .env for gateway (see skill-gateway briefingCron.js)
+  FRIDAY_BRIEFING_CRON_EXPR             default */15 * * * * (every fifteen minutes)
+  FRIDAY_BRIEFING_GIT_COMMITS           how many git log lines (default 10)
+  FRIDAY_BRIEFING_DONE_TODOS            max completed todos to mention (default 12)
+  FRIDAY_TRACKER_SILENT_DEFAULT        no | yes — when mic silence / STT fail (default no: skip briefing)
 """
 from __future__ import annotations
 
@@ -57,6 +67,9 @@ if _ENV_FILE.exists():
             os.environ[_k] = _v
 
 _SPEAK_SCRIPT = _REPO_ROOT / "skill-gateway" / "scripts" / "friday-speak.py"
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
 
 try:
     import psycopg2
@@ -90,7 +103,10 @@ def _env_float(key: str, default: float) -> float:
 
 
 TRACKER_ON = _env_bool("FRIDAY_TRACKER_ENABLED", True)
+RUN_BRIEFING_IN_LOOP = _env_bool("FRIDAY_TRACKER_RUN_BRIEFING_IN_LOOP", True)
 POLL_SEC = max(60, _env_int("FRIDAY_TRACKER_POLL_SEC", 900))
+GIT_COMMITS_N = max(0, min(30, _env_int("FRIDAY_BRIEFING_GIT_COMMITS", 10)))
+DONE_TODOS_N = max(0, min(30, _env_int("FRIDAY_BRIEFING_DONE_TODOS", 12)))
 MODEL = os.environ.get("FRIDAY_TRACKER_MODEL", "claude-haiku-4-5").strip()
 MAX_BATCH = max(1, min(25, _env_int("FRIDAY_TRACKER_MAX_BATCH", 10)))
 LOOKBACK_DAYS = max(1, _env_int("FRIDAY_TRACKER_GMAIL_LOOKBACK_DAYS", 3))
@@ -142,10 +158,16 @@ def _wait_for_tts_clear(timeout: float = 30.0) -> None:
         time.sleep(0.2)
 
 
+def _tracker_silent_default() -> str:
+    """When the user says nothing or the mic chain fails — default briefing on or off."""
+    raw = os.environ.get("FRIDAY_TRACKER_SILENT_DEFAULT", "no").strip().lower()
+    return "no" if raw in ("no", "n", "false", "0", "off") else "yes"
+
+
 def _interpret_yes_no(transcript: str | None) -> str:
-    """Return 'yes' or 'no'. Unknown / empty / mic failure callers should use 'yes' (user default)."""
-    if not transcript:
-        return "yes"
+    """Return 'yes' or 'no' from spoken text. Empty transcript uses FRIDAY_TRACKER_SILENT_DEFAULT."""
+    if not transcript or not str(transcript).strip():
+        return _tracker_silent_default()
     t = transcript.lower().strip()
     yes_w = (
         "yes",
@@ -172,7 +194,7 @@ def _interpret_yes_no(transcript: str | None) -> str:
         return "no"
     if t in ("y",):
         return "yes"
-    return "yes"
+    return _tracker_silent_default()
 
 
 def _numpy_to_audio_data(audio_int16, sr_recognizer) -> object:
@@ -266,15 +288,20 @@ def _mic_index() -> int | None:
         return None
 
 
-def _prompt_listen_yes_no() -> str:
-    """Speak check-in question, listen for yes or no. Mic or STT failure → yes."""
+def _prompt_listen_yes_no() -> tuple[str, str]:
+    """Speak check-in question, listen for yes or no.
+
+    Returns (answer, meta): answer is yes|no; meta is heard_yes|heard_no|silent|error
+    (silent/error use FRIDAY_TRACKER_SILENT_DEFAULT for answer).
+    """
     os.environ["FRIDAY_DEFER_WHEN_CURSOR"] = "false"
+    d = _tracker_silent_default()
     _ensure_speaker_path()
     try:
         from friday_speaker import speaker
     except ImportError:
-        _log.warning("friday_speaker missing → default yes")
-        return "yes"
+        _log.warning("friday_speaker missing → silent default %s", d)
+        return (d, "error")
 
     custom = (os.environ.get("FRIDAY_TRACKER_CHECKIN_PROMPT") or "").strip()
     n = int(round(TRACKER_LISTEN_SEC))
@@ -283,7 +310,8 @@ def _prompt_listen_yes_no() -> str:
     else:
         prompt = (
             f"Hey {USER_NAME}, time for your fifteen-minute check-in. "
-            f"Want me to read your action plan for today? Say yes or no — I am listening for about {n} seconds."
+            f"Want me to read your action plan for today? Say yes or no — I am listening for about {n} seconds. "
+            f"If you say nothing, I will assume you are busy and skip it."
         )
 
     _wait_for_tts_clear(45.0)
@@ -297,8 +325,8 @@ def _prompt_listen_yes_no() -> str:
             timeout=120.0,
         )
     except Exception as e:
-        _log.warning("Check-in speak failed: %s → default yes", e)
-        return "yes"
+        _log.warning("Check-in speak failed: %s → silent default %s", e, d)
+        return (d, "error")
     time.sleep(0.35)
     _wait_for_tts_clear(20.0)
 
@@ -307,13 +335,13 @@ def _prompt_listen_yes_no() -> str:
         import sounddevice as sd  # noqa: F401
         import speech_recognition as sr
     except ImportError:
-        _log.warning("Listen deps missing (numpy, sounddevice, SpeechRecognition) → default yes")
-        return "yes"
+        _log.warning("Listen deps missing (numpy, sounddevice, SpeechRecognition) → silent default %s", d)
+        return (d, "error")
 
     audio = _record_after_tracker_prompt(_mic_index())
     if audio is None:
-        _log.info("No speech in listen window → default yes")
-        return "yes"
+        _log.info("No speech in listen window → silent default %s", d)
+        return (d, "silent")
 
     recognizer = sr.Recognizer()
     try:
@@ -321,15 +349,59 @@ def _prompt_listen_yes_no() -> str:
         lang = os.environ.get("LISTEN_LANGUAGE", "en-US")
         text = recognizer.recognize_google(audio_data, language=lang)
     except sr.UnknownValueError:
-        _log.info("Could not understand reply → default yes")
-        return "yes"
+        _log.info("Could not understand reply → silent default %s", d)
+        return (d, "silent")
     except sr.RequestError as e:
-        _log.warning("STT error %s → default yes", e)
-        return "yes"
+        _log.warning("STT error %s → silent default %s", e, d)
+        return (d, "error")
 
     text = (text or "").strip()
     _log.info("Heard: %s", text[:120])
-    return _interpret_yes_no(text)
+    ans = _interpret_yes_no(text)
+    return (ans, "heard_yes" if ans == "yes" else "heard_no")
+
+
+def _git_recent_commit_summaries() -> list[str]:
+    """One line per commit: short hash + subject (for TTS when no open work)."""
+    if GIT_COMMITS_N <= 0:
+        return []
+    try:
+        p = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(_REPO_ROOT),
+                "log",
+                f"-n{GIT_COMMITS_N}",
+                "--pretty=format:%h %s",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        if p.returncode != 0:
+            return []
+        return [ln.strip() for ln in (p.stdout or "").splitlines() if ln.strip()]
+    except Exception as e:
+        _log.debug("git log failed: %s", e)
+        return []
+
+
+def _fetch_done_todos_recent(conn) -> list[dict]:
+    if DONE_TODOS_N <= 0:
+        return []
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT id, title, detail, source, updated_at
+            FROM todos
+            WHERE done
+            ORDER BY updated_at DESC NULLS LAST, created_at DESC
+            LIMIT %s
+            """,
+            (DONE_TODOS_N,),
+        )
+        return [dict(r) for r in cur.fetchall()]
 
 
 def _fetch_briefing_payload(conn) -> tuple[list[dict], list[dict]]:
@@ -370,27 +442,79 @@ def _local_today_context() -> str:
         return datetime.utcnow().strftime("%Y-%m-%d UTC")
 
 
-def _briefing_template_plain(actions: list[dict], todos: list[dict]) -> str:
+def _briefing_template_plain(
+    actions: list[dict],
+    todos: list[dict],
+    *,
+    commits: list[str] | None = None,
+    done_todos: list[dict] | None = None,
+) -> str:
+    commits = commits or []
+    done_todos = done_todos or []
     if not actions and not todos:
+        parts: list[str] = []
+        if done_todos:
+            titles = [t.get("title", "") for t in done_todos[:DONE_TODOS_N] if t.get("title")]
+            if titles:
+                parts.append(
+                    f"{USER_NAME}, no open todos right now. Recently finished: " + "; ".join(titles)
+                )
+        if commits:
+            # Speak subjects only — shorten for ear
+            spoken = []
+            for c in commits[:8]:
+                if " " in c:
+                    spoken.append(c.split(" ", 1)[1][:80])
+                else:
+                    spoken.append(c[:80])
+            if spoken:
+                parts.append("Recent commits in the repo: " + "; ".join(spoken))
+        if parts:
+            return " ".join(parts)
         return (
             f"{USER_NAME}, you are all clear — no pending action items and no open todos on the list for today. "
             f"Nice one."
         )
-    parts = [f"{USER_NAME}, here is your plan for today."]
+    parts2 = [f"{USER_NAME}, here is your plan for today."]
     if actions:
-        parts.append(
+        parts2.append(
             "Pending actions: " + "; ".join(a.get("title", "") for a in actions[:12] if a.get("title"))
         )
     if todos:
-        parts.append("Open todos: " + "; ".join(t.get("title", "") for t in todos[:12] if t.get("title")))
-    return " ".join(parts)
+        parts2.append("Open todos: " + "; ".join(t.get("title", "") for t in todos[:12] if t.get("title")))
+    return " ".join(parts2)
 
 
-def _briefing_spoken_text(actions: list[dict], todos: list[dict]) -> str:
+def _briefing_spoken_text(
+    actions: list[dict],
+    todos: list[dict],
+    *,
+    commits: list[str] | None = None,
+    done_todos: list[dict] | None = None,
+) -> str:
+    commits = commits or []
+    done_todos = done_todos or []
     if not actions and not todos:
-        return _briefing_template_plain([], [])
+        if not ANTHROPIC_KEY:
+            return _briefing_template_plain([], [], commits=commits, done_todos=done_todos)
+        today = _local_today_context()
+        system = f"""You are Friday, {USER_NAME}'s assistant. Output ONE short paragraph for text-to-speech only.
+Rules: no markdown, no bullets, no symbols that sound wrong spoken. Spell out small numbers.
+Today is {today}. They have no pending actions and no open todos. Summarize recent progress: completed todos and git commits.
+Sound encouraging. Keep under six sentences."""
+        payload = {
+            "recently_completed_todos": [
+                {"title": t.get("title"), "detail": (t.get("detail") or "")[:120]} for t in done_todos
+            ],
+            "recent_git_commits_one_line_each": commits,
+        }
+        user = json.dumps(payload, ensure_ascii=False)
+        raw = _call_claude(system, user, max_tokens=500)
+        if not raw:
+            return _briefing_template_plain([], [], commits=commits, done_todos=done_todos)
+        return raw.replace("*", "").replace("#", "").strip()
     if not ANTHROPIC_KEY:
-        return _briefing_template_plain(actions, todos)
+        return _briefing_template_plain(actions, todos, commits=commits, done_todos=done_todos)
 
     today = _local_today_context()
     system = f"""You are Friday, {USER_NAME}'s assistant. Output ONE short paragraph for text-to-speech only.
@@ -416,7 +540,7 @@ Keep under eight sentences unless the list is huge — then hit the top prioriti
     user = json.dumps(payload, ensure_ascii=False)
     raw = _call_claude(system, user, max_tokens=700)
     if not raw:
-        return _briefing_template_plain(actions, todos)
+        return _briefing_template_plain(actions, todos, commits=commits, done_todos=done_todos)
     return raw.replace("*", "").replace("#", "").strip()
 
 
@@ -661,9 +785,14 @@ Existing open action titles (do not duplicate):
 
 def _speak(text: str) -> None:
     if not text or not _SPEAK_SCRIPT.exists():
-        print(f"[action-tracker] would speak: {text[:120]}", flush=True)
+        print(f"[dexter] would speak: {text[:120]}", flush=True)
         return
-    env = {**os.environ, "FRIDAY_TTS_PRIORITY": "1", "FRIDAY_TTS_BYPASS_CURSOR_DEFER": "true"}
+    try:
+        from openclaw_company import friday_speak_env_for_persona
+
+        env = {**os.environ, **friday_speak_env_for_persona("dexter", priority=True)}
+    except Exception:
+        env = {**os.environ, "FRIDAY_TTS_PRIORITY": "1", "FRIDAY_TTS_BYPASS_CURSOR_DEFER": "true"}
     kwargs: dict = {}
     if platform.system() == "Windows":
         kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -675,7 +804,7 @@ def _speak(text: str) -> None:
             **kwargs,
         )
     except Exception as e:
-        print(f"[action-tracker] speak failed: {e}", file=sys.stderr)
+        print(f"[dexter] speak failed: {e}", file=sys.stderr)
 
 
 def _speak_blocking_tracker(text: str, *, timeout: float = 120.0) -> None:
@@ -685,13 +814,23 @@ def _speak_blocking_tracker(text: str, *, timeout: float = 120.0) -> None:
     _ensure_speaker_path()
     try:
         from friday_speaker import speaker as _spk
+        try:
+            from openclaw_company import get_persona
+
+            _dx = get_persona("dexter")
+            _dv = (_dx.get("voice") or "").strip() or None
+            _dr = (_dx.get("rate") or "").strip() or None
+        except Exception:
+            _dv, _dr = None, None
 
         _spk.speak_blocking(
             text,
             priority=True,
             bypass_cursor_defer=True,
             interrupt_music=True,
-            use_session_sticky=True,
+            use_session_sticky=False if _dv else True,
+            voice=_dv,
+            rate=_dr,
             timeout=timeout,
         )
     except Exception as e:
@@ -937,23 +1076,40 @@ def run_ingestion_cycle(conn) -> int:
     return inserted
 
 
-def run_briefing_cycle(conn) -> None:
-    """Every poll: ask (spoken) whether to hear today's plan; listen for yes or no; default yes if listen fails."""
+def run_briefing_cycle(conn, *, gateway_cron: bool = False) -> None:
+    """Ask yes/no unless gateway_cron; FRIDAY_TRACKER_SILENT_DEFAULT when mic fails; witty asides on skip."""
+    try:
+        from friday_vocal_asides import pick_tracker_silent_default_no, pick_tracker_user_said_no
+    except ImportError:
+
+        def pick_tracker_user_said_no() -> str:
+            return f"No problem, {USER_NAME}. Skipping this check-in."
+
+        def pick_tracker_silent_default_no() -> str:
+            return f"Did not hear you — skipping the rundown, {USER_NAME}."
+
     if _quiet_now():
         print("[action-tracker] quiet hours — skipping check-in", flush=True)
         return
 
-    answer = _prompt_listen_yes_no()
+    meta = "cron"
+    if gateway_cron:
+        answer = "yes"
+        print("[action-tracker] gateway-cron — skipping mic prompt", flush=True)
+    else:
+        answer, meta = _prompt_listen_yes_no()
     if answer == "no":
-        _speak_blocking_tracker(
-            f"No problem, {USER_NAME}. Skipping this check-in. I will ask again next round.",
-            timeout=90.0,
-        )
-        print("[action-tracker] user declined check-in", flush=True)
+        line = pick_tracker_user_said_no() if meta == "heard_no" else pick_tracker_silent_default_no()
+        _speak_blocking_tracker(line, timeout=90.0)
+        print(f"[action-tracker] check-in skipped (meta={meta})", flush=True)
         return
 
     actions, todos = _fetch_briefing_payload(conn)
-    speech = _briefing_spoken_text(actions, todos)
+    done_recent = _fetch_done_todos_recent(conn)
+    commits = _git_recent_commit_summaries()
+    speech = _briefing_spoken_text(
+        actions, todos, commits=commits, done_todos=done_recent
+    )
     _speak_blocking_tracker(speech, timeout=300.0)
     _whatsapp_text(speech)
     ids = [str(a["id"]) for a in actions]
@@ -967,6 +1123,10 @@ def run_briefing_cycle(conn) -> None:
 def main() -> None:
     once = "--once" in sys.argv
     skip_ingestion = "--skip-ingestion" in sys.argv
+    gateway_cron = "--gateway-cron" in sys.argv
+    if gateway_cron and not once:
+        print("[action-tracker] --gateway-cron only works with --once", file=sys.stderr)
+        sys.exit(2)
     if skip_ingestion and not once:
         print("[action-tracker] --skip-ingestion only works with --once", file=sys.stderr)
         sys.exit(2)
@@ -984,7 +1144,8 @@ def main() -> None:
     if once:
         print(
             "[action-tracker] --once: single cycle"
-            + (" (briefing only)" if skip_ingestion else " (ingestion + check-in)"),
+            + (" (briefing only)" if skip_ingestion else " (ingestion + check-in)")
+            + (" [gateway-cron]" if gateway_cron else ""),
             flush=True,
         )
     else:
@@ -998,7 +1159,8 @@ def main() -> None:
             try:
                 if not skip_ingestion:
                     run_ingestion_cycle(conn)
-                run_briefing_cycle(conn)
+                if RUN_BRIEFING_IN_LOOP or once:
+                    run_briefing_cycle(conn, gateway_cron=gateway_cron and once)
             finally:
                 conn.close()
         except KeyboardInterrupt:

@@ -9,8 +9,21 @@ export default defineConfig({
     port: 5173,
     open: false,
     proxy: {
-      '/voice': 'http://127.0.0.1:3847',
-      '/health': 'http://127.0.0.1:3847',
+      '/voice': {
+        target: 'http://127.0.0.1:3847',
+        changeOrigin: true,
+        configure: (proxy) => {
+          // ECONNRESET on SSE streams is expected when pc-agent restarts; suppress the noise.
+          proxy.on('error', (err: NodeJS.ErrnoException) => {
+            if (err.code === 'ECONNRESET' || err.code === 'ECONNREFUSED') return;
+            console.error('[proxy error]', err.message);
+          });
+        },
+      },
+      '/health': {
+        target: 'http://127.0.0.1:3847',
+        changeOrigin: true,
+      },
     },
   },
   build: {

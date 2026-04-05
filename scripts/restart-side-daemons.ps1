@@ -8,6 +8,26 @@ $ErrorActionPreference = 'Continue'
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $root
 
+function Get-SageOcrFromDotEnv {
+  $p = Join-Path $root '.env'
+  if (-not (Test-Path $p)) { return $false }
+  $rawSage = ''
+  $rawOcr = ''
+  foreach ($line in Get-Content -LiteralPath $p -Encoding utf8) {
+    $t = $line.Trim()
+    if ($t -match '^\s*#' -or $t -eq '') { continue }
+    $eq = $t.IndexOf('=')
+    if ($eq -lt 1) { continue }
+    $k = $t.Substring(0, $eq).Trim()
+    $v = $t.Substring($eq + 1).Split('#')[0].Trim().Trim('"').Trim("'").ToLowerInvariant()
+    if ($k -eq 'FRIDAY_SAGE_ENABLED') { $rawSage = $v }
+    if ($k -eq 'FRIDAY_CURSOR_THINKING_OCR') { $rawOcr = $v }
+  }
+  if (@('1', 'true', 'yes', 'on') -contains $rawSage) { return $true }
+  if (@('0', 'false', 'no', 'off') -contains $rawSage) { return $false }
+  return @('1', 'true', 'yes', 'on') -contains $rawOcr
+}
+
 function Get-DotEnvBool([string] $key, [bool] $default) {
   $p = Join-Path $root '.env'
   if (-not (Test-Path $p)) { return $default }
@@ -48,7 +68,7 @@ Stop-PythonDaemon 'gmail-watch'           '*gmail-watch*'
 Stop-PythonDaemon 'friday-action-tracker' '*friday-action-tracker*'
 Stop-PythonDaemon 'friday-reminder-watch' '*friday-reminder-watch*'
 Stop-PythonDaemon 'cursor-reply-watch'    '*cursor-reply-watch*'
-Stop-PythonDaemon 'cursor-thinking-ocr'   '*cursor-thinking-ocr*'
+Stop-PythonDaemon 'sage (cursor-thinking-ocr)' '*cursor-thinking-ocr*'
 Stop-PythonDaemon 'friday-ambient'        '*friday-ambient*'
 Stop-PythonDaemon 'music-scheduler'       '*friday-music-scheduler*'
 
@@ -88,12 +108,12 @@ Start-Process $py -ArgumentList @('scripts/friday-reminder-watch.py') -WorkingDi
 Write-Host "Starting cursor-reply-watch..." -ForegroundColor Green
 Start-Process $py -ArgumentList @('scripts/cursor-reply-watch.py') -WorkingDirectory $root -WindowStyle Hidden
 
-if (Get-DotEnvBool 'FRIDAY_CURSOR_THINKING_OCR' $false) {
-  Write-Host "Starting cursor-thinking-ocr..." -ForegroundColor Green
+if (Get-SageOcrFromDotEnv) {
+  Write-Host "Starting SAGE (cursor-thinking-ocr)..." -ForegroundColor Green
   Start-Process $py -ArgumentList @('scripts/cursor-thinking-ocr.py') -WorkingDirectory $root -WindowStyle Hidden
 }
 else {
-  Write-Host "Skipping cursor-thinking-ocr (FRIDAY_CURSOR_THINKING_OCR not on)" -ForegroundColor DarkGray
+  Write-Host "Skipping SAGE / cursor-thinking-ocr (FRIDAY_SAGE_ENABLED / FRIDAY_CURSOR_THINKING_OCR off)" -ForegroundColor DarkGray
 }
 
 if (Get-DotEnvBool 'FRIDAY_AMBIENT' $false) {

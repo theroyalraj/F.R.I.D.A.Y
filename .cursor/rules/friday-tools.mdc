@@ -154,4 +154,5 @@ Base: `http://127.0.0.1:3848`
 |--------|------|---------|
 | POST | `/alexa` | Alexa skill webhook |
 | POST | `/openclaw/trigger` | Manual trigger (requires `X-Openclaw-Secret`) |
+| POST | `/internal/stop-all-media` | Stop all music: taskkill friday-player/ffplay, clear music Redis, Alexa pause. Optional `?full=1` clears TTS locks too |
 

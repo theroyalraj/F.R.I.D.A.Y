@@ -496,6 +496,43 @@ SONG_SEC_MIN  = int(os.environ.get("FRIDAY_AMBIENT_SONG_SECONDS_MIN",  "8"))
 SONG_SEC_MAX  = int(os.environ.get("FRIDAY_AMBIENT_SONG_SECONDS_MAX",  "14"))
 PLAY_SCRIPT   = ROOT / "skill-gateway" / "scripts" / "friday-play.py"
 
+
+def _song_moment_weights() -> tuple[float, float, float]:
+    """
+    Relative weights for ambient featured-song category (normalized to sum 1).
+    Returns (arijit, bollywood_new, bollywood_retro).
+    Defaults: 40% Arijit, 54% new Bollywood, 6% retro Bollywood (retro = 10% of the 60% Bollywood branch).
+    """
+
+    def _wf(key: str, default: str) -> float:
+        raw = os.environ.get(key, "").strip().split("#", 1)[0].strip()
+        if not raw:
+            return float(default)
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            return float(default)
+
+    a = _wf("FRIDAY_AMBIENT_SONG_WEIGHT_ARIJIT", "0.4")
+    bn = _wf("FRIDAY_AMBIENT_SONG_WEIGHT_BOLLYWOOD_NEW", "0.54")
+    br = _wf("FRIDAY_AMBIENT_SONG_WEIGHT_BOLLYWOOD_RETRO", "0.06")
+    s = a + bn + br
+    if s <= 0:
+        return (0.4, 0.54, 0.06)
+    return (a / s, bn / s, br / s)
+
+
+def _pick_song_moment_category() -> str:
+    """Return 'arijit' | 'bollywood_new' | 'bollywood_retro' per weighted random draw."""
+    wa, wbn, wbr = _song_moment_weights()
+    r = random.random()
+    if r < wa:
+        return "arijit"
+    if r < wa + wbn:
+        return "bollywood_new"
+    return "bollywood_retro"
+
+
 MEME_ZONE = _env_bool("FRIDAY_AMBIENT_MEME_ZONE", False)
 MEME_DIR = Path(
     os.environ.get("FRIDAY_AMBIENT_MEME_ZONE_DIR", str(ROOT / "data" / "meme-zone"))
@@ -2002,6 +2039,8 @@ def _is_music_playing() -> bool:
 def generate_song_moment() -> dict | None:
     """
     Ask Claude to pick a famous song that fits the current mood/time.
+    Category is chosen at random: default 40% Arijit Singh, 54% recent Bollywood, 6% retro Bollywood
+    (tune via FRIDAY_AMBIENT_SONG_WEIGHT_* env vars).
     Returns a dict:
       spoken   — what Friday says before playing  (~15-20 words, natural opener)
       query    — YouTube search string  (e.g. "Bohemian Rhapsody Queen")
@@ -2030,12 +2069,36 @@ def generate_song_moment() -> dict | None:
     else:
         mood = "late night, quiet"
 
+    category = _pick_song_moment_category()
+    log.debug("[song] moment category=%s", category)
+    if category == "arijit":
+        genre_block = (
+            "Category for this pick (mandatory): **Arijit Singh**.\n"
+            "- Choose a track where Arijit Singh is the lead or featured vocalist.\n"
+            "- Pick a recognisable intro, chorus, or hook — vary across his discography; "
+            "do not default to the same few hits every time.\n"
+        )
+    elif category == "bollywood_retro":
+        genre_block = (
+            "Category for this pick (mandatory): **retro / classic Bollywood**.\n"
+            "- Hindi film or evergreen track from roughly the seventies through two-thousands "
+            "(or any widely known pre-2010 gem).\n"
+            "- Iconic section people recognise; vary films, composers, and singers — avoid repeating the same song.\n"
+        )
+    else:
+        genre_block = (
+            "Category for this pick (mandatory): **new Bollywood**.\n"
+            "- Recent Hindi film or chart hit (roughly 2015 to present).\n"
+            "- Big hook or chorus; vary films and lead singers — do not fixate on one artist every time.\n"
+        )
+
     prompt = (
         f"Pick a famous, iconic song that fits this mood: {mood}.\n"
         f"User's interests: {USER_INTERESTS}. City: {USER_CITY or 'Hyderabad'}.\n\n"
+        f"{genre_block}\n"
         "Rules:\n"
         "- Pick a song with a universally recognisable section (famous intro, chorus, riff, or hook).\n"
-        "- Vary across genres: Bollywood, classic rock, 90s pop, hip-hop, film score, EDM — don't repeat the same artist.\n"
+        "- Stay strictly inside the category above for this pick.\n"
         "- Pick a SHORT clip length so the hook lands without dominating the room: "
         f"about {SONG_SECONDS} seconds, always between {SONG_SEC_MIN} and {SONG_SEC_MAX} seconds "
         "(chorus drop, riff, or intro sting — not a long jam).\n\n"
@@ -2585,6 +2648,17 @@ def speak_blocking(text: str, voice: str | None = None) -> float:
     if should_defer_ambient_for_cursor():
         return 0.0
     resolved_voice = voice
+    rate_out: str | None = None
+    if not resolved_voice and _ambient_main_voice_only():
+        # Maestro (Creative Director) — dedicated ambient voice even when main_voice_only
+        try:
+            from openclaw_company import get_persona
+
+            _mp = get_persona("maestro")
+            resolved_voice = (_mp.get("voice") or "").strip() or None
+            rate_out = (_mp.get("rate") or "").strip() or None
+        except Exception:
+            resolved_voice = None
     if not resolved_voice and not _ambient_main_voice_only():
         av = os.environ.get("FRIDAY_AMBIENT_TTS_VOICE", "").strip()
         if av:
@@ -2598,6 +2672,7 @@ def speak_blocking(text: str, voice: str | None = None) -> float:
         speaker.speak_blocking(
             line,
             voice=resolved_voice,
+            rate=rate_out if voice is None else None,
             use_session_sticky=False,
         )
     except Exception as e:

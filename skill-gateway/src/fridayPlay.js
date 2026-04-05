@@ -15,6 +15,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pythonChildExecutable } from './winPython.js';
+import { stopAllFridayAudioSync } from './stopAllFridayAudio.js';
 
 const __dirname    = path.dirname(fileURLToPath(import.meta.url));
 const PLAY_SCRIPT  = path.resolve(__dirname, '../scripts/friday-play.py');
@@ -62,6 +63,9 @@ export function playLocalSong(searchPhrase, log, opts = {}) {
   if (!safePhrase) {
     return;
   }
+
+  // Pre-empt any other friday-play / stuck player so boot song + scheduler cannot stack.
+  stopAllFridayAudioSync(log, { fullPanic: false });
 
   const child = spawn(pythonChildExecutable(), [PLAY_SCRIPT, safePhrase], {
     env: {

@@ -48,6 +48,10 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
 _ENV_FILE = _REPO_ROOT / ".env"
 if _ENV_FILE.exists():
     for line in _ENV_FILE.read_text(encoding="utf-8").splitlines():
@@ -71,7 +75,7 @@ IMAP_PORT = 993
 
 POLL_SEC = max(10, int(os.environ.get("FRIDAY_EMAIL_POLL_SEC", "30")))
 FOLDERS = [f.strip() for f in os.environ.get("FRIDAY_EMAIL_FOLDERS", "INBOX").split(",") if f.strip()]
-NOTIFY_VOICE = os.environ.get("FRIDAY_EMAIL_NOTIFY_VOICE", "").strip()
+NOTIFY_VOICE = os.environ.get("FRIDAY_EMAIL_NOTIFY_VOICE", "").strip()  # overrides NOVA company voice
 USER_NAME = os.environ.get("FRIDAY_USER_NAME", "").strip() or "sir"
 PC_AGENT_URL = os.environ.get("PC_AGENT_URL", "http://127.0.0.1:3847").rstrip("/")
 
@@ -287,13 +291,16 @@ def _build_speak_text(envelope: dict, analysis: dict | None) -> str:
     subject = envelope.get("subject", "(no subject)")
 
     if analysis is None:
-        return f"New email from {sender}. Subject: {subject}."
+        return (
+            f"Nova here, Director of Communications. New email from {sender}. "
+            f"Subject: {subject}."
+        )
 
     speak_summary = (analysis.get("speak_summary") or "").strip()
     if not speak_summary:
         speak_summary = f"Subject: {subject}."
 
-    parts = [f"New email from {sender}."]
+    parts = [f"Nova here, Director of Communications. New email from {sender}."]
 
     # Add summary
     parts.append(speak_summary)
@@ -321,7 +328,7 @@ def _build_speak_text(envelope: dict, analysis: dict | None) -> str:
 
 
 def _speak_text(text: str) -> None:
-    """Fire-and-forget highest priority TTS for email notification."""
+    """Fire-and-forget highest priority TTS for email notification (NOVA, Director of Comms)."""
     env = {
         **os.environ,
         "FRIDAY_TTS_PRIORITY": "1",
@@ -330,6 +337,13 @@ def _speak_text(text: str) -> None:
     if NOTIFY_VOICE:
         env["FRIDAY_TTS_VOICE"] = NOTIFY_VOICE
         env["FRIDAY_TTS_USE_SESSION_STICKY_VOICE"] = "false"
+    else:
+        try:
+            from openclaw_company import friday_speak_env_for_persona
+
+            env.update(friday_speak_env_for_persona("nova", priority=True))
+        except Exception:
+            env["FRIDAY_TTS_USE_SESSION_STICKY_VOICE"] = "false"
     kwargs: dict = {}
     if platform.system() == "Windows":
         kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -340,7 +354,7 @@ def _speak_text(text: str) -> None:
             env=env,
             **kwargs,
         )
-        print(f"[gmail-watch] spoke: {text[:120]}", flush=True)
+        print(f"[nova] spoke: {text[:120]}", flush=True)
     except Exception as exc:
         print(f"[gmail-watch] speak failed: {exc}", file=sys.stderr, flush=True)
 

@@ -45,7 +45,7 @@ export function isApiKeyAvailable() {
 /**
  * Call the Anthropic Messages API directly.
  * @param {string} prompt
- * @param {{ model?: string, timeoutMs?: number, log?: import('pino').Logger }} opts
+ * @param {{ model?: string, timeoutMs?: number, log?: import('pino').Logger, speakStyleExtra?: string }} opts
  * @returns {Promise<{ ok: boolean, text: string, model: string, ms: number }>}
  */
 export async function callClaudeApi(prompt, opts = {}) {
@@ -59,6 +59,11 @@ export async function callClaudeApi(prompt, opts = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
+  const system =
+    opts.speakStyleExtra && String(opts.speakStyleExtra).trim()
+      ? `${VOICE_SYSTEM}\n\n${String(opts.speakStyleExtra).trim()}`
+      : VOICE_SYSTEM;
+
   try {
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -71,7 +76,7 @@ export async function callClaudeApi(prompt, opts = {}) {
       body: JSON.stringify({
         model,
         max_tokens: 256,
-        system: VOICE_SYSTEM,
+        system,
         messages: [{ role: 'user', content: String(prompt) }],
       }),
     });

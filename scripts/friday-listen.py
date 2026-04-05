@@ -71,6 +71,16 @@ if str(_sg_scripts) not in sys.path:
     sys.path.insert(0, str(_sg_scripts))
 from friday_greeting_delivery import sample_greeting_rate_pitch  # noqa: E402
 from friday_win_focus import should_defer_voice_for_cursor  # noqa: E402
+
+try:
+    from friday_vocal_asides import pick_music_no_ack, pick_music_yes_ack  # noqa: E402
+except ImportError:
+
+    def pick_music_yes_ack() -> str:
+        return random.choice(["On it.", "Playing now.", "You got it."])
+
+    def pick_music_no_ack() -> str:
+        return random.choice(["All right, skipping.", "Fair enough — another time.", "No worries, I'll leave it."])
 from indic_tts_voice import edge_voice_override_for_text  # noqa: E402
 from friday_music_lock import (
     SESSION_START_FILE,
@@ -282,27 +292,14 @@ def _try_answer_music_scheduler_offer(text: str, lower: str) -> bool:
         if _yes(t):
             _MUSIC_OFFER_RESPONSE_FILE.write_text("yes", encoding="utf-8")
             post_event("heard", text)
-            reply = random.choice(
-                [
-                    "On it.",
-                    "Playing now.",
-                    "You got it.",
-                    "Done — spinning it up.",
-                ]
-            )
+            reply = pick_music_yes_ack()
             post_event("speak", reply)
             speak(reply)
             return True
         if _no(t):
             _MUSIC_OFFER_RESPONSE_FILE.write_text("no", encoding="utf-8")
             post_event("heard", text)
-            reply = random.choice(
-                [
-                    "All right, skipping.",
-                    "Fair enough — another time.",
-                    "No worries, I'll leave it.",
-                ]
-            )
+            reply = pick_music_no_ack()
             post_event("speak", reply)
             speak(reply)
             return True

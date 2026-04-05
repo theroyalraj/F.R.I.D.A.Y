@@ -36,7 +36,8 @@ function modelCliArgs(extra) {
  * Non-interactive Claude Code CLI. Adjust CLAUDE_BIN / CLAUDE_CLI_ARGS / CLAUDE_MODEL.
  * @param {object} [options]
  * @param {string} [options.claudeModel] — per-request model (from UI); strips conflicting `--model` from CLAUDE_CLI_ARGS for this run only.
- * @param {'alexa'} [options.replyChannel] — extra instructions when the reply is consumed as speech (Alexa).
+ * @param {'alexa'|'voice'} [options.replyChannel] — extra instructions when the reply is consumed as speech.
+ * @param {string} [options.speakStyleExtra] — appended global mood / custom prompt (from Redis speak style).
  */
 export function runClaude(prompt, timeoutMs, options = {}) {
   const bin = process.env.CLAUDE_BIN || 'claude';
@@ -82,6 +83,9 @@ export function runClaude(prompt, timeoutMs, options = {}) {
       `• Numbers spelled out. Code described in words, not written.`,
       `• Punchy closer if it fits: "That's the one." / "You're sorted." / "Simple as that." / "Done."`,
     );
+  }
+  if (options.speakStyleExtra && String(options.speakStyleExtra).trim()) {
+    lines.push('', String(options.speakStyleExtra).trim(), '');
   }
   lines.push('User request:', String(prompt));
   const wrapped = lines.join('\n');

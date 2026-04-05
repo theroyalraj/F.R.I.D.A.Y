@@ -31,6 +31,7 @@ Thinking TTS pacing (batched sentences + sized chunks; avoids a firehose of tiny
   FRIDAY_CURSOR_THINKING_INCREMENTAL_SLOW — extra percentage points to slow mid-stream chunks (default 2)
   FRIDAY_CURSOR_THINKING_PAUSE_MIN / FRIDAY_CURSOR_THINKING_PAUSE_MAX — base seconds between intra-batch chunks (defaults 0.07–0.16; scaled by block size)
   FRIDAY_CURSOR_THINKING_OPENER_CHANCE — 0–1 chance to prefix first chunk with a soft lead-in (default 0.35)
+  FRIDAY_CURSOR_THINKING_OPENER_CONTEXT — auto (default) picks neutral vs code-roast vs calm-boundary openers from chunk text; neutral = reflective only
   FRIDAY_CURSOR_THINKING_MAX_CHUNK_CHARS — merge/split target width (default 520)
   FRIDAY_CURSOR_THINKING_MIN_BATCH_CHARS — incremental JSONL: accumulate at least this many chars before starting TTS (default 220)
   FRIDAY_CURSOR_THINKING_MIN_CHUNK_MERGE_CHARS — merge adjacent pacing chunks smaller than this (default 90)
@@ -43,6 +44,10 @@ Incremental thinking (same line growing across JSONL updates):
   When flags are missing, we buffer and speak once after FRIDAY_CURSOR_THINKING_DEBOUNCE_SEC of no updates (default 0.65).
 
 Run:  python scripts/cursor-reply-watch.py
+
+Thinking smoke tests — python scripts/cursor-watcher-smoke-thinking.py
+  Default: same TTS pipeline as cursor-thinking-ocr.py (strip_to_prose + scrub + _speak_thinking_paced).
+  --jsonl: append synthetic type=thinking for this watcher; needs watcher running and chat_id in .session-voice.json.
 """
 
 from __future__ import annotations
@@ -71,13 +76,22 @@ if _ENV_FILE.exists():
         if k and k not in os.environ:
             os.environ[k] = v
 
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
 # Same default as skill-gateway/scripts/pick-session-voice.py — set CURSOR_TRANSCRIPTS_DIR in .env for other machines.
 _TRANSCRIPTS_ROOT = Path(os.environ.get(
     "CURSOR_TRANSCRIPTS_DIR",
     r"C:\Users\rajut\.cursor\projects\d-code-openclaw\agent-transcripts",
 )).resolve()
 _SESSION_VOICE = _REPO_ROOT / ".session-voice.json"
-_PICK_SCRIPT = _REPO_ROOT / "skill-gateway" / "scripts" / "pick-session-voice.py"
+_SKILL_SCRIPTS = _REPO_ROOT / "skill-gateway" / "scripts"
+if str(_SKILL_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SKILL_SCRIPTS))
+from thinking_openers import pick_thinking_opener
+
+_PICK_SCRIPT = _SKILL_SCRIPTS / "pick-session-voice.py"
 _SPEAK_SCRIPT = _REPO_ROOT / "skill-gateway" / "scripts" / "friday-speak.py"
 
 POLL_SEC = 0.35
@@ -89,6 +103,24 @@ _SPOKEN_HASHES_MAX = 500
 # Monotonic counter: advances once per thinking block (per call to _speak_thinking_paced).
 # Ensures voice changes between spans/blocks, not between sentences within the same block.
 _thinking_pool_idx: int = 0
+
+_SENTINEL_VOICE: str | None = None
+_SENTINEL_RATE: str | None = None
+
+
+def _load_sentinel_persona() -> None:
+    global _SENTINEL_VOICE, _SENTINEL_RATE
+    try:
+        from openclaw_company import get_persona
+
+        s = get_persona("sentinel")
+        _SENTINEL_VOICE = (s.get("voice") or "").strip() or None
+        _SENTINEL_RATE = (s.get("rate") or "").strip() or None
+    except Exception:
+        _SENTINEL_VOICE, _SENTINEL_RATE = None, None
+
+
+_load_sentinel_persona()
 
 
 def _env_bool(key: str, default: bool = True) -> bool:
@@ -416,12 +448,17 @@ def strip_to_prose(raw: str) -> str:
 def _speak_main(text: str) -> None:
     from friday_speaker import speaker
 
-    speaker.speak(
-        text,
-        session="cursor-reply",
-        priority=True,
-        bypass_cursor_defer=True,
-    )
+    kw: dict = {
+        "session": "cursor-reply",
+        "priority": True,
+        "bypass_cursor_defer": True,
+    }
+    if _SENTINEL_VOICE:
+        kw["voice"] = _SENTINEL_VOICE
+        kw["use_session_sticky"] = False
+    if _SENTINEL_RATE:
+        kw["rate"] = _SENTINEL_RATE
+    speaker.speak(text, **kw)
 
 
 def _speak_subagent(text: str) -> None:
@@ -433,107 +470,6 @@ def _speak_subagent(text: str) -> None:
         priority=True,
         bypass_cursor_defer=True,
     )
-
-
-_THINKING_OPENERS = (
-    # Reflective / analytical
-    "Hmm. ",
-    "Interesting — ",
-    "Actually — ",
-    "Wait — ",
-    "Hang on — ",
-    "Hold on a second — ",
-    "That's a good question — ",
-    "Now that I look at this — ",
-    "Okay, this is nuanced — ",
-    "There's a subtlety here — ",
-    "This is worth unpacking — ",
-    "So here's what's happening — ",
-    "Let me reason through this — ",
-    "Okay, thinking this through — ",
-    "The thing to notice here is — ",
-    "This is more involved than it looks — ",
-    "Let me connect the dots here — ",
-    # Confident / knowledgeable
-    "Right. ",
-    "So — ",
-    "Now — ",
-    "Right, so — ",
-    "Okay, so — ",
-    "Here's the thing — ",
-    "The key insight is — ",
-    "What matters here is — ",
-    "From what I can tell — ",
-    "Based on what I'm seeing — ",
-    "If I'm reading this correctly — ",
-    "The way this works is — ",
-    "So the pattern here is — ",
-    "What's going on under the hood is — ",
-    # Curious / exploratory
-    "Let me think — ",
-    "Let me see — ",
-    "Let me check — ",
-    "Let me dig into this — ",
-    "Let me trace through this — ",
-    "Okay, pulling this apart — ",
-    "Let me walk through the logic — ",
-    "Bear with me on this one — ",
-    "I want to make sure I get this right — ",
-    "Okay, working through this step by step — ",
-    # Casual / human
-    "Okay — ",
-    "Alright — ",
-    "Right then — ",
-    "So look — ",
-    "Okay, here's my read — ",
-    "So basically — ",
-    "Yeah, so — ",
-    "Alright, so — ",
-    "Let me break this down — ",
-    "Okay, let me lay this out — ",
-    # Cheeky / roast
-    "Oh boy. ",
-    "Oh no. ",
-    "Wow, okay — ",
-    "Who wrote this? ",
-    "Yikes — ",
-    "Well that's creative — ",
-    "Brave choice — ",
-    "Oh, we're doing this are we — ",
-    "Someone was feeling adventurous — ",
-    "This is a cry for help — ",
-    "Bold strategy, let's see if it pays off — ",
-    "I have questions. Many questions — ",
-    "Tell me you didn't test this — ",
-    "I'm not mad, I'm just disappointed — ",
-    "Whoever did this owes me an explanation — ",
-    "This has big 'it works on my machine' energy — ",
-    "Ah yes, the classic 'fix it later' approach — ",
-    "I see someone chose violence today — ",
-    "Pain. Pure pain — ",
-    "This code has a certain chaotic energy — ",
-    # Meme / internet culture
-    "It's giving spaghetti code — ",
-    "First time? ",
-    "Skill issue detected — ",
-    "This ain't it, chief — ",
-    "We need to talk — ",
-    "So anyway, I started blasting — ",
-    "Confused screaming — ",
-    "Task failed successfully — ",
-    "Not gonna lie — ",
-    "Top ten anime betrayals — ",
-    "How do I even begin — ",
-    "Bro really said 'trust me' — ",
-    "You see what happened was — ",
-    "Ladies and gentlemen, we got him — ",
-    "Outstanding move — ",
-    "I'm going to pretend I didn't see that — ",
-    "Modern problems require modern solutions — ",
-    "That's rough, buddy — ",
-    "They don't know — ",
-    "Big brain time — ",
-)
 
 
 def _env_float(key: str, default: float) -> float:
@@ -719,7 +655,7 @@ def _speak_thinking_paced(
             if not c:
                 continue
             if i == 0 and random.random() < opener_chance:
-                c = random.choice(_THINKING_OPENERS) + c
+                c = pick_thinking_opener(c) + c
             # All chunks in this block use the same voice — voice only changes on a new block/span.
             speaker.speak_blocking(
                 c,

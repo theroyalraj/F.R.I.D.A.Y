@@ -34,13 +34,21 @@ Env vars (all optional):
                      mode in the IDE is not doubled with Jarvis TTS.
   FRIDAY_TTS_BYPASS_CURSOR_DEFER  When true, play anyway (startup greetings, Cursor
                      agent narration, etc.). Set by fridaySpeak.js for gateway boot.
+  FRIDAY_SPEAK_STYLE_FROM_REDIS  When true (default), merge rate/pitch deltas from Redis
+                     key friday:speak_style (mood toggles from the Listen UI). Sync with
+                     pc-agent speakStyle.js speakStyleDeliveryDeltas.
   FRIDAY_TTS_THINKING_RATE  optional fixed Edge rate when FRIDAY_TTS_THINKING is on;
                      when unset, rate scales with utterance length (faster short, slower long).
+  FRIDAY_CURSOR_THINKING_OPENER_CONTEXT  auto | neutral — thinking lead-in lines (see thinking_openers.py).
   FRIDAY_TTS_MAX_PLAYBACK_SEC  Hard cap on ffplay seconds per utterance for every session
                      when set (0 or false = no limit). When unset: no cap for normal TTS;
                      for FRIDAY_TTS_SESSION=cursor-reply or subagent (long transcript reads),
                      caps at FRIDAY_TTS_QUERY_MAX_PLAYBACK_SEC (default 60). On cap: kill
                      player only — no spoken line (avoid mixer volume tricks that garble later plays).
+  FRIDAY_TTS_CHUNK_MIN_CHARS  When total text is at least this many chars and splits into 2+
+                     sentences, speak sentence-by-sentence (same voice) so first audio starts
+                     sooner instead of one full MP3 download. Default 300; set 0 to disable.
+  FRIDAY_TTS_CHUNK_MAX_CHARS  Max merged sentence length per chunk (default 380; clamped).
 
 Good voices (respect FRIDAY_TTS_VOICE_BLOCK in .env — blocked ids are never used):
   en-US-EmmaMultilingualNeural  US female multilingual — repo default when env unset
@@ -119,55 +127,12 @@ if _ENV_FILE.exists():
         if k and k not in os.environ:
             os.environ[k] = v
 
-# ── Thinking openers (prepended to FRIDAY_TTS_THINKING speaks) ────────────────
-_THINKING_OPENERS = (
-    "Hmm. ", "Interesting — ", "Actually — ", "Wait — ", "Hang on — ",
-    "Hold on a second — ", "That's a good question — ",
-    "Now that I look at this — ", "Okay, this is nuanced — ",
-    "There's a subtlety here — ", "This is worth unpacking — ",
-    "So here's what's happening — ", "Let me reason through this — ",
-    "Okay, thinking this through — ", "The thing to notice here is — ",
-    "This is more involved than it looks — ", "Let me connect the dots here — ",
-    "Right. ", "So — ", "Now — ", "Right, so — ", "Okay, so — ",
-    "Here's the thing — ", "The key insight is — ", "What matters here is — ",
-    "From what I can tell — ", "Based on what I'm seeing — ",
-    "If I'm reading this correctly — ", "The way this works is — ",
-    "So the pattern here is — ", "What's going on under the hood is — ",
-    "Let me think — ", "Let me see — ", "Let me check — ",
-    "Let me dig into this — ", "Let me trace through this — ",
-    "Okay, pulling this apart — ", "Let me walk through the logic — ",
-    "Bear with me on this one — ",
-    "I want to make sure I get this right — ",
-    "Okay, working through this step by step — ",
-    "Okay — ", "Alright — ", "Right then — ", "So look — ",
-    "Okay, here's my read — ", "So basically — ", "Yeah, so — ",
-    "Alright, so — ", "Let me break this down — ",
-    "Okay, let me lay this out — ",
-    "Oh boy. ", "Oh no. ", "Wow, okay — ", "Who wrote this? ",
-    "Yikes — ", "Well that's creative — ", "Brave choice — ",
-    "Oh, we're doing this are we — ",
-    "Someone was feeling adventurous — ", "This is a cry for help — ",
-    "Bold strategy, let's see if it pays off — ",
-    "I have questions. Many questions — ",
-    "Tell me you didn't test this — ",
-    "I'm not mad, I'm just disappointed — ",
-    "Whoever did this owes me an explanation — ",
-    "This has big 'it works on my machine' energy — ",
-    "Ah yes, the classic 'fix it later' approach — ",
-    "I see someone chose violence today — ",
-    "Pain. Pure pain — ", "This code has a certain chaotic energy — ",
-    "It's giving spaghetti code — ", "First time? ",
-    "Skill issue detected — ", "This ain't it, chief — ",
-    "We need to talk — ", "So anyway, I started blasting — ",
-    "Confused screaming — ", "Task failed successfully — ",
-    "Not gonna lie — ", "Top ten anime betrayals — ",
-    "How do I even begin — ", "Bro really said 'trust me' — ",
-    "You see what happened was — ",
-    "Ladies and gentlemen, we got him — ", "Outstanding move — ",
-    "I'm going to pretend I didn't see that — ",
-    "Modern problems require modern solutions — ",
-    "That's rough, buddy — ", "They don't know — ", "Big brain time — ",
-)
+# ── Thinking openers (contextual pools in thinking_openers.py) ─────────────────
+try:
+    from thinking_openers import pick_thinking_opener as _pick_thinking_opener
+except ImportError:
+    def _pick_thinking_opener(_text: str) -> str:
+        return random.choice(("Hmm. ", "Okay — ", "So — ", "Right. "))
 
 # ── Arg parsing ───────────────────────────────────────────────────────────────
 _args  = sys.argv[1:]
@@ -1034,6 +999,73 @@ def _get_redis_client():
     return _redis_c
 
 
+_SPEAK_STYLE_REDIS_KEY = "friday:speak_style"
+
+
+def _apply_speak_style_rate_pitch_from_redis() -> None:
+    """Adjust module-level RATE/PITCH from Redis speak style (sync with pc-agent speakStyle.js)."""
+    global RATE, PITCH
+    raw = os.environ.get("FRIDAY_SPEAK_STYLE_FROM_REDIS", "true").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return
+    r = _get_redis_client()
+    if r is None:
+        return
+    try:
+        blob = r.get(_SPEAK_STYLE_REDIS_KEY)
+        if not blob:
+            return
+        import json as _json_ss
+
+        st = _json_ss.loads(blob)
+    except Exception:
+        return
+    rate_pct = 0.0
+    pitch_hz = 0.0
+    if st.get("funny"):
+        rate_pct += 3
+        pitch_hz += 2
+    if st.get("snarky"):
+        rate_pct += 4
+        pitch_hz += 3
+    if st.get("bored"):
+        rate_pct -= 10
+        pitch_hz -= 3
+    if st.get("dry"):
+        rate_pct -= 3
+        pitch_hz -= 2
+    if st.get("warm"):
+        rate_pct -= 2
+        pitch_hz += 1
+    rate_pct = max(-18, min(18, rate_pct))
+    pitch_hz = max(-8, min(12, pitch_hz))
+    if rate_pct == 0 and pitch_hz == 0:
+        return
+
+    def _parse_pct(s: str) -> float:
+        s = (s or "").strip()
+        m = re.match(r"^([+-]?\d+(?:\.\d+)?)\s*%$", s)
+        return float(m.group(1)) if m else 7.5
+
+    def _parse_hz(s: str) -> float:
+        s = (s or "").strip()
+        m = re.match(r"^([+-]?\d+(?:\.\d+)?)\s*Hz$", s, re.IGNORECASE)
+        return float(m.group(1)) if m else 2.0
+
+    def _fmt_pct(n: float) -> str:
+        s = "" if n < 0 else "+"
+        return f"{s}{round(n, 1)}%"
+
+    def _fmt_hz(n: float) -> str:
+        s = "" if n < 0 else "+"
+        return f"{s}{round(n, 1)}Hz"
+
+    base_r = _parse_pct(RATE)
+    base_p = _parse_hz(PITCH)
+    RATE = _fmt_pct(max(-50, min(50, base_r + rate_pct)))
+    PITCH = _fmt_hz(max(-20, min(20, base_p + pitch_hz)))
+
+
 # ── Redis distributed TTS lock ───────────────────────────────────────────────
 _REDIS_TTS_LOCK_KEY = "friday:tts:lock"
 _REDIS_TTS_LOCK_TTL = 120  # 2 min auto-expire — covers long TTS + network retries
@@ -1407,7 +1439,7 @@ async def speak():
         if _opener_chance > 1.0:
             _opener_chance = min(_opener_chance / 100.0, 1.0)
         if random.random() < _opener_chance:
-            _opener = random.choice(_THINKING_OPENERS)
+            _opener = _pick_thinking_opener(TEXT)
             TEXT = _opener + TEXT
             print(f"[friday-speak] thinking opener: {_opener.strip()}", flush=True)
         _think_fixed = os.environ.get("FRIDAY_TTS_THINKING_RATE", "").strip() or None
@@ -1578,10 +1610,12 @@ async def speak():
 
 
 async def _speak_inner(my_gen: int) -> None:
+    global TEXT, VOICE, RATE, PITCH
     # Kick off device-switch lookup in a background thread while we start the
     # TTS request — BT switch and stream overlap instead of running sequentially.
     if not (OUTPUT or STDOUT) and _playback_superseded(my_gen):
         return
+    _apply_speak_style_rate_pitch_from_redis()
     use_device = DEVICE and DEVICE.lower() not in ("", "default", "none")
     device_result: list = [None]   # [(target_id, target_name, original_id) | None | False]
     switch_done  = threading.Event()
@@ -1643,7 +1677,6 @@ async def _speak_inner(my_gen: int) -> None:
     # Voice changes between calls (different spans/threads), not between sentences.
     # Redis INCR tracks which pool slot to use across separate subprocess calls.
     if _thinking_voice_pool and not OUTPUT and not STDOUT:
-        global TEXT, VOICE
         _pool_orig_text = TEXT
         _pool_orig_voice = VOICE
         # Pick one voice for this entire span using a persistent cross-call counter.
@@ -1685,6 +1718,63 @@ async def _speak_inner(my_gen: int) -> None:
         VOICE = _pool_orig_voice
         _restore_device(device_result)
         return
+
+    # ── Long normal speaks: sentence chunks (same voice) — faster first audio ──
+    # Thinking-pool mode above already chunks; here we handle Cursor completions / long
+    # narrations without FRIDAY_CURSOR_THINKING_VOICE_POOL (one giant edge-tts job is slow).
+    _chunk_min_raw = os.environ.get("FRIDAY_TTS_CHUNK_MIN_CHARS", "300").strip()
+    try:
+        _chunk_min = int(_chunk_min_raw) if _chunk_min_raw else 0
+    except ValueError:
+        _chunk_min = 300
+    try:
+        _chunk_max_pc = int(os.environ.get("FRIDAY_TTS_CHUNK_MAX_CHARS", "380").strip() or "380")
+    except ValueError:
+        _chunk_max_pc = 380
+    _chunk_max_pc = max(120, min(_chunk_max_pc, 1200))
+
+    if _chunk_min > 0 and len(TEXT) >= _chunk_min and not OUTPUT and not STDOUT:
+        _chunk_parts = _split_thinking_sentences(TEXT, max_chars=_chunk_max_pc)
+        if len(_chunk_parts) > 1:
+            _orig_text_chunks = TEXT
+            print(
+                f"[friday-speak] sentence chunks: {len(_chunk_parts)} parts "
+                f"(min_chars={_chunk_min}, max_chunk={_chunk_max_pc})",
+                flush=True,
+            )
+            _fade_and_stop_music()
+            switch_done.wait(timeout=10)
+            for _ci, _part in enumerate(_chunk_parts):
+                if _playback_superseded(my_gen):
+                    break
+                TEXT = _part
+                _mp3_cached = _load_cache()
+                if _mp3_cached:
+                    print(
+                        f"[friday-speak] chunk [{_ci + 1}/{len(_chunk_parts)}] cache hit",
+                        flush=True,
+                    )
+                    _play_with_device(_mp3_cached, device_result, use_device, my_gen)
+                else:
+                    try:
+                        _mp3 = await _fetch_mp3_network(retries=2)
+                        _save_cache(_mp3)
+                        _play_with_device(_mp3, device_result, use_device, my_gen)
+                        print(
+                            f"[friday-speak] chunk [{_ci + 1}/{len(_chunk_parts)}] via {VOICE}",
+                            flush=True,
+                        )
+                    except Exception as _chunk_exc:
+                        print(
+                            f"[friday-speak] chunk {_ci + 1} failed: {_chunk_exc}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                if _ci < len(_chunk_parts) - 1 and not _playback_superseded(my_gen):
+                    await asyncio.sleep(random.uniform(0.12, 0.28))
+            TEXT = _orig_text_chunks
+            _restore_device(device_result)
+            return
 
     # ── Playback mode ─────────────────────────────────────────────────────────
     cached = _load_cache()

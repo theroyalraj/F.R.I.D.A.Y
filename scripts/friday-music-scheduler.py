@@ -11,16 +11,20 @@ is already running. Respects FRIDAY_MUSIC_SCHEDULER=false to disable.
 Optional “ask first” (default off): speak a short prompt and wait for voice yes/no from
 friday-listen.py (same machine). Set FRIDAY_MUSIC_ASK_BEFORE_PLAY=true.
 
+By default each playlist entry plays at most once per scheduler process (one OpenClaw run).
+Set FRIDAY_MUSIC_SESSION_NO_REPEAT=false to allow the same track to come up again randomly.
+
 Usage:
   python scripts/friday-music-scheduler.py
 
 Env vars (all optional — reads .env):
   FRIDAY_MUSIC_SCHEDULER       true/false to enable/disable (default: true if script is run)
   FRIDAY_MUSIC_INTERVAL_MIN    minutes between songs (default: 30)
-  FRIDAY_MUSIC_PLAYLIST        comma-separated search phrases (default: FRIDAY_STARTUP_SONG)
+  FRIDAY_MUSIC_PLAYLIST        comma-separated search phrases (default: FRIDAY_STARTUP_SONG only — same song every time if unset)
+  FRIDAY_MUSIC_SESSION_NO_REPEAT true (default) = never replay a track until restart/npm run start:all
   FRIDAY_MUSIC_FIRST_WAIT_SEC  seconds before first song (optional; default min(120, interval))
   FRIDAY_MUSIC_ASK_BEFORE_PLAY true = speak a prompt and wait for mic yes/no before playing
-                                 (default: false — behaviour unchanged)
+                                 (recommended true — avoids surprise music when the scheduler fires)
   FRIDAY_MUSIC_ASK_WAIT_SEC    seconds to wait for an answer (default: 90)
   FRIDAY_PLAY_SECONDS          per-song play duration (default: 28)
   FRIDAY_PLAY_VOLUME           ffplay volume 0-100 (default: 70)
@@ -37,6 +41,10 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
 ENV_PATH = ROOT / ".env"
 if ENV_PATH.exists():
     for line in ENV_PATH.read_text(encoding="utf-8").splitlines():
@@ -78,6 +86,51 @@ DEFAULT_SONG = os.environ.get("FRIDAY_STARTUP_SONG", "Back in Black AC DC")
 PLAYLIST_RAW = os.environ.get("FRIDAY_MUSIC_PLAYLIST", "").strip()
 PLAYLIST = [s.strip() for s in PLAYLIST_RAW.split(",") if s.strip()] if PLAYLIST_RAW else [DEFAULT_SONG]
 
+# Tracks successfully played this process lifetime (cleared only when scheduler restarts).
+_SESSION_PLAYED: set[str] = set()
+
+
+def _session_no_repeat() -> bool:
+    v = os.environ.get("FRIDAY_MUSIC_SESSION_NO_REPEAT", "true").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
+def _pick_scheduled_track() -> str | None:
+    """
+    Choose the next scheduler track. Returns None if session-no-repeat exhausted the playlist.
+    """
+    if not _session_no_repeat():
+        choice = random.choice(PLAYLIST)
+        log.info(
+            "pick: %r (repeat allowed; playlist=%d)",
+            choice,
+            len(PLAYLIST),
+        )
+        return choice
+    pool = [s for s in PLAYLIST if s not in _SESSION_PLAYED]
+    if not pool:
+        log.info(
+            "pick: SKIP — all %d entr(y/ies) in FRIDAY_MUSIC_PLAYLIST already played this run; "
+            "no scheduler music until OpenClaw restart (FRIDAY_MUSIC_SESSION_NO_REPEAT=true)",
+            len(PLAYLIST),
+        )
+        return None
+    choice = random.choice(pool)
+    log.info(
+        "pick: %r | unused=%d/%d | already_played=%s",
+        choice,
+        len(pool),
+        len(PLAYLIST),
+        sorted(_SESSION_PLAYED) if _SESSION_PLAYED else "none",
+    )
+    return choice
+
+
+def _record_played(song: str) -> None:
+    if _session_no_repeat() and song:
+        _SESSION_PLAYED.add(song)
+        log.info("session played: %d unique track(s) so far", len(_SESSION_PLAYED))
+
 
 def _ask_before_play_enabled() -> bool:
     v = os.environ.get("FRIDAY_MUSIC_ASK_BEFORE_PLAY", "").strip().lower()
@@ -111,11 +164,16 @@ def _offer_prompt(song: str) -> str:
 
 
 def _speak_ask(prompt: str) -> None:
-    env = {
-        **os.environ,
-        "FRIDAY_TTS_PRIORITY": "1",
-        "FRIDAY_TTS_BYPASS_CURSOR_DEFER": "true",
-    }
+    try:
+        from openclaw_company import friday_speak_env_for_persona
+
+        env = {**os.environ, **friday_speak_env_for_persona("maestro", priority=True)}
+    except Exception:
+        env = {
+            **os.environ,
+            "FRIDAY_TTS_PRIORITY": "1",
+            "FRIDAY_TTS_BYPASS_CURSOR_DEFER": "true",
+        }
     kw: dict = {"cwd": str(ROOT), "env": env, "timeout": 120}
     if sys.platform == "win32":
         kw["creationflags"] = subprocess.CREATE_NO_WINDOW
@@ -125,8 +183,8 @@ def _speak_ask(prompt: str) -> None:
         log.warning("Ask prompt speak failed: %s", e)
 
 
-def _wait_for_music_offer_yes(deadline: float) -> bool:
-    """Poll response file written by friday-listen (yes/no)."""
+def _wait_for_music_offer_result(deadline: float) -> str:
+    """Poll response file from friday-listen. Returns yes | no | timeout (timeout = no music, witty line from scheduler)."""
     MUSIC_OFFER_RESPONSE_FILE.unlink(missing_ok=True)
     while time.time() < deadline:
         if MUSIC_OFFER_RESPONSE_FILE.is_file():
@@ -146,17 +204,24 @@ def _wait_for_music_offer_yes(deadline: float) -> bool:
                     "okay",
                     "please",
                 ):
-                    return True
+                    return "yes"
                 if raw in ("no", "n", "0", "false", "nope", "nah", "skip", "pass"):
-                    return False
+                    return "no"
             except OSError:
                 pass
         time.sleep(0.35)
-    return False
+    return "timeout"
 
 
 def _run_ask_then_maybe_play() -> None:
-    song = random.choice(PLAYLIST)
+    try:
+        from friday_vocal_asides import pick_music_scheduler_timeout
+    except ImportError:
+        pick_music_scheduler_timeout = None  # type: ignore[misc, assignment]
+
+    song = _pick_scheduled_track()
+    if not song:
+        return
     wait_sec = _ask_wait_sec()
     deadline = time.time() + wait_sec
     try:
@@ -176,11 +241,20 @@ def _run_ask_then_maybe_play() -> None:
     log.info("Music ask — waiting up to %.0fs for yes/no (friday-listen): %s", wait_sec, song)
     _speak_ask(prompt)
 
-    if _wait_for_music_offer_yes(deadline):
+    result = _wait_for_music_offer_result(deadline)
+    if result == "yes":
         log.info("Music ask — yes, playing: %s", song)
         play_song(song)
+    elif result == "no":
+        # friday-listen already spoke a short ack — do not double-speak.
+        log.info("Music ask — no, skipping: %s", song)
     else:
-        log.info("Music ask — skipped or timed out (no affirmative)")
+        log.info("Music ask — timeout, skipping: %s", song)
+        if pick_music_scheduler_timeout:
+            try:
+                _speak_ask(pick_music_scheduler_timeout())
+            except Exception as e:
+                log.warning("Timeout aside speak failed: %s", e)
 
     MUSIC_OFFER_FILE.unlink(missing_ok=True)
     MUSIC_OFFER_RESPONSE_FILE.unlink(missing_ok=True)
@@ -229,7 +303,9 @@ def _play_running() -> bool:
 
 def play_song(song: str | None = None):
     if not song:
-        song = random.choice(PLAYLIST)
+        song = _pick_scheduled_track()
+        if not song:
+            return
     log.info("Playing: %s", song)
 
     env = {**os.environ}
@@ -248,6 +324,7 @@ def play_song(song: str | None = None):
         )
         if r.returncode == 0:
             log.info("Finished: %s", song)
+            _record_played(song)
         else:
             log.warning("friday-play exited %d for %s", r.returncode, song)
     except subprocess.TimeoutExpired:
@@ -273,11 +350,21 @@ def _first_sleep_sec(interval_sec: float) -> float:
 def main():
     interval_sec = INTERVAL_MIN * 60
     log.info(
-        "Music scheduler online — every %.0f min, %d song(s) in playlist",
+        "Maestro (Creative Director) — music scheduler online, every %.0f min, %d song(s) in playlist",
         INTERVAL_MIN,
         len(PLAYLIST),
     )
     log.info("Playlist: %s", PLAYLIST)
+    if len(PLAYLIST) < 2:
+        log.warning(
+            "FRIDAY_MUSIC_PLAYLIST has only one entry (fallback=FRIDAY_STARTUP_SONG) — "
+            "every offer sounds the same. Add comma-separated titles in .env for rotation."
+        )
+    if _session_no_repeat():
+        log.info(
+            "FRIDAY_MUSIC_SESSION_NO_REPEAT=true — each track plays at most once per OpenClaw run; "
+            "restart the stack to reset."
+        )
 
     first = True
     while True:

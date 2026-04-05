@@ -11,6 +11,7 @@
     "dev": "node --watch --watch-path=src --watch-path=../lib src/server.js"
   },
   "dependencies": {
+    "node-cron": "^3.0.3",
     "alexa-remote2": "^8.0.4",
     "alexa-verifier": "^3.0.2",
     "dotenv": "^16.4.5",

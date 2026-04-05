@@ -45,6 +45,8 @@ import {
 import { notifyFollowupListenEnabled, spawnNotifyFollowupListen } from './notifyFollowupListen.js';
 import { alexaMusicConfigured, alexaPlayMusic, alexaStopMusic } from './alexaMusic.js';
 import { playLocalSong } from './fridayPlay.js';
+import { startBriefingCron } from './briefingCron.js';
+import { stopAllFridayAudioAsync } from './stopAllFridayAudio.js';
 
 /** When true, startup / done / launch songs use yt-dlp on the PC even if an Alexa cookie exists (hear music on your Windows output). */
 function fridaySongsPreferLocalPc() {
@@ -644,6 +646,17 @@ app.post('/internal/alexa-stop', async (req, res) => {
   res.json({ ok: true });
 });
 
+/** Kill local friday-player/ffplay, clear music Redis lease, pause Alexa. No mic cooldown.
+ *  Query ?full=1 or body { full: true } also clears TTS locks (use after hard wedged state). */
+app.post('/internal/stop-all-media', async (req, res) => {
+  const full =
+    req.query?.full === '1' ||
+    req.query?.full === 'true' ||
+    req.body?.full === true;
+  await stopAllFridayAudioAsync(req.log, { fullPanic: full, alexa: true });
+  res.json({ ok: true, fullPanic: Boolean(full) });
+});
+
 /**
  * Speak arbitrary text via Jarvis (friday-speak.py).
  * Body: { text } — called by N8N workflows for WhatsApp notifications, reminders, etc.
@@ -787,6 +800,8 @@ server = app.listen(PORT, () => {
     '\x1b[36m║\x1b[0m  \x1b[90mAlexa Bridge  ·  N8N Intake  ·  All Systems Nominal\x1b[0m       \x1b[36m║\x1b[0m\n' +
     '\x1b[36m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n\n',
   );
+
+  startBriefingCron(rootLogger);
 
   rootLogger.info(
     {

@@ -29,6 +29,7 @@
     "start:ambient": "python scripts/friday-ambient.py",
     "start:cursor-reply": "python scripts/cursor-reply-watch.py",
     "start:cursor-thinking-ocr": "python scripts/cursor-thinking-ocr.py",
+    "start:argus": "python scripts/argus.py",
     "restart:watcher": "powershell -ExecutionPolicy Bypass -File scripts/restart-watcher.ps1",
     "restart:side": "powershell -ExecutionPolicy Bypass -File scripts/restart-side-daemons.ps1",
     "probe:cursor-cdp": "python scripts/cursor-cdp-probe.py",

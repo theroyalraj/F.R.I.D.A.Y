@@ -53,9 +53,9 @@ export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [currentVoice, setCurrentVoice] = useState('en-US-EmmaMultilingualNeural');
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     if (typeof window !== 'undefined') {
-      return localStorage.getItem('friday.theme') as 'light' | 'dark' | null ?? 'light';
+      return localStorage.getItem('friday.theme') as 'light' | 'dark' | null ?? 'dark';
     }
-    return 'light';
+    return 'dark';
   });
   const [bubbles, setBubbles] = useState<ChatBubble[]>([]);
   const [toasts, setToasts] = useState<Array<{ id: string; message: string; type: 'info' | 'error' | 'success' }>>([]);
@@ -68,7 +68,6 @@ export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   // Persist theme to localStorage
   useEffect(() => {
     localStorage.setItem('friday.theme', theme);
-    document.documentElement.classList.toggle('dark', theme === 'dark');
   }, [theme]);
 
   const incrementExchanges = useCallback(() => {
@@ -123,6 +122,9 @@ export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       case 'server_start':
         setConnectionStatus('listening');
         addBubble({ type: 'divider', text: 'FRIDAY ONLINE', ts: Date.now() });
+        break;
+      case 'daemon_disconnect':
+        setConnectionStatus('offline');
         break;
       case 'listening':
       case 'daemon_reconnect':
