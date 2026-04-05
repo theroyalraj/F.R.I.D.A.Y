@@ -2,6 +2,14 @@ import { matchOpenIntent, openApp } from './open.js';
 import { matchPlayMusicIntent, playMusicSearch } from './playMusic.js';
 import { runClaude } from './claude.js';
 import { callClaudeApi, isApiKeyAvailable } from './claudeApi.js';
+import {
+  OPENROUTER_SETUP_MESSAGE,
+  callOpenRouterChat,
+  isOpenRouterConfigured,
+  openRouterFreeModel,
+} from './openRouterApi.js';
+import { buildVoiceSystem } from './claudeApi.js';
+import { scheduleOpenRouterFallback } from './deferredOpenRouter.js';
 import { inferClaudeModelForTask, isAutoModelEnabled } from './claudeRouter.js';
 import { sanitizeClaudeModel } from './claudeModel.js';
 import { getSpeakStyle, buildSpeakStyleInstruction } from './speakStyle.js';
@@ -141,24 +149,135 @@ export async function runTask(body, reqLog, options = {}) {
     }
   }
 
+  // ── OpenRouter free (direct): no Anthropic call — uses OPENROUTER_FREE_MODEL ─
+  const openRouterDirectTimeoutMs =
+    src === 'whatsapp' ? Math.min(TIMEOUT, 180_000) : Math.min(TIMEOUT, 45_000);
+
+  if (FAST_SOURCES.has(src) && claudeModel === 'openrouter-free') {
+    if (!isOpenRouterConfigured()) {
+      reqLog.warn({ mode: 'openrouter' }, 'openrouter-free selected but OPENROUTER_API_KEY missing');
+      return {
+        status: 200,
+        json: {
+          ok: false,
+          mode: 'openrouter',
+          userId,
+          correlationId,
+          error: OPENROUTER_SETUP_MESSAGE,
+        },
+      };
+    }
+    const model = openRouterFreeModel();
+    reqLog.info({ mode: 'openrouter', model, apiTimeoutMs: openRouterDirectTimeoutMs }, 'openrouter direct (free model)');
+    try {
+      const system = buildVoiceSystem({ speakStyleExtra, companyContext });
+      const result = await callOpenRouterChat({
+        prompt: t,
+        system,
+        model,
+        timeoutMs: openRouterDirectTimeoutMs,
+        log: reqLog,
+      });
+      reqLog.info(
+        { mode: 'openrouter', ok: result.ok, ms: result.ms, model: result.model },
+        'openrouter direct done',
+      );
+      return {
+        status: 200,
+        json: {
+          ok: result.ok,
+          mode: 'openrouter',
+          userId,
+          correlationId,
+          summary: result.text || 'No reply text from the model.',
+        },
+      };
+    } catch (e) {
+      const msg = e?.message || String(e);
+      reqLog.warn({ err: msg }, 'openrouter direct failed');
+      return {
+        status: 200,
+        json: {
+          ok: false,
+          mode: 'openrouter',
+          userId,
+          correlationId,
+          error: msg.slice(0, 400),
+        },
+      };
+    }
+  }
+
   // ── Fast path: direct API for voice/mic commands ────────────────────────────
   // Bypasses Claude CLI spawn overhead (~2-5s) → direct HTTP ~500ms-1.5s.
-  // Haiku = quick chat, Sonnet = complex/coding. Falls back to CLI on API error.
+  // Default tier Sonnet; Opus when inferred or selected; Haiku if explicitly chosen. On Anthropic rate limit, OpenRouter if configured.
   const useFastApi = FAST_SOURCES.has(src) && isApiKeyAvailable();
 
   if (useFastApi) {
-    const apiModel = (claudeModel === 'sonnet') ? 'sonnet' : 'haiku';
+    let apiTier = 'sonnet';
+    if (claudeModel === 'opus') apiTier = 'opus';
+    else if (claudeModel === 'haiku') apiTier = 'haiku';
     const apiTimeoutMs =
       src === 'whatsapp' ? Math.min(TIMEOUT, 180_000) : Math.min(TIMEOUT, 20_000);
-    reqLog.info({ mode: 'api', apiModel, apiTimeoutMs }, 'invoking claude api (fast path)');
+    reqLog.info({ mode: 'api', apiTier, apiTimeoutMs }, 'invoking claude api (fast path)');
     try {
       const result = await callClaudeApi(t, {
-        model:     apiModel,
+        model:     apiTier,
         timeoutMs: apiTimeoutMs,
         log:       reqLog,
         speakStyleExtra,
         companyContext,
       });
+      if (result.needsOpenRouterKey) {
+        reqLog.info({ mode: 'api' }, 'task done — anthropic limited, openrouter key missing');
+        return {
+          status: 200,
+          json: {
+            ok: false,
+            mode: 'api',
+            userId,
+            correlationId,
+            error: OPENROUTER_SETUP_MESSAGE,
+          },
+        };
+      }
+      if (result.deferred && result.deferredContext) {
+        scheduleOpenRouterFallback(result.deferredContext);
+        reqLog.info(
+          {
+            mode: 'api',
+            deferredOpenRouter: true,
+            cooldownSkip: Boolean(result.skippedAnthropicCooldown),
+          },
+          'task ack — OpenRouter scheduled async',
+        );
+        return {
+          status: 200,
+          json: {
+            ok: true,
+            mode: 'api',
+            userId,
+            correlationId,
+            summary: '',
+            speakAsync: false,
+            deferredOpenRouter: true,
+          },
+        };
+      }
+      if (result.skippedAnthropicCooldown) {
+        reqLog.info({ mode: 'api' }, 'task ack — anthropic cooldown, silent (no OpenRouter)');
+        return {
+          status: 200,
+          json: {
+            ok: true,
+            mode: 'api',
+            userId,
+            correlationId,
+            summary: '',
+            speakAsync: false,
+          },
+        };
+      }
       reqLog.info({ mode: 'api', ok: result.ok, ms: result.ms, model: result.model }, 'task done');
       return {
         status: 200,

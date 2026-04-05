@@ -6,10 +6,10 @@
  * Env vars:
  *   FRIDAY_TTS_EDGE=false      — explicitly disable (enabled by default when script is present)
  *   FRIDAY_TTS_DISABLED=1      — disables all server-side TTS
- *   FRIDAY_EDGE_TTS_VOICE      — voice short-name (default: inherits FRIDAY_TTS_VOICE → en-US-EmmaMultilingualNeural)
+ *   FRIDAY_EDGE_TTS_VOICE      — voice short-name (default: inherits FRIDAY_TTS_VOICE → en-US-AvaMultilingualNeural)
  *
  * Good voices (see FRIDAY_TTS_VOICE_BLOCK — blocked ids are rejected by API and clamped at runtime):
- *   en-US-EmmaMultilingualNeural — repo default
+ *   en-US-AvaMultilingualNeural — repo default (Jarvis)
  *   en-US-GuyNeural       US male neural
  *   en-US-AriaNeural      US female neural
  *   en-IN-NeerjaExpressiveNeural  Indian English / Hinglish
@@ -79,9 +79,9 @@ export function edgeTtsVoice(env = process.env) {
   const blocked = getVoiceBlockSet(env);
   const envMain = env.FRIDAY_TTS_VOICE?.trim() || '';
   const fallback =
-    (envMain && !blocked.has(envMain) && envMain) || 'en-US-EmmaMultilingualNeural';
+    (envMain && !blocked.has(envMain) && envMain) || 'en-US-AvaMultilingualNeural';
   const edgeOverride = env.FRIDAY_EDGE_TTS_VOICE?.trim() || '';
-  const candidates = [_sessionVoice, edgeOverride, envMain, 'en-US-EmmaMultilingualNeural'].filter(Boolean);
+  const candidates = [_sessionVoice, edgeOverride, envMain, 'en-US-AvaMultilingualNeural'].filter(Boolean);
   let resolved = fallback;
   for (const c of candidates) {
     if (!blocked.has(c)) { resolved = c; break; }
@@ -112,7 +112,8 @@ export function filteredEdgeTtsCatalogue(env = process.env) {
 
 /** Curated Edge TTS voice catalogue with descriptions. */
 export const EDGE_TTS_VOICE_CATALOGUE = [
-  { voice: 'en-US-EmmaMultilingualNeural',      lang: 'en-US', gender: 'Female', desc: 'US female multilingual — natural flow (edge-tts maintainer pick)' },
+  { voice: 'en-US-AvaMultilingualNeural',       lang: 'en-US', gender: 'Female', desc: 'US female multilingual — Jarvis default' },
+  { voice: 'en-US-EmmaMultilingualNeural',      lang: 'en-US', gender: 'Female', desc: 'US female multilingual — natural flow' },
   { voice: 'en-GB-RyanNeural',                  lang: 'en-GB', gender: 'Male',   desc: 'British male — Jarvis / FRIDAY feel' },
   { voice: 'en-GB-ThomasNeural',                lang: 'en-GB', gender: 'Male',   desc: 'British male, deeper tone' },
   { voice: 'en-GB-LibbyNeural',                 lang: 'en-GB', gender: 'Female', desc: 'British female, natural' },

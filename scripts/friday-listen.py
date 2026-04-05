@@ -109,7 +109,22 @@ DEAF_SEC     = float(os.environ.get("LISTEN_DEAF_SEC", "15"))
 # Long window while friday-play holds music (Redis + PID + session file age). During hold,
 # stop_music() is a no-op unless force=True (spoken "stop" after LISTEN_SONG_STOP_GRACE_SEC).
 # Mic energy never stops music; only transcribed commands do. Override via LISTEN_MUSIC_PROTECT_SEC.
-_play_sec    = int(os.environ.get("FRIDAY_PLAY_SECONDS", "45").split("#")[0].strip())
+def _int_env_sec(name: str, default: int = 0) -> int:
+    raw = os.environ.get(name, "").strip().split("#")[0].strip()
+    if not raw:
+        return default
+    try:
+        return max(1, int(float(raw)))
+    except ValueError:
+        return default
+
+
+_base_play = _int_env_sec("FRIDAY_PLAY_SECONDS", 45)
+_entry_play = _int_env_sec("FRIDAY_ENTRY_PLAY_SECONDS", 0)
+_sched_play = _int_env_sec("FRIDAY_SCHEDULER_PLAY_SECONDS", 0)
+_entry_eff = _entry_play if _entry_play > 0 else _base_play
+_sched_eff = _sched_play if _sched_play > 0 else _base_play
+_play_sec = max(_entry_eff, _sched_eff)
 MUSIC_PROTECT_SEC = float(os.environ.get("LISTEN_MUSIC_PROTECT_SEC", str(_play_sec + 15)))
 # Seconds after friday-play starts before spoken "stop" may cut the song (VAD never cuts music).
 SONG_STOP_GRACE_SEC = float(os.environ.get("LISTEN_SONG_STOP_GRACE_SEC", "5"))
@@ -799,10 +814,18 @@ def main():
             DEAF_SEC, MUSIC_PROTECT_SEC, SONG_STOP_GRACE_SEC,
         )
 
+    _defer_notice = False
     while True:
         if should_defer_voice_for_cursor():
+            if not _defer_notice:
+                log.info(
+                    "Mic deferred — IDE has focus (FRIDAY_DEFER_WHEN_CURSOR). "
+                    "Alt-tab away or set FRIDAY_DEFER_WHEN_CURSOR=false in .env."
+                )
+                _defer_notice = True
             time.sleep(0.25)
             continue
+        _defer_notice = False
         try:
             audio = record_phrase(mic_idx)
             _mic_errors = 0   # reset backoff on success

@@ -7,9 +7,9 @@
   unhealthy, exits with a message (no automatic kill).
 
 .PARAMETER ForceKill
-  **Explicit only:** stop ffplay/friday-player, free ports 3847/3848 (taskkill listeners),
-  stop auxiliary Python daemons (listen, ambient, cursor-reply-watch, SAGE OCR, music,
-  stray friday-speak), then start. Use when you truly want to replace a stuck stack.
+  **Explicit only:** POST skill-gateway /internal/stop-all-media?full=1 (kill players, clear TTS Redis),
+  stop friday-speak and all voice-related Python daemons (listen, ambient, watchers, SAGE,
+  gmail, tracker, reminders, Argus, music), free ports 3847/3848, clear locks again, then start.
 
 .PARAMETER SkipDocker
   Skip Docker compose up for postgres / n8n / redis-insight.
@@ -67,26 +67,63 @@ function Test-OpenClawHealthy {
 Write-Host ""
 Write-Host "=== OpenClaw restart ===" -ForegroundColor Yellow
 
+function Stop-OpenClawPythonDaemon {
+  param([string]$Label, [string]$Pattern)
+  $hit = $false
+  Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -like $Pattern } |
+    ForEach-Object {
+      $hit = $true
+      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+      Write-Host "  stop $Label PID $($_.ProcessId)"
+    }
+  if (-not $hit) {
+    Write-Host "  (no $Label)" -ForegroundColor DarkGray
+  }
+}
+
 if ($ForceKill) {
-  Write-Host "ForceKill: stopping playback, freeing 3847/3848, stopping auxiliary Python daemons..." -ForegroundColor Magenta
+  Write-Host "ForceKill: stop all media + TTS locks, release voice pipeline, free 3847/3848..." -ForegroundColor Magenta
+
+  # While skill-gateway is still up: kill players, clear Redis TTS/music locks (full panic).
+  try {
+    Invoke-WebRequest -Uri 'http://127.0.0.1:3848/internal/stop-all-media?full=1' -Method POST -TimeoutSec 4 -UseBasicParsing | Out-Null
+    Write-Host "  gateway POST /internal/stop-all-media?full=1 (players + TTS locks)" -ForegroundColor DarkGray
+  } catch {
+    Write-Host "  gateway stop-all-media skipped (3848 not reachable)" -ForegroundColor DarkGray
+  }
+
+  # Any in-flight friday-speak / daemons that spawn TTS — before killing Node listeners.
+  Stop-OpenClawPythonDaemon 'friday-speak' '*friday-speak*'
+  Stop-OpenClawPythonDaemon 'gmail-watch' '*gmail-watch*'
+  Stop-OpenClawPythonDaemon 'friday-action-tracker' '*friday-action-tracker*'
+  Stop-OpenClawPythonDaemon 'friday-reminder-watch' '*friday-reminder-watch*'
+  Stop-OpenClawPythonDaemon 'argus' '*argus.py*'
+  Stop-OpenClawPythonDaemon 'friday-listen' '*friday-listen*'
+  Stop-OpenClawPythonDaemon 'friday-ambient' '*friday-ambient*'
+  Stop-OpenClawPythonDaemon 'cursor-reply-watch' '*cursor-reply-watch*'
+  Stop-OpenClawPythonDaemon 'cursor-thinking-ocr' '*cursor-thinking-ocr*'
+  Stop-OpenClawPythonDaemon 'friday-music-scheduler' '*friday-music-scheduler*'
+
+  Start-Sleep -Milliseconds 400
 
   $ffplayProcs = @(Get-Process -Name ffplay -ErrorAction SilentlyContinue)
   if ($ffplayProcs.Count -gt 0) {
     $ffplayProcs | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
-    Write-Host "  killed $($ffplayProcs.Count) ffplay process(es) (song/TTS stopped)"
+    Write-Host "  killed $($ffplayProcs.Count) ffplay process(es)"
   }
 
   $fridayPlayer = @(Get-Process -Name 'friday-player' -ErrorAction SilentlyContinue)
   if ($fridayPlayer.Count -gt 0) {
     $fridayPlayer | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
-    Write-Host "  killed $($fridayPlayer.Count) friday-player process(es) (Edge TTS playback)"
+    Write-Host "  killed $($fridayPlayer.Count) friday-player process(es)"
   }
 
   Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
     Where-Object { $_.CommandLine -like '*friday-play*' -or $_.CommandLine -like '*yt_dlp*' } |
     ForEach-Object {
       Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-      Write-Host "  killed play/download process (PID $($_.ProcessId))"
+      Write-Host "  killed play/download PID $($_.ProcessId)"
     }
 
   $pidFile = Join-Path $env:TEMP "friday-play.pid"
@@ -95,48 +132,6 @@ if ($ForceKill) {
   Write-Host "Freeing ports 3848 and 3847..."
   Stop-ListenersOnPort @(3848, 3847)
   Start-Sleep -Milliseconds 600
-
-  Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -like '*friday-listen*' } |
-    ForEach-Object {
-      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-      Write-Host "  killed old voice daemon (PID $($_.ProcessId))"
-    }
-
-  Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -like '*friday-ambient*' } |
-    ForEach-Object {
-      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-      Write-Host "  killed old ambient daemon (PID $($_.ProcessId))"
-    }
-
-  Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -like '*cursor-reply-watch*' } |
-    ForEach-Object {
-      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-      Write-Host "  killed old cursor-reply watcher (PID $($_.ProcessId))"
-    }
-
-  Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -like '*cursor-thinking-ocr*' } |
-    ForEach-Object {
-      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-      Write-Host "  killed old cursor-thinking-ocr (PID $($_.ProcessId))"
-    }
-
-  Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -like '*friday-music-scheduler*' } |
-    ForEach-Object {
-      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-      Write-Host "  killed old music scheduler (PID $($_.ProcessId))"
-    }
-
-  Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -like '*friday-speak*' } |
-    ForEach-Object {
-      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-      Write-Host "  killed stray TTS process (PID $($_.ProcessId))"
-    }
 }
 else {
   Write-Host "Safe mode (default): no kills on 3847/3848 or OpenClaw Python daemons." -ForegroundColor Cyan

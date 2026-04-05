@@ -36,7 +36,7 @@ const CompanySetupPage: React.FC<Props> = ({ theme = 'dark' }) => {
 
   return (
     <div className={`${styles.authWrap} ${theme === 'light' ? styles.light : ''}`}>
-      <div className={styles.card} style={{ maxWidth: 480 }}>
+      <div className={`${styles.card} ${styles.cardWide}`}>
         <h1 className={styles.title}>Company profile</h1>
         <p className={styles.steps}>Step {step} of 3 — this shapes voice replies for everyone in your organization</p>
         {err ? <div className={styles.err}>{err}</div> : null}

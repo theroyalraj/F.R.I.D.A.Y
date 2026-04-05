@@ -21,7 +21,7 @@ PERSONAS: dict[str, dict[str, str]] = {
     "jarvis": {
         "name": "Jarvis",
         "title": "Chief of Staff",
-        "voice": "en-US-EmmaMultilingualNeural",
+        "voice": "en-US-AvaMultilingualNeural",
         "rate": "",
         "personality": "Composed, warm, confident — your primary executive assistant.",
     },
@@ -63,7 +63,7 @@ PERSONAS: dict[str, dict[str, str]] = {
     "harper": {
         "name": "Harper",
         "title": "Executive Assistant",
-        "voice": "en-US-AvaMultilingualNeural",
+        "voice": "en-US-JennyNeural",
         "rate": "",
         "personality": "Organised, supportive; reminders without nagging.",
     },
@@ -88,12 +88,50 @@ def _env_upper(role: str) -> str:
     return role.strip().upper().replace("-", "_")
 
 
+def _redis_url() -> str:
+    return (
+        os.environ.get("OPENCLAW_REDIS_URL", "").strip()
+        or os.environ.get("FRIDAY_AMBIENT_REDIS_URL", "").strip()
+        or "redis://127.0.0.1:6379"
+    )
+
+
+def _persona_patch_from_redis() -> dict[str, dict[str, str]]:
+    """Partial overrides written by pc-agent when Postgres voice_agent_personas changes."""
+    try:
+        import redis as _redis_mod
+
+        r = _redis_mod.Redis.from_url(_redis_url(), decode_responses=True, socket_timeout=1.5)
+        blob = r.get("openclaw:voice_agent_personas_patch")
+        if not blob:
+            return {}
+        import json as _json
+
+        o = _json.loads(blob)
+        return o if isinstance(o, dict) else {}
+    except Exception:
+        return {}
+
+
+def _apply_stored_persona_patch(out: dict[str, str], role_key: str, patch_all: dict[str, dict]) -> None:
+    if not patch_all:
+        return
+    p = patch_all.get(role_key)
+    if not isinstance(p, dict):
+        return
+    for fld in ("name", "title", "voice", "personality", "rate"):
+        v = p.get(fld)
+        if isinstance(v, str) and v.strip():
+            out[fld] = v.strip()
+
+
 def get_persona(role: str) -> dict[str, str]:
-    """Return persona dict with voice/rate resolved from OPENCLAW_* env and legacy keys."""
+    """Return persona dict: code defaults + Redis/Postgres patch + OPENCLAW_* env and legacy keys."""
     key = role.strip().lower()
     if key not in PERSONAS:
         raise KeyError(f"Unknown OpenClaw persona: {role}")
     out = dict(PERSONAS[key])
+    _apply_stored_persona_patch(out, key, _persona_patch_from_redis())
 
     u = _env_upper(key)
     v = os.environ.get(f"OPENCLAW_{u}_VOICE", "").strip()

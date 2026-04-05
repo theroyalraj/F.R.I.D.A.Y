@@ -1,0 +1,209 @@
+/**
+ * Post-task "done song" flow: ask before playing (default) so TTS summary does not kill friday-play.
+ * Modes: off | immediate | ask (FRIDAY_DONE_SONG_MODE).
+ */
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { existsSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { pythonChildExecutable } from './winPython.js';
+import { getSpeakStyle, normalizeSpeakStyle, mergeDeliveryWithSpeakStyle } from './speakStyle.js';
+import { getAllVoiceContexts } from './voiceRedis.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const PLAY_SCRIPT = path.resolve(__dirname, '../../skill-gateway/scripts/friday-play.py');
+const SPEAK_SCRIPT = path.resolve(__dirname, '../../skill-gateway/scripts/friday-speak.py');
+
+const CTX_LABEL = {
+  api: 'Listen UI',
+  'cursor:main': 'Cursor',
+  'cursor:subagent': 'Cursor Task',
+  'cursor:reply': 'Cursor Reply',
+  'cursor:thinking': 'Thinking',
+};
+
+function parseIntEnv(name, defaultVal) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return defaultVal;
+  const n = parseInt(String(raw).split('#')[0].trim(), 10);
+  return Number.isFinite(n) ? n : defaultVal;
+}
+
+/** Same shape as server.js greetingTtsRatePitch (Jarvis-style delivery). */
+function greetingTtsRatePitch() {
+  const off = ['false', '0', 'no', 'off'];
+  const raw = (process.env.FRIDAY_TTS_JARVIS_RANDOM || 'true').toLowerCase();
+  if (off.includes(raw)) {
+    return {
+      FRIDAY_TTS_RATE: process.env.FRIDAY_TTS_JARVIS_RATE || '+10%',
+      FRIDAY_TTS_PITCH: process.env.FRIDAY_TTS_JARVIS_PITCH || '+2Hz',
+    };
+  }
+  const rLo = parseIntEnv('FRIDAY_TTS_JARVIS_RATE_MIN_PCT', 3);
+  const rHi = parseIntEnv('FRIDAY_TTS_JARVIS_RATE_MAX_PCT', 12);
+  const pLo = parseIntEnv('FRIDAY_TTS_JARVIS_PITCH_MIN_HZ', 0);
+  const pHi = parseIntEnv('FRIDAY_TTS_JARVIS_PITCH_MAX_HZ', 10);
+  const rMin = Math.min(rLo, rHi);
+  const rMax = Math.max(rLo, rHi);
+  const pMin = Math.min(pLo, pHi);
+  const pMax = Math.max(pLo, pHi);
+  const rp = rMin + Math.floor(Math.random() * (rMax - rMin + 1));
+  const ph = pMin + Math.floor(Math.random() * (pMax - pMin + 1));
+  return {
+    FRIDAY_TTS_RATE: `${rp >= 0 ? '+' : ''}${rp}%`,
+    FRIDAY_TTS_PITCH: `${ph >= 0 ? '+' : ''}${ph}Hz`,
+  };
+}
+
+function shortVoiceLabel(voiceId) {
+  const id = String(voiceId || '');
+  const m = id.match(/-(\w+)Neural/);
+  return m ? m[1] : id.slice(-14) || 'voice';
+}
+
+/**
+ * @param {string} song
+ * @param {ReturnType<typeof normalizeSpeakStyle>} style
+ */
+export function buildCelebrationAskText(song, style) {
+  const s = normalizeSpeakStyle(style);
+  if (s.snarky) {
+    return `Right, we're done here. I could hit you with ${song} like a budget action movie — tap Play if you're into that — or Focus recap for the grown-up status line. Your call.`;
+  }
+  if (s.funny) {
+    return `Aaand scene. Want a gloriously over the top micro-blast of ${song}? Smash Play — or choose Focus recap if you're pretending spreadsheets are exciting.`;
+  }
+  if (s.bored) {
+    return `Finished. If you care, ${song} is an option — Play — otherwise Focus recap and I'll monotone your status strip.`;
+  }
+  if (s.dry) {
+    return `Done. Optional stinger: ${song}. Play — or Focus recap for a short status line, no guitar.`;
+  }
+  if (s.warm) {
+    return `All sorted. If you'd like a little lift, I can play a snippet of ${song} — tap Play — or Focus recap and I'll give you a soft line on where everyone's voices are.`;
+  }
+  return `Task complete. Fancy a short burst of ${song}? Tap Play on screen, or Focus recap for a quick channel roundup instead.`;
+}
+
+/**
+ * @param {ReturnType<typeof normalizeSpeakStyle>} style
+ * @param {Awaited<ReturnType<typeof getAllVoiceContexts>>} contexts
+ */
+export function buildFocusModeDigest(style, contexts) {
+  const s = normalizeSpeakStyle(style);
+  const top = Array.isArray(contexts) ? contexts.slice(0, 3) : [];
+  const parts = top.map((c) => {
+    const lab = CTX_LABEL[c.context] || c.context;
+    return `${lab} on ${shortVoiceLabel(c.voice)}`;
+  });
+  const list = parts.length ? parts.join('. ') : 'voice channels look quiet on my board';
+
+  let opener = "Okay — focus recap. I'll skip the victory lap.";
+  if (s.snarky) opener = "Fine — you're in laser focus, not stadium mode. Skipping the fanfare.";
+  if (s.funny) opener = "Ha — focus recap, bold choice. I'll keep the band on the bench.";
+  if (s.bored) opener = "Sure, no song. Here's the tiny dashboard tick-list.";
+  if (s.dry) opener = "Skipping music. Status only.";
+  if (s.warm) opener = "Alright, I'll keep things calm — here's a quick catch-up for you.";
+
+  let out = `${opener} Last activity touchpoints: ${list}. Carry on when you're ready.`;
+  if (s.customPrompt && s.customPrompt.trim()) {
+    out += ` ${s.customPrompt.trim().slice(0, 240)}`;
+  }
+  return out;
+}
+
+export function getCelebrationMode() {
+  const song = (process.env.FRIDAY_DONE_SONG || '').trim();
+  if (!song) return 'off';
+  if (/^(false|0|no|off)$/i.test((process.env.FRIDAY_AUTOPLAY || 'true').trim())) return 'off';
+  const m = (process.env.FRIDAY_DONE_SONG_MODE || 'ask').trim().toLowerCase();
+  if (['off', 'false', '0', 'no'].includes(m)) return 'off';
+  if (['immediate', 'now', 'auto'].includes(m)) return 'immediate';
+  return 'ask';
+}
+
+/**
+ * @returns {Promise<Record<string, never> | { celebration: { song: string, askText: string, delayMsBeforeAsk: number } }>}
+ */
+export async function buildCelebrationOffer() {
+  if (getCelebrationMode() !== 'ask') return {};
+  const song = (process.env.FRIDAY_DONE_SONG || '').trim();
+  if (!song || !existsSync(PLAY_SCRIPT)) return {};
+  const style = await getSpeakStyle();
+  const askText = buildCelebrationAskText(song, style);
+  const rawDelay = process.env.FRIDAY_CELEBRATION_ASK_DELAY_MS;
+  const parsedDelay =
+    rawDelay === undefined || rawDelay === ''
+      ? 4000
+      : Number(String(rawDelay).split('#')[0].trim());
+  const delayMsBeforeAsk = Math.min(
+    120_000,
+    Math.max(1500, Number.isFinite(parsedDelay) ? parsedDelay : 4000),
+  );
+  return { celebration: { song, askText, delayMsBeforeAsk } };
+}
+
+export function playDoneSong(log) {
+  const song = (process.env.FRIDAY_DONE_SONG || '').trim();
+  if (!song || !existsSync(PLAY_SCRIPT)) return;
+  const child = spawn(pythonChildExecutable(), [PLAY_SCRIPT, song], {
+    env: { ...process.env },
+    stdio: ['ignore', 'ignore', 'pipe'],
+    windowsHide: true,
+    detached: true,
+  });
+  child.unref();
+  child.stderr?.on('data', (buf) => {
+    const line = buf.toString().trim();
+    if (line) log?.warn({ line: line.slice(0, 400) }, 'done-song stderr');
+  });
+  child.on('error', (e) => log?.warn({ err: String(e.message) }, 'done-song spawn failed'));
+  log?.info({ song }, 'done-song: spawned friday-play.py');
+}
+
+/**
+ * Priority TTS (same as /voice/speak-async) with speak-style delivery merge.
+ * @param {import('pino').Logger|undefined} log
+ */
+export async function spawnCelebrationSpeak(text, log) {
+  const t = String(text || '').trim();
+  if (!t || !existsSync(SPEAK_SCRIPT)) return;
+  const style = await getSpeakStyle();
+  const base = greetingTtsRatePitch();
+  const delivery = mergeDeliveryWithSpeakStyle(base, style);
+  const child = spawn(pythonChildExecutable(), [SPEAK_SCRIPT, t], {
+    env: {
+      ...process.env,
+      FRIDAY_TTS_VOICE: process.env.FRIDAY_TTS_VOICE || 'en-US-AvaMultilingualNeural',
+      FRIDAY_TTS_DEVICE: process.env.FRIDAY_TTS_DEVICE || 'default',
+      FRIDAY_TTS_PRIORITY: '1',
+      FRIDAY_TTS_BYPASS_CURSOR_DEFER: 'true',
+      ...delivery,
+    },
+    detached: true,
+    stdio: ['ignore', 'ignore', 'pipe'],
+    windowsHide: true,
+  });
+  child.unref();
+  child.stderr?.on('data', (buf) => {
+    const line = buf.toString().trim();
+    if (line) log?.warn({ fridaySpeak: line }, 'celebration speak stderr');
+  });
+  child.on('error', (e) => log?.warn({ err: String(e.message) }, 'celebration speak spawn failed'));
+}
+
+/**
+ * @param {import('pino').Logger|undefined} log
+ * @param {boolean} accept
+ */
+export async function resolveCelebration(log, accept) {
+  if (accept) {
+    playDoneSong(log);
+    return { played: true, spoke: false };
+  }
+  const style = await getSpeakStyle();
+  const contexts = await getAllVoiceContexts();
+  const line = buildFocusModeDigest(style, contexts);
+  await spawnCelebrationSpeak(line, log);
+  return { played: false, spoke: true };
+}

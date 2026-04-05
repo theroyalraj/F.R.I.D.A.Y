@@ -23,12 +23,12 @@ export function stripModelCliFlags(parts) {
   return out;
 }
 
-/** Extra `--model` args when not already in CLAUDE_CLI_ARGS. Default haiku = faster / cheaper. */
+/** Extra `--model` args when not already in CLAUDE_CLI_ARGS. Default sonnet when unset. */
 function modelCliArgs(extra) {
   if (cliArgsHasModelFlag(extra)) return [];
   const raw = process.env.CLAUDE_MODEL;
   if (raw && String(raw).trim().toLowerCase() === 'inherit') return [];
-  const name = raw && String(raw).trim() ? String(raw).trim() : 'haiku';
+  const name = raw && String(raw).trim() ? String(raw).trim() : 'sonnet';
   return ['--model', name];
 }
 

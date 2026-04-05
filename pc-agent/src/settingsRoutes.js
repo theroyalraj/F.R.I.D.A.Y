@@ -1,6 +1,12 @@
 import express from 'express';
 import { perceptionDbConfigured } from './perceptionDb.js';
 import { getAmbientMerged, putAmbientPartial } from './settingsDb.js';
+import {
+  getVoiceAgentPersonasMerged,
+  putVoiceAgentPersonaPatch,
+  resetVoiceAgentPersonaPatch,
+  SETTINGS_KEY,
+} from './voiceAgentPersona.js';
 
 export function createSettingsRouter(authMiddleware) {
   const r = express.Router();
@@ -17,6 +23,70 @@ export function createSettingsRouter(authMiddleware) {
     try {
       const merged = await getAmbientMerged();
       res.json({ ok: true, ...merged });
+    } catch (e) {
+      res.status(500).json({ error: String(e.message || e) });
+    }
+  });
+
+  /**
+   * Voice-agent personas (OpenClaw Labs roster): defaults merged with JSON from Postgres openclaw_settings.voice_agent_personas.
+   * PUT body: full or partial { jarvis: { name?, title?, voice?, personality?, rate? }, ... } — replaces stored patch.
+   * DELETE: clear patch (back to code defaults only).
+   */
+  r.get('/personas', async (_req, res) => {
+    if (!perceptionDbConfigured()) {
+      return res.status(503).json({
+        error: 'Database not configured',
+        hint: 'Set OPENCLAW_SQLITE_PATH or OPENCLAW_DATABASE_URL.',
+      });
+    }
+    try {
+      const { merged, patch, fromDatabase } = await getVoiceAgentPersonasMerged();
+      res.json({
+        ok: true,
+        settingsKey: SETTINGS_KEY,
+        fromDatabase,
+        patch,
+        merged,
+        note: 'Edit patch via PUT /settings/personas — merged = defaults + patch. Python daemons read Redis openclaw:voice_agent_personas_patch.',
+      });
+    } catch (e) {
+      res.status(500).json({ error: String(e.message || e) });
+    }
+  });
+
+  r.put('/personas', async (req, res) => {
+    if (!perceptionDbConfigured()) {
+      return res.status(503).json({
+        error: 'Database not configured',
+        hint: 'Set OPENCLAW_SQLITE_PATH or OPENCLAW_DATABASE_URL.',
+      });
+    }
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    try {
+      const { patch, merged, redisSynced } = await putVoiceAgentPersonaPatch(body);
+      res.json({
+        ok: true,
+        settingsKey: SETTINGS_KEY,
+        patch,
+        merged,
+        redisSynced,
+      });
+    } catch (e) {
+      res.status(400).json({ error: String(e.message || e) });
+    }
+  });
+
+  r.delete('/personas', async (_req, res) => {
+    if (!perceptionDbConfigured()) {
+      return res.status(503).json({
+        error: 'Database not configured',
+        hint: 'Set OPENCLAW_SQLITE_PATH or OPENCLAW_DATABASE_URL.',
+      });
+    }
+    try {
+      const { patch, merged, redisSynced } = await resetVoiceAgentPersonaPatch();
+      res.json({ ok: true, patch, merged, redisSynced });
     } catch (e) {
       res.status(500).json({ error: String(e.message || e) });
     }

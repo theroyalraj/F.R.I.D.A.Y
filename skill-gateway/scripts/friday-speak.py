@@ -8,7 +8,7 @@ Usage:
   python friday-speak.py --stdout "Text"                    # pipe MP3 bytes to stdout
 
 Env vars (all optional):
-  FRIDAY_TTS_VOICE   edge-tts voice name  (default: en-US-EmmaMultilingualNeural)
+  FRIDAY_TTS_VOICE   edge-tts voice name  (default: en-US-AvaMultilingualNeural)
   FRIDAY_TTS_DEVICE  audio device substring (default: "" = Windows default device)
                      set to "Echo Dot", "WH-1000XM3", etc. to lock a specific output
   FRIDAY_TTS_RATE    speed               (default: +7.5% ≈ 1.075× vs baseline)
@@ -51,7 +51,7 @@ Env vars (all optional):
   FRIDAY_TTS_CHUNK_MAX_CHARS  Max merged sentence length per chunk (default 380; clamped).
 
 Good voices (respect FRIDAY_TTS_VOICE_BLOCK in .env — blocked ids are never used):
-  en-US-EmmaMultilingualNeural  US female multilingual — repo default when env unset
+  en-US-AvaMultilingualNeural  US female multilingual — repo default when env unset
   en-US-GuyNeural               US male neural
   en-IN-NeerjaExpressiveNeural  Indian English / Hinglish
   hi-IN-SwaraNeural             Hindi female
@@ -151,7 +151,7 @@ TEXT   = " ".join(_args).strip()
 # Normalise immediately — every downstream path (cache key, edge-tts, SAPI) gets clean text.
 # The function is defined later in this file; we call it after full module load below.
 _RAW_TEXT = TEXT
-VOICE  = os.environ.get("FRIDAY_TTS_VOICE",  "en-US-EmmaMultilingualNeural")
+VOICE  = os.environ.get("FRIDAY_TTS_VOICE",  "en-US-AvaMultilingualNeural")
 
 # Session-sticky voice: .session-voice.json overrides the env default above
 # unless FRIDAY_TTS_USE_SESSION_STICKY_VOICE is false (ambient alternate voice).
@@ -208,11 +208,11 @@ _blocked_tts |= {
     "en-GB-ThomasNeural",
 }
 if VOICE in _blocked_tts:
-    _pref = os.environ.get("FRIDAY_TTS_VOICE", "en-US-EmmaMultilingualNeural").strip() or "en-US-EmmaMultilingualNeural"
+    _pref = os.environ.get("FRIDAY_TTS_VOICE", "en-US-AvaMultilingualNeural").strip() or "en-US-AvaMultilingualNeural"
     if _pref not in _blocked_tts:
         VOICE = _pref
     else:
-        VOICE = "en-US-EmmaMultilingualNeural"
+        VOICE = "en-US-AvaMultilingualNeural"
 
 RATE   = os.environ.get("FRIDAY_TTS_RATE",   "+7.5%")
 PITCH  = os.environ.get("FRIDAY_TTS_PITCH",  "+2Hz")
@@ -1053,12 +1053,21 @@ def _apply_speak_style_rate_pitch_from_redis() -> None:
         return float(m.group(1)) if m else 2.0
 
     def _fmt_pct(n: float) -> str:
+        # Edge TTS rejects values like "+10.0%" — use integer percent when whole.
         s = "" if n < 0 else "+"
-        return f"{s}{round(n, 1)}%"
+        r = round(n, 1)
+        if abs(r - int(r)) < 1e-9:
+            return f"{s}{int(r)}%"
+        body = f"{r:.1f}".rstrip("0").rstrip(".")
+        return f"{s}{body}%"
 
     def _fmt_hz(n: float) -> str:
         s = "" if n < 0 else "+"
-        return f"{s}{round(n, 1)}Hz"
+        r = round(n, 1)
+        if abs(r - int(r)) < 1e-9:
+            return f"{s}{int(r)}Hz"
+        body = f"{r:.1f}".rstrip("0").rstrip(".")
+        return f"{s}{body}Hz"
 
     base_r = _parse_pct(RATE)
     base_p = _parse_hz(PITCH)
@@ -1115,6 +1124,7 @@ def _release_redis_tts_lock() -> None:
 
 # ── Edge TTS rate-limit guard ────────────────────────────────────────────────
 _REDIS_TTS_LAST_KEY = "friday:tts:last_call"
+_REDIS_TTS_ACTIVITY_KEY = "friday:tts:last_activity"  # long TTL — idle watchers (e.g. ECHO) use this
 _MIN_TTS_GAP_SEC = 0.15
 
 def _rate_limit_ok() -> bool:
@@ -1136,6 +1146,17 @@ def _stamp_tts_call() -> None:
         return
     try:
         r.set(_REDIS_TTS_LAST_KEY, str(time.time()), ex=300)
+    except Exception:
+        pass
+
+
+def _stamp_tts_activity_long() -> None:
+    """Wall-clock of last spoken output — survives short last_call TTL for silence / idle daemons."""
+    r = _get_redis_client()
+    if r is None:
+        return
+    try:
+        r.set(_REDIS_TTS_ACTIVITY_KEY, str(time.time()), ex=604800)  # 7 days
     except Exception:
         pass
 
@@ -1473,17 +1494,20 @@ async def speak():
             except Exception:
                 pass
 
-        # Per-sentence voice rotation pool — FRIDAY_CURSOR_THINKING_VOICE_POOL
+        # Per-span voice rotation pool — merge dedicated thinking voice (SAGE / env / session)
+        # with FRIDAY_CURSOR_THINKING_VOICE_POOL so rotation includes the persona voice, not only extras.
         global _thinking_voice_pool
         _tv_pool_raw = os.environ.get("FRIDAY_CURSOR_THINKING_VOICE_POOL", "").strip()
-        _thinking_voice_pool = []
-        if _tv_pool_raw:
-            _pool_cands = [v.strip() for v in _tv_pool_raw.split(",") if v.strip()]
-            _thinking_voice_pool = [v for v in _pool_cands if v not in _blocked_tts]
-            if len(_thinking_voice_pool) > 1:
-                print(f"[friday-speak] thinking voice pool ({len(_thinking_voice_pool)}): {', '.join(_thinking_voice_pool)}", flush=True)
-            else:
-                _thinking_voice_pool = []  # need at least 2 to rotate
+        _pool_cands = [v.strip() for v in _tv_pool_raw.split(",") if v.strip()] if _tv_pool_raw else []
+        _merged_pool: list[str] = []
+        if VOICE and str(VOICE).strip() and VOICE not in _blocked_tts:
+            _merged_pool.append(VOICE)
+        for _pv in _pool_cands:
+            if _pv and _pv not in _blocked_tts and _pv not in _merged_pool:
+                _merged_pool.append(_pv)
+        _thinking_voice_pool = _merged_pool if len(_merged_pool) > 1 else []
+        if _thinking_voice_pool:
+            print(f"[friday-speak] thinking voice pool ({len(_thinking_voice_pool)}): {', '.join(_thinking_voice_pool)}", flush=True)
 
     preempted_replay: str | None = None
     _my_gen = 0
@@ -1531,6 +1555,7 @@ async def speak():
             print("[friday-speak] timed out waiting for Redis TTS lock — skipping", flush=True)
             sys.exit(0)
         _stamp_tts_call()
+        _stamp_tts_activity_long()
 
         # ── Global serialisation: wait for any other speak instance to finish ──
         # Uses O_CREAT|O_EXCL for atomic lock acquisition on NTFS — eliminates

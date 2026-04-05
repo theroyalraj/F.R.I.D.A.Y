@@ -10,6 +10,7 @@ Env (see .env):
   FRIDAY_TRACKER_POLL_SEC      default 900 (15 min)
   FRIDAY_TRACKER_MODEL         default claude-haiku-4-5
   FRIDAY_TRACKER_MAX_BATCH     messages per extraction call (default 10)
+  FRIDAY_TRACKER_IMAP_BATCH    Gmail RFC822 UID FETCH chunk size (default 5; fewer round trips)
   FRIDAY_TRACKER_GMAIL_LOOKBACK_DAYS   default 3
   FRIDAY_TRACKER_WHATSAPP_SUMMARY    send text to WHATSAPP_NOTIFY_NUMBER (default true)
   FRIDAY_TRACKER_QUIET_START / FRIDAY_TRACKER_QUIET_END  optional 24h local hours
@@ -40,6 +41,7 @@ import io
 import json
 import logging
 import os
+import re
 import platform
 import subprocess
 import sys
@@ -109,7 +111,9 @@ GIT_COMMITS_N = max(0, min(30, _env_int("FRIDAY_BRIEFING_GIT_COMMITS", 10)))
 DONE_TODOS_N = max(0, min(30, _env_int("FRIDAY_BRIEFING_DONE_TODOS", 12)))
 MODEL = os.environ.get("FRIDAY_TRACKER_MODEL", "claude-haiku-4-5").strip()
 MAX_BATCH = max(1, min(25, _env_int("FRIDAY_TRACKER_MAX_BATCH", 10)))
+IMAP_BATCH = max(1, min(30, _env_int("FRIDAY_TRACKER_IMAP_BATCH", 5)))
 LOOKBACK_DAYS = max(1, _env_int("FRIDAY_TRACKER_GMAIL_LOOKBACK_DAYS", 3))
+_UID_FETCH_RE = re.compile(rb"UID (\d+)")
 WA_SUMMARY = _env_bool("FRIDAY_TRACKER_WHATSAPP_SUMMARY", True)
 
 GMAIL_ADDRESS = os.environ.get("GMAIL_ADDRESS", "").strip()
@@ -863,6 +867,74 @@ def _imap_connect():
     return m
 
 
+def _plaintext_body_from_msg(msg: email.message.Message) -> str:
+    body = ""
+    try:
+        if msg.is_multipart():
+            for part in msg.walk():
+                ct = part.get_content_type()
+                cd = str(part.get("Content-Disposition", ""))
+                if ct == "text/plain" and "attachment" not in cd:
+                    raw_pl = part.get_payload(decode=True)
+                    body = raw_pl.decode(part.get_content_charset() or "utf-8", errors="replace")
+                    break
+        else:
+            pl = msg.get_payload(decode=True)
+            body = pl.decode(msg.get_content_charset() or "utf-8", errors="replace") if pl else ""
+        return textwrap.shorten(body.strip(), width=3000, placeholder="…")
+    except Exception:
+        return ""
+
+
+def _envelope_from_parsed_msg(msg: email.message.Message) -> dict:
+    date_str = msg.get("Date", "")
+    try:
+        date = parsedate_to_datetime(date_str).isoformat()
+    except Exception:
+        date = date_str
+    return {
+        "from": _extract_sender(msg.get("From", "")),
+        "subject": _decode_header(msg.get("Subject", "")),
+        "date": date,
+    }
+
+
+def _fetch_single_rfc822(conn: imaplib.IMAP4_SSL, uid: str) -> bytes | None:
+    try:
+        _, data = conn.uid("fetch", uid.encode(), "(RFC822)")
+        if not data or not data[0] or not isinstance(data[0], tuple):
+            return None
+        payload = data[0][1]
+        return bytes(payload) if isinstance(payload, (bytes, bytearray)) else None
+    except Exception:
+        return None
+
+
+def _fetch_rfc822_batch(conn: imaplib.IMAP4_SSL, uids: list[str]) -> dict[str, bytes]:
+    if not uids:
+        return {}
+    try:
+        typ, data = conn.uid("fetch", ",".join(uids), "(RFC822)")
+    except Exception:
+        return {}
+    if typ != "OK" or not data:
+        return {}
+    out: dict[str, bytes] = {}
+    for item in data:
+        if not isinstance(item, tuple) or len(item) != 2:
+            continue
+        meta, payload = item
+        if not isinstance(payload, (bytes, bytearray)):
+            continue
+        mb = meta if isinstance(meta, (bytes, bytearray)) else str(meta).encode("utf-8", errors="replace")
+        m = _UID_FETCH_RE.search(mb)
+        if not m:
+            continue
+        uid_key = m.group(1).decode("ascii", errors="ignore")
+        out[uid_key] = bytes(payload)
+    return out
+
+
 def _imap_fetch_messages() -> list[dict]:
     if not GMAIL_ADDRESS or not GMAIL_APP_PWD:
         return []
@@ -886,20 +958,33 @@ def _imap_fetch_messages() -> list[dict]:
             if typ != "OK" or not data or not data[0]:
                 continue
             uids = [u.decode() for u in data[0].split() if u]
-            for uid in uids:
-                msg_id = f"gmail:{folder}:{uid}"
-                env = _fetch_envelope(conn, uid)
-                body = _fetch_body(conn, uid)
-                out.append(
-                    {
-                        "source": "gmail",
-                        "message_id": msg_id,
-                        "sender": env.get("from", ""),
-                        "subject_or_chat": env.get("subject", ""),
-                        "body": body,
-                        "received_at": env.get("date", ""),
-                    }
-                )
+            for i in range(0, len(uids), IMAP_BATCH):
+                chunk = uids[i : i + IMAP_BATCH]
+                batch_raw = _fetch_rfc822_batch(conn, chunk)
+                for uid in chunk:
+                    msg_id = f"gmail:{folder}:{uid}"
+                    raw = batch_raw.get(uid) or _fetch_single_rfc822(conn, uid)
+                    if raw:
+                        try:
+                            parsed = email.message_from_bytes(raw)
+                            env = _envelope_from_parsed_msg(parsed)
+                            body = _plaintext_body_from_msg(parsed)
+                        except Exception:
+                            env = _fetch_envelope(conn, uid)
+                            body = _fetch_body(conn, uid)
+                    else:
+                        env = _fetch_envelope(conn, uid)
+                        body = _fetch_body(conn, uid)
+                    out.append(
+                        {
+                            "source": "gmail",
+                            "message_id": msg_id,
+                            "sender": env.get("from", ""),
+                            "subject_or_chat": env.get("subject", ""),
+                            "body": body,
+                            "received_at": env.get("date", ""),
+                        }
+                    )
     finally:
         try:
             conn.logout()

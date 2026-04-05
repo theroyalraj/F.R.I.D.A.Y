@@ -124,6 +124,47 @@ function readCursorReplyWatchFromDotEnv() {
   return main || sub || thinking;
 }
 
+/**
+ * all — single machine: gateway + agent + voice/Cursor daemons + action tracker (default).
+ * server — headless/backend: gateway + agent + optional Gmail watch + action tracker (no mic UI spawn).
+ * client — local speech/mic/Cursor helpers only; set PC_AGENT_URL if pc-agent runs elsewhere.
+ */
+function parseOpenclawMode() {
+  const arg = process.argv.find((a) => a.startsWith('--openclaw-mode='));
+  if (arg) {
+    const m = arg.split('=')[1]?.trim().toLowerCase();
+    if (['server', 'client', 'all'].includes(m)) return m;
+  }
+  const env = String(process.env.OPENCLAW_START_MODE || 'all').trim().toLowerCase();
+  if (['server', 'client', 'all'].includes(env)) return env;
+  return 'all';
+}
+
+/**
+ * Node --watch on gateway + agent (same idea as nodemon; no extra dependency).
+ * ON by default for local dev; OFF when NODE_ENV=production unless OPENCLAW_SERVER_WATCH=1.
+ * Set OPENCLAW_SERVER_WATCH=0 to disable while developing.
+ */
+function useServerWatch() {
+  const explicit = String(process.env.OPENCLAW_SERVER_WATCH || '').trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(explicit)) return true;
+  if (['0', 'false', 'no', 'off'].includes(explicit)) return false;
+  return String(process.env.NODE_ENV || '').toLowerCase() !== 'production';
+}
+
+function nodeArgsForServer(entryRel, watchPathsRel) {
+  const watch = useServerWatch();
+  if (!watch) return [entryRel];
+  const args = ['--watch'];
+  for (const p of watchPathsRel) args.push('--watch-path', p);
+  args.push(entryRel);
+  return args;
+}
+
+function readEmailWatchSpawnFromDotEnv() {
+  return envBool('FRIDAY_EMAIL_WATCH', false);
+}
+
 // ── Colours ──────────────────────────────────────────────────────────────────
 const C = {
   gateway:  '\x1b[36m',   // cyan
@@ -285,7 +326,19 @@ function freePort(port) {
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 async function main() {
-  if (NO_FREE_PORTS) {
+  const MODE = parseOpenclawMode();
+  process.stdout.write(`${C.warn}[openclaw] OPENCLAW start mode: ${MODE}${C.reset}\n`);
+  process.stdout.write(
+    `${C.warn}[openclaw] gateway/agent file watch: ${useServerWatch() ? 'ON' : 'OFF'} ` +
+      `(OPENCLAW_SERVER_WATCH / NODE_ENV) — edits under skill-gateway/src, pc-agent/src, or lib/ reload those servers; ` +
+      `root dot env changes still need npm run restart:force${C.reset}\n`,
+  );
+
+  if (MODE === 'client') {
+    process.stdout.write(
+      `${C.warn}[openclaw] client mode — leaving ports 3847 and 3848 untouched (remote pc-agent OK)${C.reset}\n`,
+    );
+  } else if (NO_FREE_PORTS) {
     process.stdout.write(`${C.warn}[openclaw] OPENCLAW_NO_FREE_PORTS set — not clearing ports 3847/3848${C.reset}\n`);
   } else if (FREE_PORTS_ON_START) {
     freePort(3848);
@@ -296,80 +349,123 @@ async function main() {
     );
   }
 
+  const modeBanner =
+    MODE === 'server'
+      ? '║ server: :3848 gateway │ :3847 agent │ email + tracker (no mic tab)  ║'
+      : MODE === 'client'
+        ? '║ client: mic │ ambient │ Cursor TTS · set PC_AGENT_URL if remote    ║'
+        : '║ gateway :3848 │ agent :3847 │ mic │ Jarvis + team                   ║';
   process.stdout.write(`${C.warn}
   ╔══════════════════════════════════════════════════╗
-  ║          OpenClaw  —  All Services               ║
-  ║ gateway :3848 │ agent :3847 │ mic │ Jarvis + team ║
+  ║          OpenClaw — ${String(MODE).toUpperCase().padEnd(8)} stack                    ║
+  ${modeBanner}
   ╚══════════════════════════════════════════════════╝
 ${C.reset}\n`);
 
-  await start('gateway', 'node', [
-    'skill-gateway/src/server.js',
-  ]);
-  await start('agent', 'node', [
-    'pc-agent/src/server.js',
-  ]);
-
-  // Wait for pc-agent to be healthy, then open Chrome to the listen UI
-  process.stdout.write(`${C.warn}[openclaw] Waiting for pc-agent to be ready…${C.reset}\n`);
-  const agentReady = await waitForPort(3847, 12_000);
-  if (agentReady) {
-    const listenUrl = 'http://127.0.0.1:3847/friday/listen';
-    process.stdout.write(`${C.warn}[openclaw] Opening Chrome → ${listenUrl}${C.reset}\n`);
-    openChrome(listenUrl);
-  } else {
-    process.stdout.write(`${C.warn}[openclaw] pc-agent not ready in time — skipping Chrome open${C.reset}\n`);
+  if (MODE === 'all' || MODE === 'server') {
+    await start('gateway', 'node', nodeArgsForServer('skill-gateway/src/server.js', [
+      'skill-gateway/src',
+      'lib',
+    ]));
+    await start('agent', 'node', nodeArgsForServer('pc-agent/src/server.js', [
+      'pc-agent/src',
+      'lib',
+    ]));
   }
 
-  const listenScript = path.join(ROOT, 'scripts', 'friday-listen.py');
-  if (existsSync(listenScript)) {
-    log('listener', 'voice daemon will start in 3 s...');
-    await start('listener', 'python', ['scripts/friday-listen.py'], { delayMs: 3000 });
-  } else {
-    process.stdout.write(`${C.warn}[openclaw] friday-listen.py not found — voice daemon skipped${C.reset}\n`);
+  if (MODE === 'all') {
+    // Wait for pc-agent to be healthy, then open Chrome to the listen UI
+    process.stdout.write(`${C.warn}[openclaw] Waiting for pc-agent to be ready…${C.reset}\n`);
+    const agentReady = await waitForPort(3847, 12_000);
+    if (agentReady) {
+      const listenUrl = 'http://127.0.0.1:3847/friday/listen';
+      process.stdout.write(`${C.warn}[openclaw] Opening Chrome → ${listenUrl}${C.reset}\n`);
+      openChrome(listenUrl);
+    } else {
+      process.stdout.write(`${C.warn}[openclaw] pc-agent not ready in time — skipping Chrome open${C.reset}\n`);
+    }
+  } else if (MODE === 'server') {
+    process.stdout.write(`${C.warn}[openclaw] Waiting for pc-agent (no browser open in server mode)…${C.reset}\n`);
+    await waitForPort(3847, 12_000);
+  } else if (MODE === 'client') {
+    const agentUrl = (process.env.PC_AGENT_URL || 'http://127.0.0.1:3847').replace(/\/$/, '');
+    process.stdout.write(
+      `${C.warn}[openclaw] client mode — voice commands go to ${agentUrl} (set PC_AGENT_URL if remote)${C.reset}\n`,
+    );
   }
 
-  const cursorWatchScript = path.join(ROOT, 'scripts', 'cursor-reply-watch.py');
-  if (readCursorReplyWatchFromDotEnv() && existsSync(cursorWatchScript)) {
-    log('cursor', 'Composer reply TTS watcher will start shortly after the voice daemon...');
-    await start('cursor', 'python', ['scripts/cursor-reply-watch.py'], { delayMs: 500 });
+  if (MODE === 'server') {
+    const emailScript = path.join(ROOT, 'scripts', 'gmail-watch.py');
+    if (readEmailWatchSpawnFromDotEnv() && existsSync(emailScript)) {
+      log('email', 'Gmail watch will start in 2 s…');
+      await start('email', 'python', ['scripts/gmail-watch.py'], {
+        delayMs: 2000,
+      });
+    }
   }
 
-  const thinkingOcrScript = path.join(ROOT, 'scripts', 'cursor-thinking-ocr.py');
-  if (readSageOcrFromDotEnv() && existsSync(thinkingOcrScript)) {
-    log('sage', 'SAGE (Head of Research) thinking OCR will start in 1.2 s...');
-    await start('sage', 'python', ['scripts/cursor-thinking-ocr.py'], { delayMs: 1200 });
-  }
+  if (MODE === 'all' || MODE === 'client') {
+    const listenScript = path.join(ROOT, 'scripts', 'friday-listen.py');
+    if (existsSync(listenScript)) {
+      log('listener', 'voice daemon will start in 3 s...');
+      await start('listener', 'python', ['scripts/friday-listen.py'], { delayMs: 3000 });
+    } else {
+      process.stdout.write(`${C.warn}[openclaw] friday-listen.py not found — voice daemon skipped${C.reset}\n`);
+    }
 
-  const argusScript = path.join(ROOT, 'scripts', 'argus.py');
-  if (readArgusFromDotEnv() && existsSync(argusScript)) {
-    log('argus', 'ARGUS (pending-accept watcher) will start in 1.5 s...');
-    await start('argus', 'python', ['scripts/argus.py'], { delayMs: 1500 });
-  }
+    const cursorWatchScript = path.join(ROOT, 'scripts', 'cursor-reply-watch.py');
+    if (readCursorReplyWatchFromDotEnv() && existsSync(cursorWatchScript)) {
+      log('cursor', 'Composer reply TTS watcher will start shortly after the voice daemon...');
+      await start('cursor', 'python', ['scripts/cursor-reply-watch.py'], { delayMs: 500 });
+    }
 
-  const ambientOn =
-    readFridayAmbientFromDotEnv() ||
-    ['1', 'true', 'yes', 'on'].includes(String(process.env.FRIDAY_AMBIENT || '').toLowerCase());
-  const ambientScript = path.join(ROOT, 'scripts', 'friday-ambient.py');
-  if (ambientOn && existsSync(ambientScript)) {
-    log('ambient', 'Jarvis ambient daemon will start in 4.5 s...');
-    await start('ambient', 'python', ['scripts/friday-ambient.py'], { delayMs: 4500 });
-  }
+    const thinkingOcrScript = path.join(ROOT, 'scripts', 'cursor-thinking-ocr.py');
+    if (readSageOcrFromDotEnv() && existsSync(thinkingOcrScript)) {
+      log('sage', 'SAGE (Head of Research) thinking OCR will start in 1.2 s...');
+      await start('sage', 'python', ['scripts/cursor-thinking-ocr.py'], { delayMs: 1200 });
+    }
 
-  // Background music scheduler — plays a song every FRIDAY_MUSIC_INTERVAL_MIN minutes
-  const musicSchedOn = ['1', 'true', 'yes', 'on'].includes(
-    String(process.env.FRIDAY_MUSIC_SCHEDULER || '').toLowerCase(),
-  );
-  const musicSchedScript = path.join(ROOT, 'scripts', 'friday-music-scheduler.py');
-  if (musicSchedOn && existsSync(musicSchedScript)) {
-    log('music', 'background music scheduler will start in 6 s...');
-    await start('music', 'python', ['scripts/friday-music-scheduler.py'], { delayMs: 6000 });
+    const argusScript = path.join(ROOT, 'scripts', 'argus.py');
+    if (readArgusFromDotEnv() && existsSync(argusScript)) {
+      log('argus', 'ARGUS (pending-accept watcher) will start in 1.5 s...');
+      await start('argus', 'python', ['scripts/argus.py'], { delayMs: 1500 });
+    }
+
+    const ambientOn =
+      readFridayAmbientFromDotEnv() ||
+      ['1', 'true', 'yes', 'on'].includes(String(process.env.FRIDAY_AMBIENT || '').toLowerCase());
+    const ambientScript = path.join(ROOT, 'scripts', 'friday-ambient.py');
+    if (ambientOn && existsSync(ambientScript)) {
+      log('ambient', 'Jarvis ambient daemon will start in 4.5 s...');
+      await start('ambient', 'python', ['scripts/friday-ambient.py'], { delayMs: 4500 });
+    }
+
+    // Background music scheduler — plays a song every FRIDAY_MUSIC_INTERVAL_MIN minutes
+    const musicSchedOn = ['1', 'true', 'yes', 'on'].includes(
+      String(process.env.FRIDAY_MUSIC_SCHEDULER || '').toLowerCase(),
+    );
+    const musicSchedScript = path.join(ROOT, 'scripts', 'friday-music-scheduler.py');
+    if (musicSchedOn && existsSync(musicSchedScript)) {
+      log('music', 'background music scheduler will start in 6 s...');
+      await start('music', 'python', ['scripts/friday-music-scheduler.py'], { delayMs: 6000 });
+    }
   }
 
   const trackerScript = path.join(ROOT, 'scripts', 'friday-action-tracker.py');
-  if (readFridayActionTrackerFromDotEnv() && existsSync(trackerScript)) {
+  if (
+    (MODE === 'all' || MODE === 'server') &&
+    readFridayActionTrackerFromDotEnv() &&
+    existsSync(trackerScript)
+  ) {
     log('tracker', 'action tracker (Gmail, WhatsApp, Postgres) will start in 7.5 s...');
     await start('tracker', 'python', ['scripts/friday-action-tracker.py'], { delayMs: 7500 });
+  }
+
+  if (procs.length === 0) {
+    process.stdout.write(
+      `${C.warn}[openclaw] No child processes started for mode ${MODE} — check script paths and .env toggles.${C.reset}\n`,
+    );
+    process.exit(1);
   }
 
   process.stdout.write(`${C.warn}[openclaw] All services running. Press Ctrl+C to stop everything.${C.reset}\n\n`);

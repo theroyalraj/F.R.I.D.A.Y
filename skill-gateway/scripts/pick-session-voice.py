@@ -187,7 +187,7 @@ def _hindi_hinglish_candidates() -> list[str]:
 
 
 def _env_main_voice_raw() -> str:
-    return os.environ.get("FRIDAY_TTS_VOICE", "en-US-EmmaMultilingualNeural").strip() or "en-US-EmmaMultilingualNeural"
+    return os.environ.get("FRIDAY_TTS_VOICE", "en-US-AvaMultilingualNeural").strip() or "en-US-AvaMultilingualNeural"
 
 
 def _session_use_env_voice_only() -> bool:
@@ -204,7 +204,7 @@ def _pick_main_chat_voice(state: dict) -> str:
             return preferred
         if ADULT_POOL:
             return _pick_from_pool_excluding(ADULT_POOL, last_voice)
-        return "en-US-EmmaMultilingualNeural"
+        return "en-US-AvaMultilingualNeural"
 
     use_hindi_hinglish = random.random() < 0.5
 
@@ -226,7 +226,7 @@ def _pick_main_chat_voice(state: dict) -> str:
         return preferred
     if ADULT_POOL:
         return _pick_from_pool_excluding(ADULT_POOL, last_voice)
-    return "en-US-EmmaMultilingualNeural"
+    return "en-US-AvaMultilingualNeural"
 
 
 def _jarvis_greeting_env(voice: str) -> dict:
@@ -321,7 +321,7 @@ def pick_voice(*, subagent: bool = False, cursor_reply: bool = False, thinking: 
         if not pool:
             pool = [v for v in ADULT_POOL if v not in _BLOCKED_VOICES and v != last_voice]
         if not pool:
-            pool = [v for v in ADULT_POOL if v not in _BLOCKED_VOICES] or ["en-US-EmmaMultilingualNeural"]
+            pool = [v for v in ADULT_POOL if v not in _BLOCKED_VOICES] or ["en-US-AvaMultilingualNeural"]
         new_voice = random.choice(pool)
         state.pop("cursor_reply_chat_id", None)
         state["cursor_reply_voice"] = new_voice

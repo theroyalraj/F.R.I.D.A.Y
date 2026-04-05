@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { existsSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import express from 'express';
 import dotenv from 'dotenv';
@@ -31,11 +32,22 @@ import { createTodosRouter } from './todosRoutes.js';
 import { createActionItemsRouter } from './actionItemsRoutes.js';
 import { perceptionDbConfigured, perceptionDbHealth } from './perceptionDb.js';
 import { loadOpenclawUserConfig } from './userConfig.js';
-import { getSpeakStyle, setSpeakStyle, buildSpeakStyleInstruction } from './speakStyle.js';
+import { getSpeakStyle, setSpeakStyle, buildSpeakStyleInstruction, mergeDeliveryWithSpeakStyle } from './speakStyle.js';
+import {
+  playDoneSong,
+  buildCelebrationOffer,
+  resolveCelebration,
+  getCelebrationMode,
+} from './celebration.js';
 import { createAuthRouter } from './authRoutes.js';
 import { createOrganizationRouter } from './organizationRoutes.js';
 import { authJwtOrAgentSecret } from './authMiddleware.js';
 import { ensureAuthSchema } from './ensureAuthSchema.js';
+import { registerDeferredOpenRouterEmitter } from './deferredOpenRouter.js';
+import {
+  refreshPersonaPatchRedisFromDb,
+  getVoicePersonasRegistrySnapshot,
+} from './voiceAgentPersona.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, '../public');
@@ -61,27 +73,12 @@ loadOpenclawUserConfig();
 
 const PORT = Number(process.env.PC_AGENT_PORT || 3847);
 
+function gatewayBaseUrl() {
+  return (process.env.OPENCLAW_SKILL_GATEWAY_URL || 'http://127.0.0.1:3848').replace(/\/$/, '');
+}
+
 // ── Friday startup voice ──────────────────────────────────────────────────────
 const SPEAK_SCRIPT = path.resolve(__dirname, '../../skill-gateway/scripts/friday-speak.py');
-const PLAY_SCRIPT  = path.resolve(__dirname, '../../skill-gateway/scripts/friday-play.py');
-
-function playDoneSong(log) {
-  const song = (process.env.FRIDAY_DONE_SONG || '').trim();
-  if (!song || !existsSync(PLAY_SCRIPT)) return;
-  const child = spawn(pythonChildExecutable(), [PLAY_SCRIPT, song], {
-    env: { ...process.env },
-    stdio: ['ignore', 'ignore', 'pipe'],
-    windowsHide: true,
-    detached: true,
-  });
-  child.unref();
-  child.stderr?.on('data', (buf) => {
-    const line = buf.toString().trim();
-    if (line) log?.warn({ line: line.slice(0, 400) }, 'done-song stderr');
-  });
-  child.on('error', (e) => log?.warn({ err: String(e.message) }, 'done-song spawn failed'));
-  log?.info({ song }, 'done-song: spawned friday-play.py');
-}
 
 function pcAgentStartupGreetingPhrase() {
   const n = (process.env.FRIDAY_USER_NAME || 'Raj').trim() || 'Raj';
@@ -137,7 +134,7 @@ function speakStartup() {
   const child = spawn('python', [SPEAK_SCRIPT, phrase], {
     env: {
       ...process.env,
-      FRIDAY_TTS_VOICE:  process.env.FRIDAY_TTS_VOICE  || 'en-US-EmmaMultilingualNeural',
+      FRIDAY_TTS_VOICE:  process.env.FRIDAY_TTS_VOICE  || 'en-US-AvaMultilingualNeural',
       FRIDAY_TTS_DEVICE: process.env.FRIDAY_TTS_DEVICE || 'default',
       FRIDAY_TTS_BYPASS_CURSOR_DEFER: 'true',
       FRIDAY_TTS_PRIORITY: '1',
@@ -299,8 +296,28 @@ voiceRouter.post('/command', async (req, res, next) => {
   try {
     const orgId = req.user?.orgId ?? null;
     const out = await runTask(req.body, req.log, { orgId });
-    res.status(out.status).json(out.json);
-    if (out.json?.ok) playDoneSong(req.log);
+    const json = { ...(out.json || {}) };
+    if (out.json?.ok && !out.json?.deferredOpenRouter) {
+      const mode = getCelebrationMode();
+      if (mode === 'immediate') {
+        playDoneSong(req.log);
+      } else if (mode === 'ask') {
+        const offer = await buildCelebrationOffer();
+        Object.assign(json, offer);
+      }
+    }
+    res.status(out.status).json(json);
+  } catch (e) {
+    next(e);
+  }
+});
+
+/** After a successful task: accept true plays FRIDAY_DONE_SONG; false speaks a focus-mode recap (last 3 voice sessions). */
+voiceRouter.post('/celebration', async (req, res, next) => {
+  try {
+    const accept = Boolean(req.body?.accept);
+    const result = await resolveCelebration(req.log, accept);
+    res.json({ ok: true, ...result });
   } catch (e) {
     next(e);
   }
@@ -309,7 +326,7 @@ voiceRouter.post('/command', async (req, res, next) => {
 /** Speak text asynchronously via friday-speak.py with Jarvis voice settings (fire-and-forget).
  * Used for incoming messages (WhatsApp, email, etc.) to auto-speak responses.
  */
-voiceRouter.post('/speak-async', (req, res) => {
+voiceRouter.post('/speak-async', async (req, res) => {
   const text = String(req.body?.text || '').trim();
   if (!text) {
     return res.status(400).json({ error: 'Missing text in body: { "text": "Hello" }' });
@@ -318,11 +335,12 @@ voiceRouter.post('/speak-async', (req, res) => {
     return res.status(503).json({ error: 'friday-speak.py not found', hint: 'Install skill-gateway scripts.' });
   }
 
-  const delivery = greetingTtsRatePitch();
-  const child = spawn('python', [SPEAK_SCRIPT, text], {
+  const style = await getSpeakStyle();
+  const delivery = mergeDeliveryWithSpeakStyle(greetingTtsRatePitch(), style);
+  const child = spawn(pythonChildExecutable(), [SPEAK_SCRIPT, text], {
     env: {
       ...process.env,
-      FRIDAY_TTS_VOICE:  process.env.FRIDAY_TTS_VOICE  || 'en-US-EmmaMultilingualNeural',
+      FRIDAY_TTS_VOICE:  process.env.FRIDAY_TTS_VOICE  || 'en-US-AvaMultilingualNeural',
       FRIDAY_TTS_DEVICE: process.env.FRIDAY_TTS_DEVICE || 'default',
       FRIDAY_TTS_PRIORITY: '1',
       FRIDAY_TTS_BYPASS_CURSOR_DEFER: 'true',
@@ -473,7 +491,7 @@ voiceRouter.get('/status', async (_req, res) => {
 voiceRouter.post('/set-voice', (req, res) => {
   const { voice } = req.body || {};
   if (!voice || typeof voice !== 'string') {
-    return res.status(400).json({ error: 'Missing voice name in body: { "voice": "en-US-EmmaMultilingualNeural" }' });
+    return res.status(400).json({ error: 'Missing voice name in body: { "voice": "en-US-AvaMultilingualNeural" }' });
   }
   const trimmed = voice.trim();
   if (isVoiceBlocked(trimmed)) {
@@ -540,12 +558,70 @@ voiceRouter.post('/speak-style', async (req, res) => {
 app.use('/voice', voiceRouter);
 
 app.get('/health', async (_req, res) => {
-  const body = { ok: true, service: 'openclaw-pc-agent' };
+  const uptimeSec = Math.floor(process.uptime());
+  const startedAt = new Date(Date.now() - process.uptime() * 1000).toISOString();
+  const body = { ok: true, service: 'openclaw-pc-agent', uptimeSec, startedAt };
   if (perceptionDbConfigured()) {
     body.database = await perceptionDbHealth();
     body.postgres = body.database;
   }
+  try {
+    body.personas = await getVoicePersonasRegistrySnapshot();
+  } catch {
+    /* ignore */
+  }
+  const gw = gatewayBaseUrl();
+  body.links = {
+    openclawStatusProxy: `http://127.0.0.1:${PORT}/openclaw/status`,
+    gatewayOpenclawStatus: `${gw}/openclaw/status`,
+    personasJson: `http://127.0.0.1:${PORT}/settings/personas`,
+  };
   res.json(body);
+});
+
+/** Aggregated stack status (proxies skill-gateway) + local persona registry snapshot. No auth — same host as Listen. */
+app.get('/openclaw/status', async (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const gw = gatewayBaseUrl();
+  try {
+    const ac = new AbortController();
+    const tid = setTimeout(() => ac.abort(), 4500);
+    const r = await fetch(`${gw}/openclaw/status`, { signal: ac.signal });
+    clearTimeout(tid);
+    const j = await r.json();
+    try {
+      j.personas = await getVoicePersonasRegistrySnapshot();
+      j.personas.note = 'Full merged roster: GET /settings/personas (Bearer JWT or PC_AGENT_SECRET)';
+      j.links = {
+        ...(typeof j.links === 'object' && j.links ? j.links : {}),
+        listenOpenclawStatus: `http://127.0.0.1:${PORT}/openclaw/status`,
+        gatewayOpenclawStatus: `${gw}/openclaw/status`,
+        personasSettings: `http://127.0.0.1:${PORT}/settings/personas`,
+      };
+    } catch (e) {
+      j.personasError = String(e.message || e);
+    }
+    res.status(r.status).json(j);
+  } catch (e) {
+    let personas = null;
+    try {
+      personas = await getVoicePersonasRegistrySnapshot();
+    } catch {
+      /* ignore */
+    }
+    res.status(502).json({
+      ok: false,
+      error: String(e.message || e),
+      hint: 'Start skill-gateway on 3848 or set OPENCLAW_SKILL_GATEWAY_URL',
+      gatewayTried: gw,
+      personas,
+      links: {
+        listenOpenclawStatus: `http://127.0.0.1:${PORT}/openclaw/status`,
+        gatewayOpenclawStatus: `${gw}/openclaw/status`,
+        personasSettings: `http://127.0.0.1:${PORT}/settings/personas`,
+      },
+    });
+  }
 });
 
 app.get('/', (_req, res) => {
@@ -562,10 +638,26 @@ app.get('/favicon.ico', (_req, res) => {
   res.redirect(302, '/favicon.svg');
 });
 
-app.get('/friday', (_req, res) => {
+app.get('/friday', async (_req, res) => {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   res.setHeader('Pragma', 'no-cache');
-  res.sendFile(path.join(publicDir, 'voice.html'));
+  const htmlPath = path.join(publicDir, 'voice.html');
+  const secret = String(process.env.PC_AGENT_SECRET || '').trim();
+  if (!secret) {
+    res.sendFile(htmlPath);
+    return;
+  }
+  try {
+    const data = await readFile(htmlPath, 'utf8');
+    const inject = `<script>window.__OPENCLAW_PC_AGENT_BEARER__=${JSON.stringify(secret)};</script>`;
+    const out = data.includes('</head>')
+      ? data.replace('</head>', `${inject}</head>`)
+      : `${inject}${data}`;
+    res.type('html').send(out);
+  } catch (e) {
+    rootLogger.error({ err: e }, 'failed to serve /friday');
+    res.status(500).send('Failed to load voice UI');
+  }
 });
 
 // React SPA routes — serve React app for /friday/listen
@@ -573,18 +665,31 @@ app.get('/friday', (_req, res) => {
 const reactDistDir = path.join(__dirname, '../dist');
 const reactIndexPath = path.join(reactDistDir, 'index.html');
 
-app.get('/friday/listen', (_req, res) => {
+function injectListenPageBoot(html) {
+  const secret = String(process.env.PC_AGENT_SECRET || '').trim();
+  const auto = ['1', 'true', 'yes', 'on'].includes(
+    String(process.env.PC_AGENT_LISTEN_AUTO_LOGIN || '').trim().toLowerCase(),
+  );
+  if (!secret) return html;
+  const bits = [`window.__OPENCLAW_PC_AGENT_BEARER__=${JSON.stringify(secret)}`];
+  if (auto) bits.push('window.__OPENCLAW_LISTEN_AUTO_LOGIN__=true');
+  const inject = `<script>${bits.join(';')};</script>`;
+  return html.includes('</head>') ? html.replace('</head>', `${inject}</head>`) : `${inject}${html}`;
+}
+
+app.get('/friday/listen', async (_req, res) => {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Content-Type', 'text/html');
 
-  // Try to serve built React app, fallback to vanilla listen.html during development
   const builtPath = reactIndexPath;
-  if (existsSync(builtPath)) {
-    res.sendFile(builtPath);
-  } else {
-    // Fallback to vanilla listen.html if React app is not built
-    res.sendFile(path.join(publicDir, 'listen.html'));
+  const htmlPath = existsSync(builtPath) ? builtPath : path.join(publicDir, 'listen.html');
+  try {
+    const raw = await readFile(htmlPath, 'utf8');
+    res.send(injectListenPageBoot(raw));
+  } catch (e) {
+    rootLogger.error({ err: e }, 'failed to serve /friday/listen');
+    res.status(500).send('Failed to load Listen UI');
   }
 });
 
@@ -664,6 +769,8 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 
 async function bootstrap() {
+  registerDeferredOpenRouterEmitter((type, data) => broadcastEvent(type, data));
+
   try {
     await ensureAuthSchema(rootLogger);
   } catch (e) {
@@ -701,6 +808,9 @@ async function bootstrap() {
     broadcastEvent('server_start', { text: 'PC Agent online. All systems go.' });
     // Restore the last API session voice from Redis so it survives restarts
     restoreSessionVoiceFromRedis().catch(() => {});
+    void refreshPersonaPatchRedisFromDb().then((ok) => {
+      if (ok) rootLogger.info('voice_agent_personas: Redis patch synced from Postgres (for Python daemons)');
+    });
     speakStartup();
   });
   server.on('error', (err) => {

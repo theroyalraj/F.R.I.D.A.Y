@@ -126,7 +126,10 @@
       "Bash(powershell -Command \"Get-CimInstance Win32_Process -Filter ''ProcessId=60968'' | Select-Object ParentProcessId | Format-List\")",
       "Bash(powershell -Command \"Get-CimInstance Win32_Process -Filter ''ProcessId=60460'' | Select-Object ProcessId,Name,CommandLine | Format-List\")",
       "Bash(powershell -Command \"Get-CimInstance Win32_Process -Filter \"\"CommandLine LIKE ''%start.mjs%''\"\" | Select-Object ProcessId,CommandLine | Format-List\")",
-      "Bash(taskkill //PID 60968 //F)"
+      "Bash(taskkill //PID 60968 //F)",
+      "Bash(node -e \"const jwt=require\\(''jsonwebtoken''\\); const t=jwt.sign\\({sub:''dev-user'',email:''dev@openclaw.local'',orgId:''dev-org'',role:''admin''},''9f3c2a1e8b7d6c5a4b3e2d1c0f9e8d7c6b5a4039281716051423121100fffaaee'',{expiresIn:''30d''}\\); console.log\\(t\\)\")",
+      "Bash(TOKEN=\"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJmMzUzNzQ0Zi03Y2M2LTQyNzItYTk5Yy0yNzdjZDVmYjEyNzQiLCJlbWFpbCI6ImRldkB0ZXN0LmxvY2FsIiwib3JnSWQiOiIzMTkxZDc2NS1iYjNmLTQ0MTctYTg3My1hMzZkZmFhNmNiYWYiLCJyb2xlIjoiYWRtaW4iLCJpYXQiOjE3NzUzNzY1NjIsImV4cCI6MTc3Nzk2ODU2Mn0.xmxEBqjhY3qOeK57EYSOGuNkTUxoWXPuHtilSXXDwLg\")",
+      "Bash(curl -s -X PUT http://127.0.0.1:3847/organization/company -H \"Authorization: Bearer $TOKEN\" -H 'Content-Type: application/json' -d '{\"\"name\"\":\"\"Dev Co\"\",\"\"description\"\":\"\"Testing\"\",\"\"mission\"\":\"\"Test\"\",\"\"vision\"\":\"\"Test\"\"}')"
     ]
   }
 }

@@ -2,8 +2,8 @@
 """
 friday-music-scheduler.py — background daemon that plays a song at a fixed interval.
 
-Picks a random song from FRIDAY_MUSIC_PLAYLIST (comma-separated) and plays it via
-friday-play.py every FRIDAY_MUSIC_INTERVAL_MIN minutes (default: 30).
+Picks a random song from FRIDAY_MUSIC_SCHEDULER_PLAYLIST or FRIDAY_MUSIC_PLAYLIST and plays it via
+friday-play.py every FRIDAY_MUSIC_INTERVAL_MIN minutes (default: 30). Boot entry music uses FRIDAY_ENTRY_PLAYLIST separately.
 
 Skips if TTS is currently active (friday-tts-active lock exists) or if friday-play
 is already running. Respects FRIDAY_MUSIC_SCHEDULER=false to disable.
@@ -20,14 +20,20 @@ Usage:
 Env vars (all optional — reads .env):
   FRIDAY_MUSIC_SCHEDULER       true/false to enable/disable (default: true if script is run)
   FRIDAY_MUSIC_INTERVAL_MIN    minutes between songs (default: 30)
-  FRIDAY_MUSIC_PLAYLIST        comma-separated search phrases (default: FRIDAY_STARTUP_SONG only — same song every time if unset)
+  FRIDAY_MUSIC_SCHEDULER_PLAYLIST  optional — comma-separated phrases for this daemon only; if unset, FRIDAY_MUSIC_PLAYLIST
+  FRIDAY_MUSIC_PLAYLIST        legacy flat list OR international pool when FRIDAY_MUSIC_HINDI_PLAYLIST is set
+  FRIDAY_MUSIC_HINDI_PLAYLIST  optional — if non-empty, enables weighted pick: ~FRIDAY_MUSIC_HINDI_WEIGHT_PCT% Hindi vs intl
+  FRIDAY_MUSIC_INTL_PLAYLIST   optional international pool; if empty, FRIDAY_MUSIC_PLAYLIST (or scheduler playlist) is used
+  FRIDAY_MUSIC_HINDI_WEIGHT_PCT  Hindi vs intl: use 0.025 for two point five percent (fraction 0<w<1), or 70 for seventy percent (integer or >=1 = percent). Other pool tried if first is exhausted.
+  (Use search phrases with "latest", "trending", "new" in Hindi/Intl lines so yt-dlp surfaces fresher chart results.)
   FRIDAY_MUSIC_SESSION_NO_REPEAT true (default) = never replay a track until restart/npm run start:all
   FRIDAY_MUSIC_FIRST_WAIT_SEC  seconds before first song (optional; default min(120, interval))
   FRIDAY_MUSIC_ASK_BEFORE_PLAY true = speak a prompt and wait for mic yes/no before playing
                                  (recommended true — avoids surprise music when the scheduler fires)
   FRIDAY_MUSIC_ASK_WAIT_SEC    seconds to wait for an answer (default: 90)
   FRIDAY_MUSIC_ASK_POST_PROMPT_SEC  seconds of silence after the ask TTS before yes/no counts (default: 5)
-  FRIDAY_PLAY_SECONDS          per-song play duration (default: 28)
+  FRIDAY_SCHEDULER_PLAY_SECONDS  clip length for scheduler plays (default: FRIDAY_PLAY_SECONDS)
+  FRIDAY_PLAY_SECONDS          fallback when scheduler entry seconds unset (default: 45)
   FRIDAY_PLAY_VOLUME           ffplay volume 0-100 (default: 70)
 """
 
@@ -84,8 +90,35 @@ AUTOPLAY_ENABLED = _autoplay_raw not in ("false", "0", "off", "no")
 
 INTERVAL_MIN = float(os.environ.get("FRIDAY_MUSIC_INTERVAL_MIN", "30"))
 DEFAULT_SONG = os.environ.get("FRIDAY_STARTUP_SONG", "Back in Black AC DC")
-PLAYLIST_RAW = os.environ.get("FRIDAY_MUSIC_PLAYLIST", "").strip()
-PLAYLIST = [s.strip() for s in PLAYLIST_RAW.split(",") if s.strip()] if PLAYLIST_RAW else [DEFAULT_SONG]
+_SCHEDULER_ONLY = os.environ.get("FRIDAY_MUSIC_SCHEDULER_PLAYLIST", "").strip()
+_BASE_MUSIC_RAW = _SCHEDULER_ONLY or os.environ.get("FRIDAY_MUSIC_PLAYLIST", "").strip()
+
+
+def _split_csv(raw: str) -> list[str]:
+    return [s.strip() for s in raw.split(",") if s.strip()]
+
+
+HINDI_POOL = _split_csv(os.environ.get("FRIDAY_MUSIC_HINDI_PLAYLIST", "").strip())
+_INTL_ENV = os.environ.get("FRIDAY_MUSIC_INTL_PLAYLIST", "").strip()
+INTL_POOL = _split_csv(_INTL_ENV) if _INTL_ENV else _split_csv(_BASE_MUSIC_RAW)
+if HINDI_POOL and not INTL_POOL:
+    INTL_POOL = [DEFAULT_SONG]
+
+_hindi_w_raw = os.environ.get("FRIDAY_MUSIC_HINDI_WEIGHT_PCT", "70").strip().split("#")[0].strip()
+try:
+    _hw = float(_hindi_w_raw)
+    # 0 < w < 1  → fraction (e.g. 0.025 = 2.5% Hindi); else percent 0–100 (e.g. 70 = 70%)
+    if 0 < _hw < 1:
+        HINDI_WEIGHT = max(0.0, min(1.0, _hw))
+    else:
+        HINDI_WEIGHT = max(0.0, min(100.0, _hw)) / 100.0
+except ValueError:
+    HINDI_WEIGHT = 0.70
+
+WEIGHTED_HINDI_MODE = bool(HINDI_POOL)
+
+# Legacy single-list mode when no Hindi pool configured
+LEGACY_PLAYLIST = _split_csv(_BASE_MUSIC_RAW) if _BASE_MUSIC_RAW else [DEFAULT_SONG]
 
 # Tracks successfully played this process lifetime (cleared only when scheduler restarts).
 _SESSION_PLAYED: set[str] = set()
@@ -96,35 +129,72 @@ def _session_no_repeat() -> bool:
     return v not in ("0", "false", "no", "off")
 
 
-def _pick_scheduled_track() -> str | None:
-    """
-    Choose the next scheduler track. Returns None if session-no-repeat exhausted the playlist.
-    """
-    if not _session_no_repeat():
-        choice = random.choice(PLAYLIST)
-        log.info(
-            "pick: %r (repeat allowed; playlist=%d)",
-            choice,
-            len(PLAYLIST),
-        )
-        return choice
-    pool = [s for s in PLAYLIST if s not in _SESSION_PLAYED]
+def _pick_from_pool(pool: list[str], label: str) -> str | None:
+    """Pick one search phrase from pool; respects session no-repeat."""
     if not pool:
-        log.info(
-            "pick: SKIP — all %d entr(y/ies) in FRIDAY_MUSIC_PLAYLIST already played this run; "
-            "no scheduler music until OpenClaw restart (FRIDAY_MUSIC_SESSION_NO_REPEAT=true)",
-            len(PLAYLIST),
-        )
         return None
-    choice = random.choice(pool)
+    if not _session_no_repeat():
+        choice = random.choice(pool)
+        log.info("pick [%s]: %r (repeat allowed; pool=%d)", label, choice, len(pool))
+        return choice
+    avail = [s for s in pool if s not in _SESSION_PLAYED]
+    if not avail:
+        log.debug("pool %s exhausted (%d played)", label, len(pool))
+        return None
+    choice = random.choice(avail)
     log.info(
-        "pick: %r | unused=%d/%d | already_played=%s",
+        "pick [%s]: %r | unused=%d/%d | played=%s",
+        label,
         choice,
+        len(avail),
         len(pool),
-        len(PLAYLIST),
         sorted(_SESSION_PLAYED) if _SESSION_PLAYED else "none",
     )
     return choice
+
+
+def _pick_scheduled_track() -> str | None:
+    """
+    Choose the next scheduler track. Weighted Hindi/intl when FRIDAY_MUSIC_HINDI_PLAYLIST is set.
+    Tries the weighted-first pool, then the other if the first has no unused tracks (session no-repeat).
+    """
+    if not WEIGHTED_HINDI_MODE:
+        if not _session_no_repeat():
+            choice = random.choice(LEGACY_PLAYLIST)
+            log.info("pick: %r (repeat allowed; playlist=%d)", choice, len(LEGACY_PLAYLIST))
+            return choice
+        pool = [s for s in LEGACY_PLAYLIST if s not in _SESSION_PLAYED]
+        if not pool:
+            log.info(
+                "pick: SKIP — all %d entr(y/ies) in scheduler playlist already played this run; "
+                "no scheduler music until OpenClaw restart (FRIDAY_MUSIC_SESSION_NO_REPEAT=true)",
+                len(LEGACY_PLAYLIST),
+            )
+            return None
+        choice = random.choice(pool)
+        log.info(
+            "pick: %r | unused=%d/%d | already_played=%s",
+            choice,
+            len(pool),
+            len(LEGACY_PLAYLIST),
+            sorted(_SESSION_PLAYED) if _SESSION_PLAYED else "none",
+        )
+        return choice
+
+    prefer_hindi = random.random() < HINDI_WEIGHT
+    order = (
+        (("hindi", HINDI_POOL), ("intl", INTL_POOL))
+        if prefer_hindi
+        else (("intl", INTL_POOL), ("hindi", HINDI_POOL))
+    )
+    for label, p in order:
+        c = _pick_from_pool(p, label)
+        if c is not None:
+            return c
+    log.info(
+        "pick: SKIP — hindi and intl pools exhausted this session (no-repeat); restart stack to reset"
+    )
+    return None
 
 
 def _record_played(song: str) -> None:
@@ -338,6 +408,18 @@ def _play_running() -> bool:
         return False
 
 
+def _scheduler_play_seconds_str() -> str:
+    raw = os.environ.get("FRIDAY_SCHEDULER_PLAY_SECONDS", "").strip().split("#")[0].strip()
+    if raw:
+        try:
+            n = max(5, int(float(raw)))
+            return str(n)
+        except ValueError:
+            pass
+    fb = os.environ.get("FRIDAY_PLAY_SECONDS", "45").strip().split("#")[0].strip()
+    return fb or "45"
+
+
 def play_song(song: str | None = None):
     if not song:
         song = _pick_scheduled_track()
@@ -345,7 +427,7 @@ def play_song(song: str | None = None):
             return
     log.info("Playing: %s", song)
 
-    env = {**os.environ}
+    env = {**os.environ, "FRIDAY_PLAY_SECONDS": _scheduler_play_seconds_str()}
     kw = {
         "cwd": str(ROOT),
         "env": env,
@@ -386,17 +468,34 @@ def _first_sleep_sec(interval_sec: float) -> float:
 
 def main():
     interval_sec = INTERVAL_MIN * 60
-    log.info(
-        "Maestro (Creative Director) — music scheduler online, every %.0f min, %d song(s) in playlist",
-        INTERVAL_MIN,
-        len(PLAYLIST),
-    )
-    log.info("Playlist: %s", PLAYLIST)
-    if len(PLAYLIST) < 2:
-        log.warning(
-            "FRIDAY_MUSIC_PLAYLIST has only one entry (fallback=FRIDAY_STARTUP_SONG) — "
-            "every offer sounds the same. Add comma-separated titles in .env for rotation."
+    if WEIGHTED_HINDI_MODE:
+        log.info(
+            "Maestro (Creative Director) — music scheduler online, every %.0f min, "
+            "weighted Hindi %.2f%% (hindi=%d phrases, intl=%d phrases)",
+            INTERVAL_MIN,
+            HINDI_WEIGHT * 100,
+            len(HINDI_POOL),
+            len(INTL_POOL),
         )
+        log.info("Hindi pool: %s", HINDI_POOL)
+        log.info("Intl pool: %s", INTL_POOL)
+        if len(HINDI_POOL) < 2 or len(INTL_POOL) < 2:
+            log.warning(
+                "Small pool — add more trending search lines in .env for variety "
+                "(FRIDAY_MUSIC_HINDI_PLAYLIST / FRIDAY_MUSIC_INTL_PLAYLIST or FRIDAY_MUSIC_PLAYLIST)."
+            )
+    else:
+        log.info(
+            "Maestro (Creative Director) — music scheduler online, every %.0f min, %d song(s) in playlist",
+            INTERVAL_MIN,
+            len(LEGACY_PLAYLIST),
+        )
+        log.info("Playlist: %s", LEGACY_PLAYLIST)
+        if len(LEGACY_PLAYLIST) < 2:
+            log.warning(
+                "Scheduler playlist has only one entry (fallback=FRIDAY_STARTUP_SONG) — "
+                "every offer sounds the same. Add comma-separated titles in FRIDAY_MUSIC_PLAYLIST (or FRIDAY_MUSIC_SCHEDULER_PLAYLIST)."
+            )
     if _session_no_repeat():
         log.info(
             "FRIDAY_MUSIC_SESSION_NO_REPEAT=true — each track plays at most once per OpenClaw run; "

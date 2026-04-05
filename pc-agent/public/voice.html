@@ -587,6 +587,15 @@
   /* ── constants ──────────────────────────────────────────────── */
   const API     = p => new URL(p, location.origin).href;
   const THEADERS = { 'ngrok-skip-browser-warning': '69420', Accept: 'application/json' };
+  /** Injected by pc-agent when serving /friday if PC_AGENT_SECRET is set — same Bearer daemons use. */
+  function voiceAuthHeaders() {
+    try {
+      const t = typeof window !== 'undefined' && window.__OPENCLAW_PC_AGENT_BEARER__;
+      if (t && String(t).trim()) return { Authorization: `Bearer ${String(t).trim()}` };
+    } catch {}
+    return {};
+  }
+  const VOICE_HEADERS = () => ({ ...THEADERS, ...voiceAuthHeaders() });
   const SR      = window.SpeechRecognition || window.webkitSpeechRecognition;
 
   const CHAT_VOICES = [
@@ -1004,6 +1013,8 @@
     const abrtRef  = useRef(null);  // AbortController
     const lstnRef  = useRef(0);     // listen turn gen
     const msgIdRef = useRef(0);
+    const openRouterPendingRef = useRef(false);
+    const openRouterTimeoutRef = useRef(null);
     const bvRef    = useRef(bv);
     const rateRef  = useRef(rate);
     const pitchRef = useRef(pitch);
@@ -1063,7 +1074,7 @@
     /* ── server voices ── */
     async function loadSvrVoices() {
       try {
-        const r = await fetch(API('/voice/voices'), { headers: THEADERS });
+        const r = await fetch(API('/voice/voices'), { headers: VOICE_HEADERS() });
         const d = await r.json();
         if (!d.ok || d.provider !== 'edge' || !d.voices?.length) return;
         setSvrVoices(d.voices); setSvrActive(d.active || ''); setShowSvr(true);
@@ -1076,7 +1087,7 @@
       try {
         const r = await fetch(API('/voice/set-voice'), {
           method:'POST',
-          headers:{ 'Content-Type':'application/json', ...THEADERS },
+          headers:{ 'Content-Type':'application/json', ...VOICE_HEADERS() },
           body: JSON.stringify({ voice }),
         });
         const d = await r.json();
@@ -1089,7 +1100,7 @@
 
     /* ── TTS ping ── */
     useEffect(() => {
-      fetch(API('/voice/ping'), { headers: THEADERS })
+      fetch(API('/voice/ping'), { headers: VOICE_HEADERS() })
         .then(r => r.json())
         .then(j => {
           if (!j.tts) return;
@@ -1182,7 +1193,7 @@
       try {
         const r = await fetch(API('/voice/tts'), {
           method:'POST',
-          headers:{ 'Content-Type':'application/json', 'ngrok-skip-browser-warning':'69420', Accept:'audio/wav, audio/mpeg, application/json' },
+          headers:{ 'Content-Type':'application/json', 'ngrok-skip-browser-warning':'69420', Accept:'audio/wav, audio/mpeg, application/json', ...voiceAuthHeaders() },
           body: JSON.stringify({ text: cleaned, voice: chatVRef.current.voice }),
           cache:'no-store',
         });
@@ -1234,7 +1245,7 @@
       try {
         const r = await fetch(API('/voice/command'), {
           method:'POST',
-          headers:{ 'Content-Type':'application/json', ...THEADERS },
+          headers:{ 'Content-Type':'application/json', ...VOICE_HEADERS() },
           body: JSON.stringify({ text: t, userId:'friday-web', correlationId: crypto.randomUUID(), ...modelBody() }),
           cache:'no-store', signal: ac.signal,
         });
@@ -1250,9 +1261,27 @@
           speak('Sorry, that request failed.', cycleAfterSpeech); return;
         }
         const reply = typeof j.summary === 'string' ? j.summary : JSON.stringify(j);
-        addMsg('agent', reply);
-        setOrb('speaking'); setHint('Speak to interrupt, tap Stop, or tap the orb.');
-        speak(reply, cycleAfterSpeech);
+        const replyTrim = String(reply).trim();
+        if (j.deferredOpenRouter) {
+          openRouterPendingRef.current = true;
+          if (openRouterTimeoutRef.current) clearTimeout(openRouterTimeoutRef.current);
+          openRouterTimeoutRef.current = setTimeout(() => {
+            openRouterPendingRef.current = false;
+            openRouterTimeoutRef.current = null;
+          }, 120_000);
+        }
+        if (replyTrim) {
+          addMsg('agent', reply);
+        }
+        if (j.speakAsync !== false && replyTrim) {
+          setOrb('speaking'); setHint('Speak to interrupt, tap Stop, or tap the orb.');
+          speak(reply, cycleAfterSpeech);
+        } else {
+          setOrb('listening');
+          busyRef.current = false;
+          setHint(sessRef.current ? 'Listening…' : 'Stand by.');
+          if (sessRef.current) startListenTurn();
+        }
       } catch (e) {
         if (e?.name === 'AbortError') {
           addMsg('agent', 'Stopped.'); busyRef.current = false;
@@ -1271,6 +1300,45 @@
       if (!sessRef.current) { setOrb('idle'); setHint('Session ended.'); return; }
       setHint('Speak when ready.'); startListenTurn();
     }
+
+    /* Deferred OpenRouter answer arrives via SSE — do not speak the rate-limit status line above */
+    useEffect(() => {
+      let es;
+      try {
+        es = new EventSource(API('/voice/stream'));
+        es.onmessage = (e) => {
+          try {
+            const ev = JSON.parse(e.data);
+            if (!openRouterPendingRef.current) return;
+            if (ev.type === 'reply' && ev.text) {
+              openRouterPendingRef.current = false;
+              if (openRouterTimeoutRef.current) {
+                clearTimeout(openRouterTimeoutRef.current);
+                openRouterTimeoutRef.current = null;
+              }
+              addMsg('agent', ev.text);
+              setOrb('speaking');
+              setHint('Speak to interrupt, tap Stop, or tap the orb.');
+              busyRef.current = true;
+              speak(ev.text, cycleAfterSpeech);
+            } else if (ev.type === 'error' && ev.text) {
+              openRouterPendingRef.current = false;
+              if (openRouterTimeoutRef.current) {
+                clearTimeout(openRouterTimeoutRef.current);
+                openRouterTimeoutRef.current = null;
+              }
+              addMsg('agent', ev.text);
+              setOrb('speaking');
+              busyRef.current = true;
+              speak('Open Router failed. Check the chat.', cycleAfterSpeech);
+            }
+          } catch {}
+        };
+      } catch {}
+      return () => {
+        try { es?.close(); } catch {}
+      };
+    }, []);
 
     function startListenTurn() {
       if (!sessRef.current || busyRef.current) return;
@@ -1419,10 +1487,11 @@
           <div className="bar-row" style=${{ marginTop:'0.45rem' }}>
             <span className="bar-label">Claude model</span>
             <select className="glass-select" value=${model} onChange=${e => setModel(e.target.value)}>
-              <option value="">Server default (.env / Haiku)</option>
+              <option value="">Server default (.env / Sonnet)</option>
               <option value="haiku">Haiku — fastest</option>
               <option value="sonnet">Sonnet — balanced</option>
               <option value="opus">Opus — strongest</option>
+              <option value="openrouter-free">OpenRouter free (OPENROUTER_FREE_MODEL)</option>
               <option value="inherit">CLI default (no --model)</option>
             </select>
           </div>

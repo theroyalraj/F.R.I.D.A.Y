@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 node_modules/
+openclaw-ship/extension-ui/dist/
 .env
 *.log
 logs/

@@ -8,6 +8,9 @@ Redis (same resolution as friday-speak.py: OPENCLAW_REDIS_URL, else FRIDAY_AMBIE
   friday:tts:generation        — speak supersession counter
   friday:tts:thinking_singleton — thinking narration singleton
   friday:tts:last_call         — last TTS call hint (optional flush)
+  friday:tts:last_activity     — last spoken wall time for ECHO silence watcher (optional flush)
+  openclaw:silence_watch:last_nudge — ECHO re-arm debounce (optional flush)
+  friday:tts:thinking_pool_idx — friday-speak thinking pool rotation counter
   friday:now_playing           — short-lived ambient hint
 
 Temp files (%TEMP%):
@@ -45,7 +48,10 @@ REDIS_KEYS_FULL = (
     "friday:tts:lock",
     "friday:tts:generation",
     "friday:tts:thinking_singleton",
+    "friday:tts:thinking_pool_idx",
     "friday:tts:last_call",
+    "friday:tts:last_activity",
+    "openclaw:silence_watch:last_nudge",
     "friday:now_playing",
 )
 

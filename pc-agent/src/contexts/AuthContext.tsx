@@ -109,7 +109,53 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   useEffect(() => {
-    void refreshMe();
+    let cancelled = false;
+    void (async () => {
+      type BootWin = Window & {
+        __OPENCLAW_LISTEN_AUTO_LOGIN__?: boolean;
+        __OPENCLAW_PC_AGENT_BEARER__?: string;
+      };
+      const w = window as BootWin;
+      // Vite dev server: no injected bearer — mint JWT from pc-agent when not in production.
+      if (import.meta.env.DEV && !localStorage.getItem(TOKEN_KEY)) {
+        try {
+          const r = await fetch('/auth/dev-session', { method: 'POST' });
+          const d = (await r.json().catch(() => ({}))) as { token?: string };
+          if (!cancelled && r.ok && typeof d.token === 'string' && d.token) {
+            localStorage.setItem(TOKEN_KEY, d.token);
+            setToken(d.token);
+          }
+        } catch {
+          /* fall through — show login or try auto-session */
+        }
+      }
+      if (
+        w.__OPENCLAW_LISTEN_AUTO_LOGIN__ &&
+        w.__OPENCLAW_PC_AGENT_BEARER__ &&
+        !localStorage.getItem(TOKEN_KEY)
+      ) {
+        try {
+          const r = await fetch('/auth/auto-session', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${String(w.__OPENCLAW_PC_AGENT_BEARER__)}`,
+            },
+          });
+          const d = (await r.json().catch(() => ({}))) as { token?: string };
+          if (!cancelled && r.ok && typeof d.token === 'string' && d.token) {
+            localStorage.setItem(TOKEN_KEY, d.token);
+            setToken(d.token);
+          }
+        } catch {
+          /* fall through to refreshMe — user can log in manually */
+        }
+      }
+      if (!cancelled) await refreshMe();
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [refreshMe]);
 
   const login = useCallback(async (email: string, password: string) => {

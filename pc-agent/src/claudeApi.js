@@ -5,17 +5,29 @@
  * unacceptable. fetch() is available in Node ≥ 18 with no extra deps.
  *
  * Model mapping (matches claudeRouter.js inference):
- *   'haiku'  → claude-haiku-4-5   (fast, conversational)
- *   'sonnet' → claude-sonnet-4-5  (complex / coding tasks)
+ *   'haiku'  → claude-haiku-4-5   (optional fast tier)
+ *   'sonnet' → claude-sonnet-4-5  (default tier)
+ *   'opus'   → claude-opus-4-5    (critical reasoning)
+ * On Anthropic 429/overload with OpenRouter configured, returns { deferred: true, … }
+ * so the caller can schedule async OpenRouter (does not block voice / SSE).
  *
  * Env vars:
  *   ANTHROPIC_API_KEY  — required
  *   CLAUDE_API_HAIKU   — override haiku model name
  *   CLAUDE_API_SONNET  — override sonnet model name
+ *   CLAUDE_API_OPUS    — override opus model name
  */
+
+import { isOpenRouterConfigured } from './openRouterApi.js';
+import {
+  isAnthropicCooldownActive,
+  clearAnthropicCooldown,
+  armAnthropicCooldownFromRateLimitResponse,
+} from './anthropicCooldown.js';
 
 const HAIKU_MODEL  = process.env.CLAUDE_API_HAIKU  || 'claude-haiku-4-5';
 const SONNET_MODEL = process.env.CLAUDE_API_SONNET || 'claude-sonnet-4-5';
+const OPUS_MODEL   = process.env.CLAUDE_API_OPUS   || 'claude-opus-4-5';
 
 const VOICE_SYSTEM_BASE = [
   `You are Friday — Raj's personal AI. British-ish voice, sharp mind, zero corporate padding.`,
@@ -35,7 +47,7 @@ const VOICE_SYSTEM_BASE = [
 /**
  * @param {{ speakStyleExtra?: string, companyContext?: string }} opts
  */
-function buildVoiceSystem(opts = {}) {
+export function buildVoiceSystem(opts = {}) {
   const parts = [];
   if (opts.companyContext && String(opts.companyContext).trim()) {
     parts.push(String(opts.companyContext).trim());
@@ -49,8 +61,36 @@ function buildVoiceSystem(opts = {}) {
 
 export function apiModelName(shortName) {
   const s = String(shortName || '').toLowerCase().trim();
+  if (s === 'opus') return OPUS_MODEL;
   if (s === 'sonnet') return SONNET_MODEL;
-  return HAIKU_MODEL;   // default to haiku for speed
+  if (s === 'haiku') return HAIKU_MODEL;
+  return SONNET_MODEL; // default tier: Sonnet
+}
+
+function tierFromApiModelKey(key) {
+  const s = String(key || '').toLowerCase().trim();
+  if (s === 'opus') return 'opus';
+  if (s === 'haiku') return 'haiku';
+  return 'sonnet';
+}
+
+/**
+ * @param {number} status
+ * @param {string} bodyText
+ */
+export function isAnthropicRateLimited(status, bodyText) {
+  const t = String(bodyText || '');
+  if (status === 429) return true;
+  if (status === 503 && /overload|overloaded|unavailable/i.test(t)) return true;
+  try {
+    const j = JSON.parse(t);
+    const errType = j?.error?.type || j?.type || '';
+    if (String(errType).toLowerCase().includes('rate_limit')) return true;
+  } catch {
+    /* ignore */
+  }
+  if (/rate[_\s-]?limit|too\s+many\s+requests/i.test(t)) return true;
+  return false;
 }
 
 export function isApiKeyAvailable() {
@@ -61,7 +101,7 @@ export function isApiKeyAvailable() {
  * Call the Anthropic Messages API directly.
  * @param {string} prompt
  * @param {{ model?: string, timeoutMs?: number, log?: import('pino').Logger, speakStyleExtra?: string, companyContext?: string }} opts
- * @returns {Promise<{ ok: boolean, text: string, model: string, ms: number }>}
+ * @returns {Promise<{ ok: boolean, text: string, model: string, ms: number, needsOpenRouterKey?: boolean, deferred?: boolean, deferredContext?: { prompt: string, system: string, tier: string, timeoutMs: number, log?: import('pino').Logger } }>}
  */
 export async function callClaudeApi(prompt, opts = {}) {
   const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
@@ -70,6 +110,7 @@ export async function callClaudeApi(prompt, opts = {}) {
   const model     = apiModelName(opts.model);
   const timeoutMs = opts.timeoutMs ?? 30_000;
   const t0        = Date.now();
+  const tier      = tierFromApiModelKey(opts.model);
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -78,6 +119,35 @@ export async function callClaudeApi(prompt, opts = {}) {
     speakStyleExtra: opts.speakStyleExtra,
     companyContext: opts.companyContext,
   });
+
+  if (await isAnthropicCooldownActive()) {
+    opts.log?.info({ via: 'anthropic_cooldown' }, 'claudeApi: skip Anthropic — Redis cooldown active');
+    const ms = Date.now() - t0;
+    if (isOpenRouterConfigured()) {
+      return {
+        ok: true,
+        text: '',
+        model,
+        ms,
+        deferred: true,
+        skippedAnthropicCooldown: true,
+        deferredContext: {
+          prompt: String(prompt),
+          system,
+          tier,
+          timeoutMs,
+          log: opts.log,
+        },
+      };
+    }
+    return {
+      ok: true,
+      text: '',
+      model,
+      ms,
+      skippedAnthropicCooldown: true,
+    };
+  }
 
   try {
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
@@ -96,15 +166,53 @@ export async function callClaudeApi(prompt, opts = {}) {
       }),
     });
 
+    const bodyText = await resp.text().catch(() => '');
     const ms = Date.now() - t0;
 
     if (!resp.ok) {
-      const err = await resp.text().catch(() => resp.status);
-      throw new Error(`Anthropic API ${resp.status}: ${String(err).slice(0, 200)}`);
+      if (isAnthropicRateLimited(resp.status, bodyText) && isOpenRouterConfigured()) {
+        await armAnthropicCooldownFromRateLimitResponse(resp.status, resp.headers, bodyText);
+        opts.log?.warn(
+          { status: resp.status, via: 'openrouter', async: true },
+          'claudeApi: anthropic limited — deferring OpenRouter (non-blocking)',
+        );
+        return {
+          ok: true,
+          text: '',
+          model,
+          ms,
+          deferred: true,
+          deferredContext: {
+            prompt: String(prompt),
+            system,
+            tier,
+            timeoutMs,
+            log: opts.log,
+          },
+        };
+      }
+      if (isAnthropicRateLimited(resp.status, bodyText) && !isOpenRouterConfigured()) {
+        await armAnthropicCooldownFromRateLimitResponse(resp.status, resp.headers, bodyText);
+        opts.log?.warn({ status: resp.status }, 'claudeApi: anthropic limited — no OpenRouter key');
+        return {
+          ok: false,
+          text: '',
+          model,
+          ms,
+          needsOpenRouterKey: true,
+        };
+      }
+      throw new Error(`Anthropic API ${resp.status}: ${String(bodyText).slice(0, 200)}`);
     }
 
-    const data = await resp.json();
+    let data;
+    try {
+      data = JSON.parse(bodyText);
+    } catch {
+      throw new Error(`Anthropic API: invalid JSON`);
+    }
     const text = data?.content?.[0]?.text?.trim() || '';
+    await clearAnthropicCooldown();
     opts.log?.info({ model, ms, chars: text.length }, 'claudeApi: ok');
     return { ok: true, text, model, ms };
   } finally {

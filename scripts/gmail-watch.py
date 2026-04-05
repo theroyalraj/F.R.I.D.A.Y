@@ -8,10 +8,11 @@ How it works:
   1. Connects to Gmail IMAP, selects INBOX (read-only).
   2. Snapshots the current UNSEEN UIDs on startup (does not announce old mail).
   3. Polls every FRIDAY_EMAIL_POLL_SEC (default 30) for new UNSEEN UIDs.
-  4. For each new UID:
+  4. For each new UID in a poll:
        a. Fetches full body.
        b. Calls email-analyze.py (Claude Haiku) for summary + action items.
-       c. Speaks a rich TTS notification (sender, subject, summary, actions).
+       c. Speaks once per mail, or — if several arrive together and FRIDAY_EMAIL_DIGEST is on —
+          one digest after processing all (optional wait until other TTS finishes).
        d. POSTs any todos/reminders to pc-agent /todos API.
        e. If a meeting is detected, creates a calendar .ics event.
   5. Reconnects automatically on IMAP errors / dropped connections.
@@ -24,6 +25,10 @@ Env (in .env):
   FRIDAY_EMAIL_FOLDERS      comma-separated IMAP folders (default INBOX)
   FRIDAY_EMAIL_NOTIFY_VOICE voice override for email announcements (blank = session voice)
   FRIDAY_EMAIL_ANALYZE      true/false — enable AI summary+actions (default true)
+  FRIDAY_EMAIL_DIGEST       when several new mails arrive in one poll, one spoken digest (default true)
+  FRIDAY_EMAIL_DIGEST_MAX   max individual blurbs inside a digest (default 8)
+  FRIDAY_EMAIL_SPEAK_AFTER_TTS_CLEAR  wait until no TTS is playing before digest (default true; avoids cutting off WhatsApp)
+  FRIDAY_EMAIL_TTS_CLEAR_TIMEOUT_SEC  max seconds to wait for playback to finish (default 20)
   PC_AGENT_URL              pc-agent base URL (default http://127.0.0.1:3847)
 
 Run:
@@ -40,6 +45,7 @@ import os
 import platform
 import subprocess
 import sys
+import tempfile
 import textwrap
 import time
 import urllib.request
@@ -87,7 +93,43 @@ def _env_bool(key: str, default: bool = True) -> bool:
     return raw in ("1", "true", "yes", "on")
 
 
+def _env_int(key: str, default: int) -> int:
+    try:
+        return int(os.environ.get(key, "").split("#")[0].strip() or str(default))
+    except ValueError:
+        return default
+
+
+def _env_float(key: str, default: float) -> float:
+    try:
+        return float(os.environ.get(key, "").split("#")[0].strip() or default)
+    except ValueError:
+        return default
+
+
 EMAIL_ANALYZE = _env_bool("FRIDAY_EMAIL_ANALYZE", True)
+EMAIL_DIGEST = _env_bool("FRIDAY_EMAIL_DIGEST", True)
+EMAIL_DIGEST_MAX = max(1, min(20, _env_int("FRIDAY_EMAIL_DIGEST_MAX", 8)))
+EMAIL_SPEAK_AFTER_TTS_CLEAR = _env_bool("FRIDAY_EMAIL_SPEAK_AFTER_TTS_CLEAR", True)
+EMAIL_TTS_CLEAR_TIMEOUT = max(1.0, min(120.0, _env_float("FRIDAY_EMAIL_TTS_CLEAR_TIMEOUT_SEC", 20.0)))
+
+TTS_ACTIVE_FILE = Path(tempfile.gettempdir()) / "friday-tts-active"
+
+
+def _wait_for_tts_clear(timeout: float) -> None:
+    """Block until friday-speak is not holding the TTS active marker (or timeout)."""
+    deadline = time.time() + timeout
+    while TTS_ACTIVE_FILE.exists():
+        try:
+            age = time.time() - TTS_ACTIVE_FILE.stat().st_mtime
+            if age > 120:
+                TTS_ACTIVE_FILE.unlink(missing_ok=True)
+                break
+        except OSError:
+            break
+        if time.time() > deadline:
+            break
+        time.sleep(0.25)
 
 
 def _decode_header(raw: str) -> str:
@@ -327,6 +369,42 @@ def _build_speak_text(envelope: dict, analysis: dict | None) -> str:
     return " ".join(parts)
 
 
+def _apply_analysis_actions(envelope: dict, analysis: dict | None) -> None:
+    if not analysis:
+        return
+    if analysis.get("todos") or analysis.get("reminders"):
+        _post_todos_and_reminders(analysis, envelope.get("subject", ""))
+    meeting = analysis.get("meeting")
+    if meeting:
+        _create_calendar_event(meeting)
+
+
+def _build_digest_speak_text(entries: list[tuple[dict, dict | None]]) -> str:
+    """One announcement for several new messages (avoids stacked priority TTS vs WhatsApp)."""
+    n = len(entries)
+    if n == 0:
+        return ""
+    if n == 1:
+        env, ana = entries[0]
+        return _build_speak_text(env, ana)
+    intro = f"Nova here, Director of Communications. You have {n} new emails."
+    parts: list[str] = [intro]
+    cap = min(n, EMAIL_DIGEST_MAX)
+    for envelope, analysis in entries[:cap]:
+        sender = envelope.get("from", "someone")
+        subject = envelope.get("subject", "(no subject)")
+        sm = (analysis or {}).get("speak_summary") if analysis else None
+        sm = (sm or "").strip()
+        if sm:
+            parts.append(f"From {sender}: {textwrap.shorten(sm, width=130, placeholder='')}")
+        else:
+            parts.append(f"From {sender}, subject {subject}.")
+    rest = n - cap
+    if rest > 0:
+        parts.append(f"Plus {rest} more in your inbox.")
+    return " ".join(parts)
+
+
 def _speak_text(text: str) -> None:
     """Fire-and-forget highest priority TTS for email notification (NOVA, Director of Comms)."""
     env = {
@@ -359,23 +437,21 @@ def _speak_text(text: str) -> None:
         print(f"[gmail-watch] speak failed: {exc}", file=sys.stderr, flush=True)
 
 
-def _process_new_email(conn: imaplib.IMAP4_SSL, uid: str) -> None:
-    """Full pipeline for a new email: fetch → analyze → speak → todos → calendar."""
+def _process_new_email(
+    conn: imaplib.IMAP4_SSL, uid: str, *, speak: bool = True
+) -> tuple[dict, dict | None]:
+    """Fetch → analyze → todos/calendar; optional single-mail TTS."""
     envelope = _fetch_envelope(conn, uid)
     print(f"[gmail-watch] new email UID {uid}: from={envelope['from']} subject={envelope['subject'][:60]}", flush=True)
 
     body = _fetch_full_body(conn, uid) if EMAIL_ANALYZE else ""
     analysis = _analyze_email(envelope, body) if (body or not EMAIL_ANALYZE) else None
 
-    speak_text = _build_speak_text(envelope, analysis)
-    _speak_text(speak_text)
+    _apply_analysis_actions(envelope, analysis)
 
-    if analysis:
-        if analysis.get("todos") or analysis.get("reminders"):
-            _post_todos_and_reminders(analysis, envelope.get("subject", ""))
-        meeting = analysis.get("meeting")
-        if meeting:
-            _create_calendar_event(meeting)
+    if speak:
+        _speak_text(_build_speak_text(envelope, analysis))
+    return envelope, analysis
 
 
 def _run_watch_loop() -> None:
@@ -389,7 +465,11 @@ def _run_watch_loop() -> None:
         known_unseen[folder] = uids
         print(f"[gmail-watch] {folder}: {len(uids)} unseen (snapshot, not announced)", flush=True)
 
-    print(f"[gmail-watch] polling every {POLL_SEC}s for new emails in {', '.join(FOLDERS)} | analyze={EMAIL_ANALYZE}", flush=True)
+    print(
+        f"[gmail-watch] polling every {POLL_SEC}s for new emails in {', '.join(FOLDERS)} "
+        f"| analyze={EMAIL_ANALYZE} | digest={EMAIL_DIGEST}",
+        flush=True,
+    )
 
     reconnect_backoff = 0
     while True:
@@ -430,11 +510,25 @@ def _run_watch_loop() -> None:
                 continue
 
             print(f"[gmail-watch] {folder}: {len(new_uids)} new email(s)", flush=True)
-            for uid in sorted(new_uids):
-                try:
-                    _process_new_email(conn, uid)
-                except Exception as exc:
-                    print(f"[gmail-watch] process failed for UID {uid}: {exc}", file=sys.stderr, flush=True)
+            uids_list = sorted(new_uids)
+            if EMAIL_DIGEST and len(uids_list) > 1:
+                entries: list[tuple[dict, dict | None]] = []
+                for uid in uids_list:
+                    try:
+                        envelope, analysis = _process_new_email(conn, uid, speak=False)
+                        entries.append((envelope, analysis))
+                    except Exception as exc:
+                        print(f"[gmail-watch] process failed for UID {uid}: {exc}", file=sys.stderr, flush=True)
+                if entries:
+                    if EMAIL_SPEAK_AFTER_TTS_CLEAR:
+                        _wait_for_tts_clear(EMAIL_TTS_CLEAR_TIMEOUT)
+                    _speak_text(_build_digest_speak_text(entries))
+            else:
+                for uid in uids_list:
+                    try:
+                        _process_new_email(conn, uid, speak=True)
+                    except Exception as exc:
+                        print(f"[gmail-watch] process failed for UID {uid}: {exc}", file=sys.stderr, flush=True)
 
 
 def main() -> None:

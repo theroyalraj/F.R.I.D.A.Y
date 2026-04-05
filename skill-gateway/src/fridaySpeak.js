@@ -6,13 +6,13 @@
  *
  * Env vars:
  *   FRIDAY_SPEAK_PY=false          — disable entirely (enabled by default when script is present)
- *   FRIDAY_TTS_VOICE               — edge-tts voice (default: en-US-EmmaMultilingualNeural)
+ *   FRIDAY_TTS_VOICE               — edge-tts voice (default: en-US-AvaMultilingualNeural)
  *   FRIDAY_TTS_DEVICE              — audio device substring (default: Echo Dot)
  *   FRIDAY_TTS_RATE                — speed e.g. "+7.5%" (default: ~1.075×)
  *   FRIDAY_TTS_PITCH               — pitch e.g. "+2Hz" (default: +2Hz)
  *
  * Good voices (honour FRIDAY_TTS_VOICE_BLOCK in .env — see CLAUDE.md):
- *   en-US-EmmaMultilingualNeural — US female multilingual (repo default)
+ *   en-US-AvaMultilingualNeural — US female multilingual (repo default)
  *   en-US-AriaNeural      — US female neural
  *   en-US-GuyNeural       — US male neural
  *   en-GB-SoniaNeural     — British female
@@ -84,7 +84,7 @@ export function speakFridayPy(text, log, opts = {}) {
   const child = spawn('python', [SPEAK_SCRIPT, safeText], {
     env: {
       ...process.env,
-      FRIDAY_TTS_VOICE:  process.env.FRIDAY_TTS_VOICE  || 'en-US-EmmaMultilingualNeural',
+      FRIDAY_TTS_VOICE:  process.env.FRIDAY_TTS_VOICE  || 'en-US-AvaMultilingualNeural',
       FRIDAY_TTS_RATE:   process.env.FRIDAY_TTS_RATE   || '+7.5%',
       FRIDAY_TTS_PITCH:  process.env.FRIDAY_TTS_PITCH  || '+2Hz',
       ...(bypassCursorDefer ? { FRIDAY_TTS_BYPASS_CURSOR_DEFER: 'true' } : {}),

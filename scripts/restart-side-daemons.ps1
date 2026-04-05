@@ -62,8 +62,19 @@ function Stop-PythonDaemon([string] $label, [string] $pattern) {
 
 Write-Host ""
 Write-Host "=== OpenClaw side daemons restart ===" -ForegroundColor Yellow
+
+Write-Host "Gateway: stop-all-media (players + full TTS lock clear)..." -ForegroundColor Cyan
+try {
+  Invoke-WebRequest -Uri 'http://127.0.0.1:3848/internal/stop-all-media?full=1' -Method POST -TimeoutSec 4 -UseBasicParsing | Out-Null
+  Write-Host "  POST /internal/stop-all-media?full=1 ok" -ForegroundColor DarkGray
+} catch {
+  Write-Host "  (gateway not on 3848 — skipped)" -ForegroundColor DarkGray
+}
+
 Write-Host "Stopping auxiliary Python processes..." -ForegroundColor Cyan
 
+Stop-PythonDaemon 'friday-speak'          '*friday-speak*'
+Stop-PythonDaemon 'argus'                 '*argus.py*'
 Stop-PythonDaemon 'gmail-watch'           '*gmail-watch*'
 Stop-PythonDaemon 'friday-action-tracker' '*friday-action-tracker*'
 Stop-PythonDaemon 'friday-reminder-watch' '*friday-reminder-watch*'

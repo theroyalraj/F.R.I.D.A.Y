@@ -1,7 +1,7 @@
 /**
  * Optional JSON body field `claudeModel` (Friday voice UI). Invalid values are ignored.
  */
-const ALIASES = new Set(['haiku', 'sonnet', 'opus', 'inherit']);
+const ALIASES = new Set(['haiku', 'sonnet', 'opus', 'inherit', 'openrouter-free']);
 
 export function sanitizeClaudeModel(value) {
   if (value == null) return undefined;

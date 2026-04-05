@@ -27,6 +27,7 @@ import {
 import {
   proactiveNotifyConfigured,
   sendUnicastNotification,
+  sendUnicastMessageAlert,
   aiSummariesEnabled,
   generateAiSummary,
 } from './alexaProactive.js';
@@ -47,6 +48,7 @@ import { alexaMusicConfigured, alexaPlayMusic, alexaStopMusic } from './alexaMus
 import { playLocalSong } from './fridayPlay.js';
 import { startBriefingCron } from './briefingCron.js';
 import { stopAllFridayAudioAsync } from './stopAllFridayAudio.js';
+import { buildOpenclawStatus } from './openclawStatus.js';
 
 /** When true, startup / done / launch songs use yt-dlp on the PC even if an Alexa cookie exists (hear music on your Windows output). */
 function fridaySongsPreferLocalPc() {
@@ -55,9 +57,54 @@ function fridaySongsPreferLocalPc() {
   );
 }
 
-/** Play `FRIDAY_STARTUP_SONG` locally or via Alexa (same routing as gateway boot). */
+function entryRotateEnabled() {
+  return ['1', 'true', 'yes', 'on'].includes(
+    String(process.env.FRIDAY_STARTUP_SONG_ROTATE || '').toLowerCase(),
+  );
+}
+
+/**
+ * Boot / Alexa launch entry pool only — not the Maestro scheduler playlist.
+ * FRIDAY_ENTRY_PLAYLIST when set; else if rotating, legacy fallback FRIDAY_MUSIC_PLAYLIST.
+ */
+function resolveEntryPlaylistPhrases() {
+  const rotate = entryRotateEnabled();
+  const entryRaw = (process.env.FRIDAY_ENTRY_PLAYLIST || '').trim();
+  const legacyRaw = (process.env.FRIDAY_MUSIC_PLAYLIST || '').trim();
+  const raw = entryRaw || (rotate ? legacyRaw : '');
+  return raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function resolveStartupSongPhrase() {
+  const rotate = entryRotateEnabled();
+  const fixed = (process.env.FRIDAY_STARTUP_SONG || '').trim();
+  const pool = resolveEntryPlaylistPhrases();
+  if (rotate && pool.length) {
+    return pool[Math.floor(Math.random() * pool.length)];
+  }
+  return fixed;
+}
+
+function hasStartupEntrySequence() {
+  const fixed = (process.env.FRIDAY_STARTUP_SONG || '').trim();
+  const pool = resolveEntryPlaylistPhrases();
+  return Boolean(fixed || (entryRotateEnabled() && pool.length > 0));
+}
+
+/** Clip length for startup entry only (Alexa timer + local friday-play). */
+function entryPlaySeconds() {
+  const raw = (process.env.FRIDAY_ENTRY_PLAY_SECONDS || '').trim();
+  const n = parseInt(raw, 10);
+  if (!Number.isNaN(n) && n > 0) return n;
+  return parseInt(process.env.FRIDAY_PLAY_SECONDS || '45', 10);
+}
+
+/** Play startup entry song locally or via Alexa (same routing as gateway boot). */
 function playStartupSong(log) {
-  const phrase = process.env.FRIDAY_STARTUP_SONG;
+  const phrase = resolveStartupSongPhrase();
   if (!phrase?.trim()) return;
 
   const promptAfterSong = !['false', '0', 'no', 'off'].includes(
@@ -72,21 +119,22 @@ function playStartupSong(log) {
     else run();
   };
 
+  const entrySec = entryPlaySeconds();
+
   if (fridaySongsPreferLocalPc()) {
-    playLocalSong(phrase, log, { onClose: jarvisPrompt });
-  } else if (alexaMusicConfigured()) {
+    playLocalSong(phrase, log, { onClose: jarvisPrompt, fridayPlaySeconds: entrySec });
+  } else if (alexaBridgeEnabled() && alexaMusicConfigured()) {
     alexaPlayMusic(phrase, log)
       .then(() => {
-        const sec = parseInt(process.env.FRIDAY_PLAY_SECONDS || '45', 10);
         // Alexa has no end signal — approximate clip length (+ gap inside jarvisPrompt).
-        setTimeout(jarvisPrompt, Math.max(4000, sec * 1000));
+        setTimeout(jarvisPrompt, Math.max(4000, entrySec * 1000));
       })
       .catch((err) => {
         log.warn({ err: String(err?.message || err) }, 'startup song: Alexa failed — local friday-play');
-        playLocalSong(phrase, log, { onClose: jarvisPrompt });
+        playLocalSong(phrase, log, { onClose: jarvisPrompt, fridayPlaySeconds: entrySec });
       });
   } else {
-    playLocalSong(phrase, log, { onClose: jarvisPrompt });
+    playLocalSong(phrase, log, { onClose: jarvisPrompt, fridayPlaySeconds: entrySec });
   }
 }
 
@@ -112,6 +160,12 @@ const N8N_INTAKE_URL = process.env.N8N_INTAKE_URL || 'http://127.0.0.1:5678/webh
 const N8N_WEBHOOK_SECRET = process.env.N8N_WEBHOOK_SECRET || '';
 const VERIFY_SIG = process.env.ALEXA_VERIFY_SIGNATURE !== 'false';
 
+/** When false, the Alexa skill bridge and Alexa-only internal routes are disabled (slim / Mac / non-Echo installs). */
+function alexaBridgeEnabled() {
+  const v = String(process.env.OPENCLAW_ALEXA_ENABLED ?? 'true').trim().toLowerCase();
+  return !['0', 'false', 'no', 'off'].includes(v);
+}
+
 function verifyAlexaSignature(req, res, buf) {
   req.rawBody = buf.toString('utf8');
 }
@@ -130,7 +184,7 @@ app.use(
     logger: rootLogger,
     genReqId: (req) => req.openclawReqId,
     autoLogging: {
-      ignore: (req) => req.url === '/health',
+      ignore: (req) => req.url === '/health' || req.url === '/openclaw/status',
     },
     customProps: (req) => ({ openclawReqId: req.openclawReqId }),
     serializers: {
@@ -306,6 +360,7 @@ app.post('/openclaw/trigger', (req, res) => {
   });
 });
 
+if (alexaBridgeEnabled()) {
 app.post('/alexa', runVerifier, async (req, res, next) => {
   const t0 = Date.now();
   try {
@@ -374,11 +429,11 @@ app.post('/alexa', runVerifier, async (req, res, next) => {
       //   3. Respond to Alexa with SSML greeting + keep session open for commands
       req.log.info({ ms: Date.now() - t0, probe: !!body.lambdaLaunchProbe }, 'launch — triggering init sequence');
 
-      const initSong = process.env.FRIDAY_STARTUP_SONG;
       const welcomeDelayMs = parseInt(process.env.FRIDAY_STARTUP_WELCOME_DELAY_MS || '500', 10);
       const songGapMs = parseInt(process.env.FRIDAY_STARTUP_SONG_DELAY_MS || '0', 10);
+      const hasEntry = hasStartupEntrySequence();
 
-      if (initSong?.trim()) {
+      if (hasEntry) {
         setTimeout(() => scheduleStartupAfterWelcome(req.log, songGapMs), welcomeDelayMs);
       } else {
         setTimeout(() => speakGatewayStartup(req.log), 1500);
@@ -458,6 +513,7 @@ app.post('/alexa', runVerifier, async (req, res, next) => {
     next(err);
   }
 });
+}
 
 function requireN8nSecret(req, res) {
   const secret = req.headers['x-openclaw-secret'];
@@ -500,7 +556,7 @@ app.post('/internal/last-result', async (req, res, next) => {
     const wantNotify = notify === true || (notify === undefined && envPush);
 
     let notification = null;
-    if (wantNotify && userId && typeof userId === 'string') {
+    if (wantNotify && userId && typeof userId === 'string' && alexaBridgeEnabled()) {
       if (proactiveNotifyConfigured()) {
         const type        = notifyType || 'task_done';
         const creatorName = (notifyLabel && String(notifyLabel).trim().slice(0, 100)) || undefined;
@@ -559,7 +615,7 @@ app.post('/internal/last-result', async (req, res, next) => {
     if (doneSong) {
       if (fridaySongsPreferLocalPc()) {
         playLocalSong(doneSong, req.log);
-      } else if (alexaMusicConfigured()) {
+      } else if (alexaBridgeEnabled() && alexaMusicConfigured()) {
         alexaPlayMusic(doneSong, req.log).catch((err) => {
           req.log.warn({ err: String(err?.message || err) }, 'notify: Alexa music failed — local friday-play');
           playLocalSong(doneSong, req.log);
@@ -591,7 +647,9 @@ app.post('/internal/awaiting-user', async (req, res) => {
   setAwaitingUserReply(userId, { prompt: String(prompt), correlationId });
   let notification = null;
   if (notify === true) {
-    if (!proactiveNotifyConfigured()) {
+    if (!alexaBridgeEnabled()) {
+      notification = { skipped: 'alexa_disabled' };
+    } else if (!proactiveNotifyConfigured()) {
       notification = { ok: false, error: 'proactive_not_configured' };
     } else {
       const type = notifyType || 'waiting';
@@ -637,6 +695,9 @@ app.post('/internal/awaiting-user/peek', (req, res) => {
  *  Cooldown of 8s prevents the mic VAD from hammering this on every noise burst. */
 let _lastAlexaStop = 0;
 app.post('/internal/alexa-stop', async (req, res) => {
+  if (!alexaBridgeEnabled()) {
+    return res.json({ ok: true, skipped: 'alexa_disabled' });
+  }
   const now = Date.now();
   if (now - _lastAlexaStop < 8_000) {
     return res.json({ ok: true, skipped: 'cooldown' });
@@ -653,7 +714,7 @@ app.post('/internal/stop-all-media', async (req, res) => {
     req.query?.full === '1' ||
     req.query?.full === 'true' ||
     req.body?.full === true;
-  await stopAllFridayAudioAsync(req.log, { fullPanic: full, alexa: true });
+  await stopAllFridayAudioAsync(req.log, { fullPanic: full, alexa: alexaBridgeEnabled() });
   res.json({ ok: true, fullPanic: Boolean(full) });
 });
 
@@ -692,6 +753,7 @@ app.post('/internal/speak', async (req, res) => {
  * Body: { userId, creatorName?, count?, referenceId? } — userId must be the skill account id from the intake payload.
  * Requires LWA client credentials + skill manifest (see docs/setup.md). EU endpoints: set ALEXA_PROACTIVE_API_HOST.
  */
+if (alexaBridgeEnabled()) {
 app.post('/internal/alexa-notify', async (req, res) => {
   const secret = req.headers['x-openclaw-secret'];
   if (!N8N_WEBHOOK_SECRET || secret !== N8N_WEBHOOK_SECRET) {
@@ -723,9 +785,21 @@ app.post('/internal/alexa-notify', async (req, res) => {
   }
   res.json({ ok: true, referenceId: r.referenceId, amazonStatus: r.status });
 });
+}
 
 app.get('/health', (_req, res) => {
   res.json({ ok: true, service: 'openclaw-skill-gateway' });
+});
+
+/** Immediate status: schedules, last gateway briefing-cron run, pc-agent health snapshot. */
+app.get('/openclaw/status', async (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    const body = await buildOpenclawStatus();
+    res.json(body);
+  } catch (err) {
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
 });
 
 app.use(express.static(path.resolve(__dirname, '../public')));
@@ -733,7 +807,7 @@ app.use(express.static(path.resolve(__dirname, '../public')));
 app.use((err, req, res, _next) => {
   req.log?.error({ err }, 'unhandled route error');
   if (!res.headersSent) {
-    if (req.path === '/alexa') {
+    if (req.path === '/alexa' && alexaBridgeEnabled()) {
       res.status(500).json({
         version: '1.0',
         response: {
@@ -794,10 +868,13 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 
 server = app.listen(PORT, () => {
   // Jarvis-style startup banner
+  const tagline = alexaBridgeEnabled()
+    ? 'Alexa Bridge  ·  N8N Intake  ·  All Systems Nominal'
+    : 'Direct Intake  ·  No Alexa  ·  All Systems Nominal';
   process.stdout.write(
     '\n\x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m\n' +
     '\x1b[36m║\x1b[0m  \x1b[1;37m░░  F · R · I · D · A · Y  —  OpenClaw Skill Gateway  ░░\x1b[0m  \x1b[36m║\x1b[0m\n' +
-    '\x1b[36m║\x1b[0m  \x1b[90mAlexa Bridge  ·  N8N Intake  ·  All Systems Nominal\x1b[0m       \x1b[36m║\x1b[0m\n' +
+    `\x1b[36m║\x1b[0m  \x1b[90m${tagline}\x1b[0m       \x1b[36m║\x1b[0m\n` +
     '\x1b[36m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n\n',
   );
 
@@ -806,41 +883,63 @@ server = app.listen(PORT, () => {
   rootLogger.info(
     {
       port: PORT,
-      alexa: `POST http://127.0.0.1:${PORT}/alexa`,
+      alexaBridge: alexaBridgeEnabled(),
+      ...(alexaBridgeEnabled()
+        ? {
+            alexa: `POST http://127.0.0.1:${PORT}/alexa`,
+            alexaNotify: proactiveNotifyConfigured()
+              ? `POST http://127.0.0.1:${PORT}/internal/alexa-notify`
+              : undefined,
+            alexaVerify: VERIFY_SIG,
+            alexaMusic: alexaMusicConfigured() ? 'ready' : 'not configured (run: node scripts/setup-alexa-cookie.mjs)',
+          }
+        : {}),
       openclawTrigger: `POST http://127.0.0.1:${PORT}/openclaw/trigger (X-Openclaw-Secret + JSON commandText)`,
+      openclawStatus: `GET http://127.0.0.1:${PORT}/openclaw/status`,
       intakeProxy: useDirectIntake()
         ? `POST http://127.0.0.1:${PORT}/webhook/friday-intake → direct pc-agent (OPENCLAW_DIRECT_INTAKE)`
         : `POST http://127.0.0.1:${PORT}/webhook/friday-intake → ${N8N_INTAKE_URL}`,
       n8nIntake: useDirectIntake() ? 'disabled (direct)' : N8N_INTAKE_URL,
       openclawDirectIntake: useDirectIntake(),
-      alexaNotify: proactiveNotifyConfigured()
-        ? `POST http://127.0.0.1:${PORT}/internal/alexa-notify`
-        : undefined,
-      alexaVerify: VERIFY_SIG,
-      voice: fridaySpeakEnabled() ? (process.env.FRIDAY_TTS_VOICE || 'en-US-EmmaMultilingualNeural') : (winTtsEnabled() ? 'winTts' : 'off'),
-      alexaMusic: alexaMusicConfigured() ? 'ready' : 'not configured (run: node scripts/setup-alexa-cookie.mjs)',
+      voice: fridaySpeakEnabled() ? (process.env.FRIDAY_TTS_VOICE || 'en-US-AvaMultilingualNeural') : (winTtsEnabled() ? 'winTts' : 'off'),
       logLevel: process.env.LOG_LEVEL || 'default',
       logDir: process.env.OPENCLAW_LOG_DIR || null,
       nodeEnv: process.env.NODE_ENV || 'development',
     },
-    'skill-gateway listening (Alexa → N8N intake)',
+    alexaBridgeEnabled() ? 'skill-gateway listening (Alexa → N8N intake)' : 'skill-gateway listening (no Alexa bridge)',
   );
 
   // ── Startup sequence ────────────────────────────────────────────────────────
-  // Welcome TTS first (friday-speak exits after playback), then optional gap, then song.
-  const startSong = process.env.FRIDAY_STARTUP_SONG;
-  const welcomeDelayMs = parseInt(process.env.FRIDAY_STARTUP_WELCOME_DELAY_MS || '500', 10);
-  const songGapMs = parseInt(process.env.FRIDAY_STARTUP_SONG_DELAY_MS || '0', 10);
+  // Release any stuck players / TTS locks from a prior run, then welcome → gap → entry song.
+  void (async () => {
+    try {
+      await stopAllFridayAudioAsync(rootLogger, { fullPanic: true, alexa: alexaBridgeEnabled() });
+      rootLogger.info('startup: stop-all-media (full) — voice pipeline cleared before entry sequence');
+    } catch (e) {
+      rootLogger.debug({ err: String(e?.message || e) }, 'startup: stop-all before entry skipped');
+    }
 
-  if (startSong?.trim()) {
-    rootLogger.info(
-      { welcomeDelayMs, songGapMs },
-      'startup: welcome TTS first — song after friday-speak exits (+ gap)',
-    );
-    setTimeout(() => scheduleStartupAfterWelcome(rootLogger, songGapMs), welcomeDelayMs);
-  } else {
-    setTimeout(() => speakGatewayStartup(rootLogger), 1500);
-  }
+    const welcomeDelayMs = parseInt(process.env.FRIDAY_STARTUP_WELCOME_DELAY_MS || '500', 10);
+    const songGapMs = parseInt(process.env.FRIDAY_STARTUP_SONG_DELAY_MS || '0', 10);
+    const entryPool = resolveEntryPlaylistPhrases();
+    const hasEntry = hasStartupEntrySequence();
+
+    if (hasEntry) {
+      rootLogger.info(
+        {
+          welcomeDelayMs,
+          songGapMs,
+          rotate: entryRotateEnabled(),
+          entryPool: entryPool.length || 'fixed',
+          entryPlaySec: entryPlaySeconds(),
+        },
+        'startup: welcome TTS first — song after friday-speak exits (+ gap)',
+      );
+      setTimeout(() => scheduleStartupAfterWelcome(rootLogger, songGapMs), welcomeDelayMs);
+    } else {
+      setTimeout(() => speakGatewayStartup(rootLogger), 1500);
+    }
+  })();
 });
 server.on('error', (err) => {
   rootLogger.fatal({ err }, 'server listen error');

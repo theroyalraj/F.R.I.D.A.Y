@@ -36,17 +36,27 @@ const SignupPage: React.FC<Props> = ({ onBack, theme = 'dark' }) => {
           Corporate email domains share one organization; the first user is admin. Consumer email gets a personal org.
         </p>
         {err ? <div className={styles.err}>{err}</div> : null}
-        <form onSubmit={(e) => void submit(e)}>
+        <form onSubmit={(e) => void submit(e)} autoComplete="on" method="post" action="#">
           <div className={styles.field}>
             <label htmlFor="su-name">Your name</label>
-            <input id="su-name" value={name} onChange={(e) => setName(e.target.value)} autoComplete="name" />
+            <input
+              id="su-name"
+              name="name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              autoComplete="name"
+              placeholder="Full name"
+            />
           </div>
           <div className={styles.field}>
             <label htmlFor="su-email">Email</label>
             <input
               id="su-email"
+              name="email"
               type="email"
+              inputMode="email"
               autoComplete="email"
+              placeholder="you@example.com"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               required
@@ -56,8 +66,10 @@ const SignupPage: React.FC<Props> = ({ onBack, theme = 'dark' }) => {
             <label htmlFor="su-password">Password (8+ characters)</label>
             <input
               id="su-password"
+              name="password"
               type="password"
               autoComplete="new-password"
+              placeholder="At least 8 characters"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required

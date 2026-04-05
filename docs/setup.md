@@ -298,6 +298,12 @@ If you set **`WHATSAPP_WEBHOOK_SECRET`**, configure Evolution (or a reverse prox
 3. **Groups** are ignored by the sample workflow (only 1:1 chats).  
 4. Do **not** expose N8N or Evolution to the public internet without TLS, auth, and rate limits.
 
+### 9.7a Friday Listen — Mail and WhatsApp rail
+
+After you sign in, the dashboard at **`http://127.0.0.1:3847/friday/listen`** shows a **right-hand rail**: **Mail** (unread + recent from Gmail via **`GET /integrations/gmail`**) above **WhatsApp** (Evolution connection status, recent inbound messages, and compose). Outbound sends use **`POST /integrations/whatsapp/send`** on pc-agent; the **recipient must be in** **`WHATSAPP_ALLOWED_NUMBERS`** when that list is non-empty, and **`EVOLUTION_API_KEY`** must be a real secret (not `change-me`). **Inbound handling is unchanged:** Evolution → N8N **`whatsapp-intake`** → **`POST /task`** — the rail is for monitoring and manual sends, not a replacement for the webhook.
+
+Gmail in the rail needs **`GMAIL_ADDRESS`** and **`GMAIL_APP_PWD`** in `.env` (same as [`scripts/gmail.py`](../scripts/gmail.py)). On **narrow** windows (&lt;1100px), tap the **envelope** icon in the top bar to open the rail over the chat.
+
 ### 9.8 Alexa vs WhatsApp
 
 - **Alexa** still uses **`friday-intake`** and the skill-gateway.  

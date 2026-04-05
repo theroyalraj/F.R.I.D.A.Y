@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import { safeReadJson } from '../lib/fetchJson';
 import styles from '../styles/listen.module.css';
 
 type MailRow = { uid: string; from: string; subject: string; date: string };
@@ -30,8 +31,7 @@ type Props = {
   isNarrow: boolean;
 };
 
-const POLL_FAST_MS = 28_000;
-const POLL_SLOW_MS = 60_000;
+const POLL_MS = 32_000;
 
 export const IntegrationsRail: React.FC<Props> = ({
   authHeaders,
@@ -57,13 +57,10 @@ export const IntegrationsRail: React.FC<Props> = ({
   });
   const [waMessages, setWaMessages] = useState<WaMsg[]>([]);
   const [waMsgError, setWaMsgError] = useState<string | null>(null);
-  const [defaultWaNumber, setDefaultWaNumber] = useState('');
   const [waNumber, setWaNumber] = useState('');
   const [waText, setWaText] = useState('');
   const [waSending, setWaSending] = useState(false);
   const [selectedMail, setSelectedMail] = useState<MailRow | null>(null);
-
-  const pollInterval = document.hidden ? POLL_SLOW_MS : POLL_FAST_MS;
 
   const refreshMail = useCallback(async () => {
     try {
@@ -71,18 +68,19 @@ export const IntegrationsRail: React.FC<Props> = ({
         `/integrations/gmail?unreadCount=20&recentCount=15`,
         { headers: authHeaders() },
       );
-      const d = await r.json();
-      if (!r.ok) {
+      const { data } = await safeReadJson(r);
+      const d = data as { error?: string; unread?: unknown[]; recent?: unknown[] };
+      if (!r.ok || (d && typeof d.error === 'string' && !Array.isArray(d.unread))) {
         setGmail((g) => ({
           ...g,
           loading: false,
-          error: d.error || `HTTP ${r.status}`,
+          error: d?.error || `HTTP ${r.status}`,
         }));
         return;
       }
       setGmail({
-        unread: Array.isArray(d.unread) ? d.unread : [],
-        recent: Array.isArray(d.recent) ? d.recent : [],
+        unread: Array.isArray(d.unread) ? d.unread as MailRow[] : [],
+        recent: Array.isArray(d.recent) ? d.recent as MailRow[] : [],
         error: null,
         loading: false,
       });
@@ -102,34 +100,42 @@ export const IntegrationsRail: React.FC<Props> = ({
         fetch('/integrations/whatsapp/status', { headers: authHeaders() }),
         fetch('/integrations/whatsapp/messages?limit=12', { headers: authHeaders() }),
       ]);
-      const meta = await metaR.json();
-      if (metaR.ok && meta.defaultNumber && !waNumber) {
-        setDefaultWaNumber(meta.defaultNumber);
-        setWaNumber((n) => n || meta.defaultNumber);
+      const { data: metaRaw } = await safeReadJson(metaR);
+      const meta = metaRaw as { defaultNumber?: string };
+      if (metaR.ok && meta?.defaultNumber) {
+        setWaNumber((n) => n || String(meta.defaultNumber));
       }
 
-      const st = await stR.json();
+      const { data: stRaw } = await safeReadJson(stR);
+      const st = stRaw as {
+        error?: string;
+        connectionStatus?: string | null;
+        state?: string | null;
+        number?: string | null;
+      };
       if (!stR.ok) {
         setWaStatus({
           connectionStatus: null,
           state: null,
           number: null,
           profileName: null,
-          error: st.error || `HTTP ${stR.status}`,
+          error: st?.error || `HTTP ${stR.status}`,
           loading: false,
         });
       } else {
+        const stFull = stRaw as typeof st & { profileName?: string | null };
         setWaStatus({
-          connectionStatus: st.connectionStatus ?? null,
-          state: st.state ?? null,
-          number: st.number ?? null,
-          profileName: st.profileName ?? null,
+          connectionStatus: stFull.connectionStatus ?? null,
+          state: stFull.state ?? null,
+          number: stFull.number ?? null,
+          profileName: stFull.profileName ?? null,
           error: null,
           loading: false,
         });
       }
 
-      const mj = await msgR.json();
+      const { data: mjRaw } = await safeReadJson(msgR);
+      const mj = mjRaw as { messages?: WaMsg[]; error?: string };
       if (msgR.ok && Array.isArray(mj.messages)) {
         setWaMessages(mj.messages);
         setWaMsgError(null);
@@ -145,7 +151,7 @@ export const IntegrationsRail: React.FC<Props> = ({
       }));
       setWaMsgError(String((e as Error).message || e));
     }
-  }, [authHeaders, waNumber]);
+  }, [authHeaders]);
 
   const refreshAll = useCallback(async () => {
     setGmail((g) => ({ ...g, loading: true }));
@@ -169,9 +175,9 @@ export const IntegrationsRail: React.FC<Props> = ({
     const iv = setInterval(() => {
       if (document.hidden) return;
       refreshAll();
-    }, pollInterval);
+    }, POLL_MS);
     return () => clearInterval(iv);
-  }, [refreshAll, pollInterval]);
+  }, [refreshAll]);
 
   useEffect(() => {
     if (gmail.unread.length > 0) {
@@ -242,6 +248,14 @@ export const IntegrationsRail: React.FC<Props> = ({
       )}
       <aside className={railClass} aria-label="Mail and WhatsApp">
         <div className={styles['integrations-rail-inner']}>
+          {isNarrow && (
+            <div className={styles['integrations-mobile-head']}>
+              <span>Mail and WhatsApp</span>
+              <button type="button" className={styles['integrations-close']} onClick={onDrawerClose} aria-label="Close">
+                {'\u2715'}
+              </button>
+            </div>
+          )}
           <div className={styles['integrations-section']}>
             <div className={styles['integrations-section-head']}>
               <span className={styles['integrations-title']}>Mail</span>
@@ -274,7 +288,7 @@ export const IntegrationsRail: React.FC<Props> = ({
                         onClick={() => setSelectedMail(m)}
                       >
                         <span className={styles['integrations-mail-subj']}>{m.subject || '(no subject)'}</span>
-                        shortFromDate(m)
+                        {shortFromDate(m)}
                       </button>
                     ))}
                   </>
@@ -290,7 +304,7 @@ export const IntegrationsRail: React.FC<Props> = ({
                         onClick={() => setSelectedMail(m)}
                       >
                         <span className={styles['integrations-mail-subj']}>{m.subject || '(no subject)'}</span>
-                        shortFromDate(m)
+                        {shortFromDate(m)}
                       </button>
                     ))}
                   </>

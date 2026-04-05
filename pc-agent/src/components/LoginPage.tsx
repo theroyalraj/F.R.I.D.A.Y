@@ -33,13 +33,16 @@ const LoginPage: React.FC<Props> = ({ onSignup, theme = 'dark' }) => {
         <h1 className={styles.title}>OpenClaw</h1>
         <p className={styles.sub}>Sign in to continue to Listen</p>
         {err ? <div className={styles.err}>{err}</div> : null}
-        <form onSubmit={(e) => void submit(e)}>
+        <form onSubmit={(e) => void submit(e)} autoComplete="on" method="post" action="#">
           <div className={styles.field}>
             <label htmlFor="login-email">Email</label>
             <input
               id="login-email"
+              name="email"
               type="email"
-              autoComplete="email"
+              inputMode="email"
+              autoComplete="username"
+              placeholder="you@example.com"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               required
@@ -49,8 +52,10 @@ const LoginPage: React.FC<Props> = ({ onSignup, theme = 'dark' }) => {
             <label htmlFor="login-password">Password</label>
             <input
               id="login-password"
+              name="password"
               type="password"
               autoComplete="current-password"
+              placeholder="Enter your password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required

@@ -5,7 +5,24 @@ import { useSSEStream } from '../hooks/useSSEStream';
 import { useUptime } from '../hooks/useUptime';
 import ToastContainer from './Toast';
 import SpeakStylePanel from './SpeakStylePanel';
+import VoiceSiriOverlay from './VoiceSiriOverlay';
+import { IntegrationsRail } from './IntegrationsRail';
+import { PersonaRosterModal } from './PersonaRosterModal';
+import {
+  COMPANY_PERSONAS,
+  SPEAKING_PERSONA_ORDER,
+  mergePersona,
+  inferPersonaKeyFromVoice,
+  shortVoiceLabel,
+  USER_BUBBLE_PERSONA,
+  type CompanyPersonaKey,
+  type PersonaCatalog,
+} from '../data/companyPersonas';
 import styles from '../styles/listen.module.css';
+
+const INTEGRATIONS_NARROW_MQ = '(max-width: 1100px)';
+/** Shared with /friday voice.html — same Claude model preference */
+const LS_CLAUDE_MODEL = 'friday.claudeModel';
 
 /* ── Voice metadata ───────────────────────────────────────── */
 interface VoiceMeta { icon: string; color: string; shortName: string; }
@@ -26,6 +43,10 @@ const VOICE_META: Record<string, VoiceMeta> = {
   'en-AU-NatashaNeural':          { icon: '\uD83E\uDDD1\u200D\uD83C\uDFA4', color: '#f97316', shortName: 'Natasha' },
   'en-CA-LiamNeural':             { icon: '\uD83E\uDDD1', color: '#22d3ee', shortName: 'Liam' },
   'en-CA-ClaraNeural':            { icon: '\uD83D\uDC69\u200D\uD83C\uDFA8', color: '#a78bfa', shortName: 'Clara' },
+  'en-US-AndrewMultilingualNeural': { icon: '\uD83E\uDDD1\u200D\uD83D\uDD2C', color: '#94a3b8', shortName: 'Andrew' },
+  'en-US-BrianMultilingualNeural': { icon: '\uD83C\uDFAD', color: '#a8a29e', shortName: 'Brian' },
+  'en-US-AvaMultilingualNeural': { icon: '\uD83D\uDC69\u200D\uD83D\uDCBC', color: '#f0abfc', shortName: 'Ava' },
+  'en-IE-ConnorNeural':           { icon: '\uD83D\uDCE1', color: '#7dd3fc', shortName: 'Connor' },
 };
 
 function vm(id: string): VoiceMeta {
@@ -52,6 +73,7 @@ const MENTION_TARGETS = [
 /* ── Types ────────────────────────────────────────────────── */
 interface VoiceSession { context: string; voice: string; set_at: string; last_used: string; status: 'active' | 'idle'; }
 interface EdgeVoice { voice: string; lang: string; gender: string; desc: string; }
+interface CelebrationPayload { song: string; askText: string; delayMsBeforeAsk: number; }
 
 /* ═══ Main App ════════════════════════════════════════════════ */
 const FridayListenApp: React.FC = () => {
@@ -62,6 +84,8 @@ const FridayListenApp: React.FC = () => {
     exchanges, lastHeardText,
     edgeVoices, currentVoice, setCurrentVoice,
     bubbles, addBubble, showToast, setUptime,
+    activePersonaKey, setActivePersonaKey, personaOverrides, refreshPersonaOverrides, getReplyPersona,
+    personaCatalog, setPersonaCatalog,
   } = useVoiceApp();
   const { authHeaders } = useAuth();
 
@@ -76,14 +100,111 @@ const FridayListenApp: React.FC = () => {
   const inputRef = useRef<HTMLInputElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const glowRef = useRef<HTMLDivElement>(null);
+  const celebrationAskTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [uptime] = useUptime(setUptime);
+  const [integrationsDrawerOpen, setIntegrationsDrawerOpen] = useState(
+    () => typeof window !== 'undefined' && !window.matchMedia(INTEGRATIONS_NARROW_MQ).matches,
+  );
+  const [isNarrow, setIsNarrow] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia(INTEGRATIONS_NARROW_MQ).matches,
+  );
+  const [personaModalOpen, setPersonaModalOpen] = useState(false);
+  const [celebrationOffer, setCelebrationOffer] = useState<CelebrationPayload | null>(null);
+  const [claudeModel, setClaudeModel] = useState(() => {
+    try {
+      return typeof localStorage !== 'undefined' ? localStorage.getItem(LS_CLAUDE_MODEL) || '' : '';
+    } catch {
+      return '';
+    }
+  });
+  const [openclawStrip, setOpenclawStrip] = useState<{
+    gwOk: boolean;
+    agentOk: boolean;
+    fromDb: boolean;
+    roleCount: number;
+    err?: string;
+  } | null>(null);
 
-  // Fetch voices
+  const clearCelebrationOffer = useCallback(() => {
+    if (celebrationAskTimerRef.current) {
+      clearTimeout(celebrationAskTimerRef.current);
+      celebrationAskTimerRef.current = null;
+    }
+    setCelebrationOffer(null);
+  }, []);
+
   useEffect(() => {
-    fetch('/voice/voices', { headers: authHeaders() }).then(r => r.json())
-      .then(d => { if (d.voices) setEdgeVoices(d.voices); if (d.active) setCurrentVoice(d.active); })
+    const mq = window.matchMedia(INTEGRATIONS_NARROW_MQ);
+    const apply = () => {
+      const narrow = mq.matches;
+      setIsNarrow(narrow);
+      if (narrow) setIntegrationsDrawerOpen(false);
+      else setIntegrationsDrawerOpen(true);
+    };
+    apply();
+    mq.addEventListener('change', apply);
+    return () => mq.removeEventListener('change', apply);
+  }, []);
+
+  // Merged voice-agent personas from Postgres (openclaw_settings.voice_agent_personas)
+  useEffect(() => {
+    fetch('/settings/personas', { headers: authHeaders() })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (d?.merged && typeof d.merged === 'object') {
+          setPersonaCatalog(d.merged as PersonaCatalog);
+        }
+      })
       .catch(() => {});
-  }, [setEdgeVoices, setCurrentVoice, authHeaders]);
+  }, [authHeaders, setPersonaCatalog]);
+
+  // Fetch voices + align active persona with server session voice (catalog may load later)
+  useEffect(() => {
+    fetch('/voice/voices', { headers: authHeaders() })
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.voices) setEdgeVoices(d.voices);
+        if (d.active) {
+          setCurrentVoice(d.active);
+          setActivePersonaKey(inferPersonaKeyFromVoice(d.active, null));
+        }
+      })
+      .catch(() => {});
+  }, [setEdgeVoices, setCurrentVoice, setActivePersonaKey, authHeaders]);
+
+  useEffect(() => {
+    if (!personaCatalog) return;
+    setActivePersonaKey(inferPersonaKeyFromVoice(currentVoice, personaCatalog));
+  }, [personaCatalog, currentVoice, setActivePersonaKey]);
+
+  // OpenClaw stack status (proxies skill-gateway) — visible by default on Listen
+  useEffect(() => {
+    const tick = () => {
+      fetch('/openclaw/status')
+        .then((r) => r.json())
+        .then((j) => {
+          setOpenclawStrip({
+            gwOk: j.ok === true,
+            agentOk: j.pcAgent?.ok === true,
+            fromDb: j.personas?.fromDatabase === true,
+            roleCount: Array.isArray(j.personas?.roles) ? j.personas.roles.length : 0,
+            err: j.ok === false ? String(j.error || '').slice(0, 120) : undefined,
+          });
+        })
+        .catch((e) =>
+          setOpenclawStrip({
+            gwOk: false,
+            agentOk: false,
+            fromDb: false,
+            roleCount: 0,
+            err: String(e.message || e).slice(0, 80),
+          }),
+        );
+    };
+    tick();
+    const iv = setInterval(tick, 25000);
+    return () => clearInterval(iv);
+  }, []);
 
   // Poll sessions
   useEffect(() => {
@@ -99,9 +220,12 @@ const FridayListenApp: React.FC = () => {
     if (event.type === 'sse_disconnected') postEvent('daemon_disconnect');
     else if (event.type === 'sse_connected') postEvent('daemon_start', 'Voice daemon online.');
     else if (event.type === 'speak_style_changed') window.dispatchEvent(new CustomEvent('openclaw:speak-style-changed'));
-    else {
+    else if (event.type === 'voice_changed') {
+      const ev = event as { voice?: string; text?: string };
+      const v = typeof ev.voice === 'string' && ev.voice ? ev.voice : (ev.text || '');
+      postEvent('voice_changed', v);
+    } else {
       postEvent(event.type, event.text || '');
-      // Track speaking state
       if (event.type === 'speak' || event.type === 'thinking') setSpeakingText(event.text || 'Speaking...');
       if (event.type === 'listening' || event.type === 'reply') setSpeakingText('');
     }
@@ -132,6 +256,7 @@ const FridayListenApp: React.FC = () => {
   const handleSend = useCallback(async () => {
     const raw = inputText.trim();
     if (!raw || sending) return;
+    clearCelebrationOffer();
     setSending(true);
     setInputText('');
     setShowMentions(false);
@@ -140,7 +265,7 @@ const FridayListenApp: React.FC = () => {
     const mentions = [...raw.matchAll(/@(\w+)/g)].map(m => m[1].toLowerCase());
     const text = raw.replace(/@\w+\s*/g, '').trim() || raw;
 
-    addBubble({ type: 'user', text: raw, ts: Date.now() });
+    addBubble({ type: 'user', text: raw, ts: Date.now(), persona: USER_BUBBLE_PERSONA });
 
     // If @speak — just speak the text directly
     if (mentions.includes('speak')) {
@@ -148,7 +273,12 @@ const FridayListenApp: React.FC = () => {
         method: 'POST', headers: { ...authHeaders() as Record<string, string> },
         body: JSON.stringify({ text }),
       }).then(() => {
-        addBubble({ type: 'friday', text: `\uD83D\uDD0A Speaking: "${text}"`, ts: Date.now() });
+        addBubble({
+          type: 'friday',
+          text: `\uD83D\uDD0A Speaking: "${text}"`,
+          ts: Date.now(),
+          persona: getReplyPersona(),
+        });
       }).catch(() => {});
       setSending(false);
       setConnectionStatus('speaking');
@@ -165,27 +295,81 @@ const FridayListenApp: React.FC = () => {
           source: mentions.includes('cursor') ? 'cursor-ui' : 'ui',
           userId: 'friday-ui',
           ...(mentions.includes('cursor') ? { target: 'cursor' } : {}),
+          ...(claudeModel ? { claudeModel } : {}),
         }),
       });
       const data = await res.json();
       if (data.summary) {
-        addBubble({ type: 'friday', text: data.summary, ts: Date.now() });
-        // Auto-speak response
-        fetch('/voice/speak-async', {
-          method: 'POST', headers: { ...authHeaders() as Record<string, string> },
-          body: JSON.stringify({ text: data.summary }),
-        }).catch(() => {});
+        addBubble({ type: 'friday', text: data.summary, ts: Date.now(), persona: getReplyPersona() });
+        if (data.speakAsync !== false) {
+          fetch('/voice/speak-async', {
+            method: 'POST', headers: { ...authHeaders() as Record<string, string> },
+            body: JSON.stringify({ text: data.summary }),
+          }).catch(() => {});
+        }
       } else if (data.error) {
-        addBubble({ type: 'error', text: data.error, ts: Date.now() });
+        addBubble({ type: 'error', text: data.error, ts: Date.now(), persona: getReplyPersona() });
+      }
+      if (data.ok && data.celebration?.song && data.celebration?.askText) {
+        const cel = data.celebration as CelebrationPayload;
+        setCelebrationOffer({
+          song: cel.song,
+          askText: cel.askText,
+          delayMsBeforeAsk: cel.delayMsBeforeAsk ?? 4000,
+        });
+        celebrationAskTimerRef.current = setTimeout(() => {
+          celebrationAskTimerRef.current = null;
+          fetch('/voice/speak-async', {
+            method: 'POST',
+            headers: { ...authHeaders() as Record<string, string> },
+            body: JSON.stringify({ text: cel.askText }),
+          }).catch(() => {});
+        }, cel.delayMsBeforeAsk ?? 4000);
       }
     } catch (err) {
-      addBubble({ type: 'error', text: String(err), ts: Date.now() });
+      addBubble({ type: 'error', text: String(err), ts: Date.now(), persona: getReplyPersona() });
     } finally {
       setSending(false);
       setConnectionStatus('listening');
       inputRef.current?.focus();
     }
-  }, [inputText, sending, addBubble, setConnectionStatus, authHeaders]);
+  }, [inputText, sending, addBubble, setConnectionStatus, authHeaders, getReplyPersona, clearCelebrationOffer, claudeModel]);
+
+  const onCelebrationPlay = useCallback(async () => {
+    if (celebrationAskTimerRef.current) {
+      clearTimeout(celebrationAskTimerRef.current);
+      celebrationAskTimerRef.current = null;
+    }
+    setCelebrationOffer(null);
+    try {
+      await fetch('/voice/celebration', {
+        method: 'POST',
+        headers: { ...authHeaders() as Record<string, string>, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accept: true }),
+      });
+      showToast('Playing celebration clip', 'success');
+    } catch {
+      showToast('Could not start playback', 'error');
+    }
+  }, [authHeaders, showToast]);
+
+  const onCelebrationFocus = useCallback(async () => {
+    if (celebrationAskTimerRef.current) {
+      clearTimeout(celebrationAskTimerRef.current);
+      celebrationAskTimerRef.current = null;
+    }
+    setCelebrationOffer(null);
+    try {
+      await fetch('/voice/celebration', {
+        method: 'POST',
+        headers: { ...authHeaders() as Record<string, string>, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accept: false }),
+      });
+      showToast('Focus recap on speakers', 'info');
+    } catch {
+      showToast('Focus recap failed', 'error');
+    }
+  }, [authHeaders, showToast]);
 
   // Input handling with @mention detection
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -231,11 +415,42 @@ const FridayListenApp: React.FC = () => {
     if (!m) setConnectionStatus('listening');
   };
 
-  const handleVoiceChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    const v = e.target.value;
+  const applyVoice = useCallback((v: string, toast: string) => {
     setCurrentVoice(v);
-    fetch('/voice/set-voice', { method: 'POST', headers: { ...authHeaders() as Record<string, string> }, body: JSON.stringify({ voice: v }) })
-      .then(() => showToast(`Voice: ${vm(v).shortName}`, 'success')).catch(() => {});
+    fetch('/voice/set-voice', {
+      method: 'POST',
+      headers: { ...authHeaders() as Record<string, string> },
+      body: JSON.stringify({ voice: v }),
+    })
+      .then(() => showToast(toast, 'success'))
+      .catch(() => {});
+  }, [authHeaders, showToast]);
+
+  const handlePersonaTeamChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const key = e.target.value as CompanyPersonaKey | 'custom';
+    setActivePersonaKey(key);
+    if (key === 'custom') return;
+    const row = personaCatalog?.[key as string];
+    const v = (row?.voice?.trim() || COMPANY_PERSONAS[key].voice);
+    const nm = row?.name?.trim() || COMPANY_PERSONAS[key].name;
+    applyVoice(v, `${nm} · team voice`);
+  };
+
+  const handleCatalogueVoiceChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const v = e.target.value;
+    setActivePersonaKey('custom');
+    applyVoice(v, `Catalogue · ${vm(v).shortName}`);
+  };
+
+  const handleClaudeModelChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const v = e.target.value;
+    setClaudeModel(v);
+    try {
+      localStorage.setItem(LS_CLAUDE_MODEL, v);
+    } catch {
+      /* ignore */
+    }
+    showToast(v === 'openrouter-free' ? 'Using OpenRouter free tier for replies' : 'Claude model updated', 'info');
   };
 
   const handleFileClick = () => fileRef.current?.click();
@@ -244,7 +459,7 @@ const FridayListenApp: React.FC = () => {
     if (!file) return;
     showToast(`File: ${file.name} (${(file.size / 1024).toFixed(1)}KB)`, 'info');
     // Future: upload to server or attach to command
-    addBubble({ type: 'user', text: `\uD83D\uDCCE Attached: ${file.name}`, ts: Date.now() });
+    addBubble({ type: 'user', text: `\uD83D\uDCCE Attached: ${file.name}`, ts: Date.now(), persona: USER_BUBBLE_PERSONA });
     e.target.value = '';
   };
 
@@ -252,6 +467,7 @@ const FridayListenApp: React.FC = () => {
   const stateIcons: Record<string, string> = { offline: '\u2606', listening: '\uD83C\uDF99\uFE0F', processing: '\u26A1', speaking: '\uD83D\uDD0A' };
   const statusLabels: Record<string, string> = { offline: 'Offline', listening: 'Listening', processing: 'Thinking...', speaking: 'Speaking' };
   const curMeta = vm(currentVoice);
+  const replyPersona = mergePersona(activePersonaKey, personaOverrides, currentVoice, personaCatalog);
 
   const formatTime = (ts: number) => new Date(ts).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
   const timeAgo = (iso: string) => {
@@ -263,6 +479,11 @@ const FridayListenApp: React.FC = () => {
 
   return (
     <div className={`${styles.app} ${theme === 'light' ? styles.light : ''}`}>
+      <VoiceSiriOverlay
+        open={connectionStatus === 'speaking'}
+        theme={theme}
+        caption={speakingText.trim() || undefined}
+      />
       {/* Glow */}
       <div ref={glowRef} className={`${styles['glow-wrap']} ${styles[`glow-${connectionStatus}`]}`}>
         <div className={styles['glow-blob']} />
@@ -280,6 +501,16 @@ const FridayListenApp: React.FC = () => {
           <span className={styles['top-meta']}>UP {uptime}</span>
         </div>
         <div className={styles['top-right']}>
+          {isNarrow && (
+            <button
+              type="button"
+              className={styles['top-btn']}
+              onClick={() => setIntegrationsDrawerOpen(true)}
+              title="Mail and WhatsApp"
+            >
+              {'\uD83D\uDCE7'}
+            </button>
+          )}
           <span className={styles['top-meta']}>{exchanges} msgs</span>
           <button className={styles['top-btn']} onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>
             {theme === 'dark' ? '\u2600\uFE0F' : '\uD83C\uDF19'}
@@ -288,13 +519,44 @@ const FridayListenApp: React.FC = () => {
         </div>
       </div>
 
+      {openclawStrip && (
+        <div className={styles['openclaw-status-bar']} role="status" aria-live="polite">
+          <span className={styles['openclaw-status-brand']}>OpenClaw</span>
+          <span className={openclawStrip.gwOk ? styles['oc-ok'] : styles['oc-bad']}>
+            gateway {openclawStrip.gwOk ? 'OK' : 'down'}
+          </span>
+          <span className={openclawStrip.agentOk ? styles['oc-ok'] : styles['oc-bad']}>
+            agent {openclawStrip.agentOk ? 'OK' : 'down'}
+          </span>
+          {openclawStrip.roleCount > 0 && (
+            <span className={styles['oc-meta']}>
+              roster {openclawStrip.roleCount}
+              {openclawStrip.fromDb ? ' · Postgres' : ' · defaults'}
+            </span>
+          )}
+          {openclawStrip.err && <span className={styles['oc-err']}>{openclawStrip.err}</span>}
+          <a className={styles['oc-link']} href="/openclaw/status" target="_blank" rel="noreferrer">
+            JSON status
+          </a>
+          <a className={styles['oc-link']} href="/settings/personas" target="_blank" rel="noreferrer">
+            personas JSON
+          </a>
+        </div>
+      )}
+
       {/* Main layout: sidebar + chat */}
       <div className={styles['main-layout']}>
         {/* Left sidebar: orb + sessions */}
         <div className={styles.sidebar}>
           {/* Orb */}
-          <div className={`${styles['orb-area']} ${styles[`orb-${connectionStatus}`]}`}
-            onClick={handleOrbClick} role="button" tabIndex={0}>
+          <div
+            className={`${styles['orb-area']} ${styles[`orb-${connectionStatus}`]} ${
+              connectionStatus === 'listening' && !listenMuted ? styles['orb-siri-listen'] : ''
+            }`}
+            onClick={handleOrbClick}
+            role="button"
+            tabIndex={0}
+          >
             <div className={styles['orb-circle']}>
               <span className={`${styles['orb-icon']} ${listenMuted ? styles['orb-icon-muted'] : ''}`}>
                 {listenMuted ? '\u2298' : stateIcons[connectionStatus]}
@@ -316,19 +578,65 @@ const FridayListenApp: React.FC = () => {
             </div>
           )}
 
-          {/* Voice picker */}
+          {/* Team speaker + voice pool */}
           <div className={styles['voice-card']}>
             <div className={styles['voice-card-top']}>
               <span className={styles['voice-card-icon']} style={{ color: curMeta.color }}>{curMeta.icon}</span>
               <div className={styles['voice-card-info']}>
-                <span className={styles['voice-card-name']}>{curMeta.shortName}</span>
-                <span className={styles['voice-card-role']}>Active voice</span>
+                <span className={styles['voice-card-name']}>{replyPersona.name}</span>
+                <span className={styles['voice-card-role']}>{replyPersona.title}</span>
               </div>
             </div>
-            <select className={styles['voice-card-select']} value={currentVoice} onChange={handleVoiceChange}>
-              {(edgeVoices as EdgeVoice[]).map(v => (
-                <option key={v.voice} value={v.voice}>{vm(v.voice).shortName} - {v.lang} {v.gender}</option>
+            <div className={styles['voice-card-row-label']}>Who speaks (default replies)</div>
+            <select
+              className={styles['voice-card-select']}
+              value={activePersonaKey}
+              onChange={handlePersonaTeamChange}
+              aria-label="Team speaker"
+            >
+              {SPEAKING_PERSONA_ORDER.map((key) => {
+                const p = mergePersona(key, personaOverrides, currentVoice, personaCatalog);
+                return (
+                  <option key={key} value={key}>
+                    {p.name} — {p.title}
+                  </option>
+                );
+              })}
+              <option value="custom">Custom — catalogue only</option>
+            </select>
+            <div className={styles['voice-card-row-label']}>Edge voice catalogue</div>
+            <select
+              className={styles['voice-card-select']}
+              value={currentVoice}
+              onChange={handleCatalogueVoiceChange}
+              aria-label="Edge TTS voice"
+            >
+              {(edgeVoices as EdgeVoice[]).map((v) => (
+                <option key={v.voice} value={v.voice}>
+                  {vm(v.voice).shortName} — {v.lang} {v.gender}
+                </option>
               ))}
+            </select>
+            <button
+              type="button"
+              className={styles['voice-card-edit-roster']}
+              onClick={() => setPersonaModalOpen(true)}
+            >
+              Edit designations &amp; descriptions
+            </button>
+            <div className={styles['voice-card-row-label']}>Claude model (chat)</div>
+            <select
+              className={styles['voice-card-select']}
+              value={claudeModel}
+              onChange={handleClaudeModelChange}
+              aria-label="Claude or OpenRouter model"
+            >
+              <option value="">Server default — Sonnet via Anthropic</option>
+              <option value="haiku">Haiku — fastest</option>
+              <option value="sonnet">Sonnet — balanced</option>
+              <option value="opus">Opus — strongest</option>
+              <option value="openrouter-free">OpenRouter free — openrouter slash free router (dot env)</option>
+              <option value="inherit">CLI default — no dash dash model</option>
             </select>
           </div>
 
@@ -338,12 +646,17 @@ const FridayListenApp: React.FC = () => {
             {sessions.map(s => {
               const meta = vm(s.voice);
               const ctx = CTX[s.context] || { label: s.context, desc: '' };
+              const pk = inferPersonaKeyFromVoice(s.voice, personaCatalog);
+              const designation =
+                pk === 'custom' ? `${ctx.desc} · ${shortVoiceLabel(s.voice)}` : mergePersona(pk, personaOverrides, s.voice, personaCatalog).title;
               return (
                 <div key={s.context} className={`${styles['session-row']} ${s.status === 'active' ? styles['session-active'] : ''}`}>
                   <span className={styles['session-icon']} style={{ color: meta.color }}>{meta.icon}</span>
                   <div className={styles['session-details']}>
                     <span className={styles['session-ctx']}>{ctx.label}</span>
-                    <span className={styles['session-voice-name']}>{meta.shortName}</span>
+                    <span className={styles['session-voice-name']}>
+                      {meta.shortName} · {designation}
+                    </span>
                   </div>
                   <div className={styles['session-right']}>
                     <span className={`${styles['session-dot']} ${s.status === 'active' ? styles['dot-on'] : ''}`} />
@@ -382,20 +695,71 @@ const FridayListenApp: React.FC = () => {
               );
               const isFriday = b.type === 'friday';
               const isError = b.type === 'error';
+              const isUser = b.type === 'user';
+              const av = b.persona?.voice ? vm(b.persona.voice) : curMeta;
               return (
                 <div key={b.id} className={`${styles['chat-msg']} ${styles[`msg-${b.type}`]}`}>
                   {(isFriday || isError) && (
                     <div className={styles['msg-avatar']}>
-                      {isError ? '\u26A0\uFE0F' : curMeta.icon}
+                      {isError ? '\u26A0\uFE0F' : av.icon}
                     </div>
                   )}
                   <div className={styles['msg-content']}>
-                    {isFriday && <span className={styles['msg-sender']}>Friday</span>}
-                    {isError && <span className={styles['msg-sender']} style={{ color: '#ff4d6a' }}>Error</span>}
+                    {isFriday && (
+                      <>
+                        <span className={styles['msg-sender']}>{b.persona?.name || 'Friday'}</span>
+                        {b.persona && (
+                          <>
+                            <div className={styles['msg-persona-meta']}>
+                              <span>{b.persona.title}</span>
+                              <span className={styles['msg-persona-dot']}>·</span>
+                              <span>
+                                Voice {shortVoiceLabel(b.persona.voice)}
+                                {b.persona.voice ? ` (${b.persona.voice})` : ''}
+                              </span>
+                            </div>
+                            {b.persona.personality ? (
+                              <div className={styles['msg-persona-desc']}>{b.persona.personality}</div>
+                            ) : null}
+                          </>
+                        )}
+                      </>
+                    )}
+                    {isError && (
+                      <>
+                        <span className={styles['msg-sender']} style={{ color: '#ff4d6a' }}>
+                          {b.persona?.name ? `${b.persona.name} (error)` : 'Error'}
+                        </span>
+                        {b.persona ? (
+                          <div className={styles['msg-persona-meta']}>
+                            <span>{b.persona.title}</span>
+                            <span className={styles['msg-persona-dot']}>·</span>
+                            <span>Voice {shortVoiceLabel(b.persona.voice)}</span>
+                          </div>
+                        ) : null}
+                      </>
+                    )}
+                    {isUser && (
+                      <>
+                        <span className={styles['msg-sender']}>{b.persona?.name || 'You'}</span>
+                        {b.persona ? (
+                          <>
+                            <div className={styles['msg-persona-meta']}>
+                              <span>{b.persona.title}</span>
+                              <span className={styles['msg-persona-dot']}>·</span>
+                              <span>{b.persona.voice}</span>
+                            </div>
+                            {b.persona.personality ? (
+                              <div className={styles['msg-persona-desc']}>{b.persona.personality}</div>
+                            ) : null}
+                          </>
+                        ) : null}
+                      </>
+                    )}
                     <div className={styles['msg-bubble']}>{b.text}</div>
                     <span className={styles['msg-time']}>{formatTime(b.ts)}</span>
                   </div>
-                  {b.type === 'user' && (
+                  {isUser && (
                     <div className={styles['msg-avatar-user']}>You</div>
                   )}
                 </div>
@@ -405,6 +769,24 @@ const FridayListenApp: React.FC = () => {
 
           {/* Input area */}
           <div className={styles['chat-input-area']}>
+            {celebrationOffer && (
+              <div className={styles['celebration-bar']} role="region" aria-label="Task complete — optional music">
+                <span className={styles['celebration-bar-text']}>
+                  Task wrapped — optional clip: <strong>{celebrationOffer.song}</strong>. Tap Play after the summary, or Focus for a quick voice recap of the busiest channels.
+                </span>
+                <div className={styles['celebration-bar-actions']}>
+                  <button type="button" className={`${styles['celebration-bar-btn']} ${styles['celebration-bar-btn-play']}`} onClick={onCelebrationPlay}>
+                    Play clip
+                  </button>
+                  <button type="button" className={`${styles['celebration-bar-btn']} ${styles['celebration-bar-btn-focus']}`} onClick={onCelebrationFocus}>
+                    Focus recap
+                  </button>
+                  <button type="button" className={`${styles['celebration-bar-btn']} ${styles['celebration-bar-btn-dismiss']}`} onClick={clearCelebrationOffer}>
+                    Dismiss
+                  </button>
+                </div>
+              </div>
+            )}
             {/* @mention autocomplete */}
             {showMentions && filteredMentions.length > 0 && (
               <div className={styles['mention-popup']}>
@@ -450,8 +832,23 @@ const FridayListenApp: React.FC = () => {
             </div>
           </div>
         </div>
+
+        <IntegrationsRail
+          authHeaders={authHeaders}
+          showToast={showToast}
+          theme={theme}
+          drawerOpen={integrationsDrawerOpen}
+          onDrawerClose={() => setIntegrationsDrawerOpen(false)}
+          isNarrow={isNarrow}
+        />
       </div>
 
+      <PersonaRosterModal
+        open={personaModalOpen}
+        onClose={() => setPersonaModalOpen(false)}
+        theme={theme}
+        onSaved={refreshPersonaOverrides}
+      />
       <ToastContainer />
     </div>
   );

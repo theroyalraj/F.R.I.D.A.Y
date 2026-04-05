@@ -1,4 +1,14 @@
 import React, { createContext, useContext, useState, useCallback, useRef, useEffect } from 'react';
+import {
+  mergePersona,
+  loadPersonaOverrides,
+  inferPersonaKeyFromVoice,
+  USER_BUBBLE_PERSONA,
+  type ChatBubblePersona,
+  type CompanyPersonaKey,
+  type PersonaOverride,
+  type PersonaCatalog,
+} from '../data/companyPersonas';
 
 export type ConnectionStatus = 'offline' | 'listening' | 'processing' | 'speaking';
 
@@ -7,10 +17,11 @@ export interface ChatBubble {
   type: 'user' | 'friday' | 'error' | 'divider';
   text: string;
   ts: number;
+  /** Present for user / friday / error lines — name, designation, voice id, description */
+  persona?: ChatBubblePersona;
 }
 
 export interface VoiceAppContextType {
-  // State
   connectionStatus: ConnectionStatus;
   listenMuted: boolean;
   exchanges: number;
@@ -21,8 +32,11 @@ export interface VoiceAppContextType {
   theme: 'light' | 'dark';
   bubbles: ChatBubble[];
   toasts: Array<{ id: string; message: string; type: 'info' | 'error' | 'success' }>;
+  activePersonaKey: CompanyPersonaKey | 'custom';
+  personaOverrides: Record<string, PersonaOverride>;
+  /** Merged roster from GET /settings/personas (Postgres + defaults); null = use bundled COMPANY_PERSONAS only. */
+  personaCatalog: PersonaCatalog | null;
 
-  // Actions
   setConnectionStatus: (status: ConnectionStatus) => void;
   setListenMuted: (muted: boolean) => void;
   setExchanges: (count: number) => void;
@@ -32,12 +46,14 @@ export interface VoiceAppContextType {
   setEdgeVoices: (voices: Array<{ voice: string; label: string }>) => void;
   setCurrentVoice: (voice: string) => void;
   setTheme: (theme: 'light' | 'dark') => void;
+  setActivePersonaKey: (key: CompanyPersonaKey | 'custom') => void;
+  setPersonaCatalog: (c: PersonaCatalog | null) => void;
+  refreshPersonaOverrides: () => void;
+  getReplyPersona: () => ChatBubblePersona;
   addBubble: (bubble: Omit<ChatBubble, 'id'>) => void;
   clearBubbles: () => void;
   showToast: (message: string, type?: 'info' | 'error' | 'success') => void;
   dismissToast: (id: string) => void;
-
-  // Utility
   postEvent: (type: string, text?: string) => void;
 }
 
@@ -50,10 +66,19 @@ export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [uptime, setUptime] = useState(0);
   const [lastHeardText, setLastHeardText] = useState('');
   const [edgeVoices, setEdgeVoices] = useState<Array<{ voice: string; label: string }>>([]);
-  const [currentVoice, setCurrentVoice] = useState('en-US-EmmaMultilingualNeural');
+  const [currentVoice, setCurrentVoice] = useState('en-US-AvaMultilingualNeural');
+  const [activePersonaKey, setActivePersonaKey] = useState<CompanyPersonaKey | 'custom'>('jarvis');
+  const [personaOverrides, setPersonaOverrides] = useState<Record<string, PersonaOverride>>(() =>
+    typeof window !== 'undefined' ? loadPersonaOverrides() : {},
+  );
+  const [personaCatalog, setPersonaCatalog] = useState<PersonaCatalog | null>(null);
+  const personaCatalogRef = useRef<PersonaCatalog | null>(null);
+  useEffect(() => {
+    personaCatalogRef.current = personaCatalog;
+  }, [personaCatalog]);
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     if (typeof window !== 'undefined') {
-      return localStorage.getItem('friday.theme') as 'light' | 'dark' | null ?? 'dark';
+      return (localStorage.getItem('friday.theme') as 'light' | 'dark' | null) ?? 'dark';
     }
     return 'dark';
   });
@@ -65,27 +90,34 @@ export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const MAX_BUBBLES = 80;
   const DEDUPE_WINDOW_MS = 8000;
 
-  // Persist theme to localStorage
   useEffect(() => {
     localStorage.setItem('friday.theme', theme);
   }, [theme]);
 
+  const refreshPersonaOverrides = useCallback(() => {
+    setPersonaOverrides(loadPersonaOverrides());
+  }, []);
+
+  const getReplyPersona = useCallback(
+    () => mergePersona(activePersonaKey, personaOverrides, currentVoice, personaCatalog),
+    [activePersonaKey, personaOverrides, currentVoice, personaCatalog],
+  );
+
   const incrementExchanges = useCallback(() => {
-    setExchanges(e => e + 1);
+    setExchanges((e) => e + 1);
   }, []);
 
   const addBubble = useCallback((bubble: Omit<ChatBubble, 'id'>) => {
     const id = `bubble-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     const key = `${bubble.type}:${bubble.text}`;
 
-    // Deduplication
     const lastSeen = dedupeSeen.current.get(key);
     if (lastSeen && Date.now() - lastSeen < DEDUPE_WINDOW_MS) {
       return;
     }
     dedupeSeen.current.set(key, Date.now());
 
-    setBubbles(prev => {
+    setBubbles((prev) => {
       const updated = [...prev, { ...bubble, id }];
       if (updated.length > MAX_BUBBLES) {
         return updated.slice(updated.length - MAX_BUBBLES);
@@ -102,62 +134,73 @@ export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setBubbles([]);
   }, []);
 
-  const showToast = useCallback((message: string, type: 'info' | 'error' | 'success' = 'info') => {
-    const id = `toast-${toastIdRef.current++}`;
-    setToasts(prev => [...prev, { id, message, type }]);
-
-    // Auto-dismiss after 2.8s
-    setTimeout(() => {
-      dismissToast(id);
-    }, 2800);
-  }, []);
-
   const dismissToast = useCallback((id: string) => {
-    setToasts(prev => prev.filter(t => t.id !== id));
+    setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
-  const postEvent = useCallback((type: string, text = '') => {
-    switch (type) {
-      case 'daemon_start':
-      case 'server_start':
-        setConnectionStatus('listening');
-        addBubble({ type: 'divider', text: 'FRIDAY ONLINE', ts: Date.now() });
-        break;
-      case 'daemon_disconnect':
-        setConnectionStatus('offline');
-        break;
-      case 'listening':
-      case 'daemon_reconnect':
-        setConnectionStatus('listening');
-        setLastHeardText('');
-        break;
-      case 'heard':
-        setConnectionStatus('processing');
-        setLastHeardText(text);
-        addBubble({ type: 'user', text, ts: Date.now() });
-        break;
-      case 'thinking':
-      case 'speak':
-        setConnectionStatus('speaking');
-        break;
-      case 'reply':
-        setConnectionStatus('listening');
-        addBubble({ type: 'friday', text, ts: Date.now() });
-        break;
-      case 'error':
-        addBubble({ type: 'error', text, ts: Date.now() });
-        break;
-      case 'voice_changed':
-        // Extract voice from text like "voice: en-US-..."
-        const voiceMatch = text.match(/voice[:\s]+(\S+)/i);
-        if (voiceMatch) {
-          setCurrentVoice(voiceMatch[1]);
-        }
-        break;
-      default:
-        break;
-    }
-  }, [addBubble]);
+  const showToast = useCallback(
+    (message: string, type: 'info' | 'error' | 'success' = 'info') => {
+      const id = `toast-${toastIdRef.current++}`;
+      setToasts((prev) => [...prev, { id, message, type }]);
+      setTimeout(() => dismissToast(id), 2800);
+    },
+    [dismissToast],
+  );
+
+  const postEvent = useCallback(
+    (type: string, text = '') => {
+      switch (type) {
+        case 'daemon_start':
+        case 'server_start':
+          setConnectionStatus('listening');
+          addBubble({ type: 'divider', text: 'FRIDAY ONLINE', ts: Date.now() });
+          break;
+        case 'daemon_disconnect':
+          setConnectionStatus('offline');
+          break;
+        case 'listening':
+        case 'daemon_reconnect':
+          setConnectionStatus('listening');
+          setLastHeardText('');
+          break;
+        case 'heard':
+          setConnectionStatus('processing');
+          setLastHeardText(text);
+          addBubble({ type: 'user', text, ts: Date.now(), persona: USER_BUBBLE_PERSONA });
+          break;
+        case 'thinking':
+        case 'speak':
+          setConnectionStatus('speaking');
+          break;
+        case 'reply':
+          setConnectionStatus('listening');
+          addBubble({
+            type: 'friday',
+            text,
+            ts: Date.now(),
+            persona: mergePersona(activePersonaKey, personaOverrides, currentVoice, personaCatalogRef.current),
+          });
+          break;
+        case 'error':
+          addBubble({
+            type: 'error',
+            text,
+            ts: Date.now(),
+            persona: mergePersona(activePersonaKey, personaOverrides, currentVoice, personaCatalogRef.current),
+          });
+          break;
+        case 'voice_changed':
+          if (text.trim()) {
+            setCurrentVoice(text.trim());
+            setActivePersonaKey(inferPersonaKeyFromVoice(text.trim(), personaCatalogRef.current));
+          }
+          break;
+        default:
+          break;
+      }
+    },
+    [addBubble, activePersonaKey, personaOverrides, currentVoice],
+  );
 
   const value: VoiceAppContextType = {
     connectionStatus,
@@ -170,6 +213,9 @@ export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     theme,
     bubbles,
     toasts,
+    activePersonaKey,
+    personaOverrides,
+    personaCatalog,
 
     setConnectionStatus,
     setListenMuted,
@@ -180,6 +226,10 @@ export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setEdgeVoices,
     setCurrentVoice,
     setTheme,
+    setActivePersonaKey,
+    setPersonaCatalog,
+    refreshPersonaOverrides,
+    getReplyPersona,
     addBubble,
     clearBubbles,
     showToast,

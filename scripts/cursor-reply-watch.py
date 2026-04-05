@@ -22,7 +22,8 @@ Thinking capture from JSONL defaults ON with narration (live agent thinking TTS 
 Set FRIDAY_CURSOR_SPEAK_THINKING_WITH_NARRATION=false to disable watcher thinking only.
 
 Optional:
-  FRIDAY_CURSOR_REPLY_VOICE — Edge voice id for main transcript TTS (see pick-session-voice --cursor-reply)
+  FRIDAY_CURSOR_REPLY_VOICE / FRIDAY_CURSOR_REPLY_RATE — override main Composer transcript TTS; else
+  .session-voice.json cursor_reply_voice; else Sentinel persona (OPENCLAW_SENTINEL_*).
   CURSOR_TRANSCRIPTS_DIR — override path to agent-transcripts
 
 Thinking TTS pacing (batched sentences + sized chunks; avoids a firehose of tiny clips):
@@ -48,6 +49,12 @@ Run:  python scripts/cursor-reply-watch.py
 Thinking smoke tests — python scripts/cursor-watcher-smoke-thinking.py
   Default: same TTS pipeline as cursor-thinking-ocr.py (strip_to_prose + scrub + _speak_thinking_paced).
   --jsonl: append synthetic type=thinking for this watcher; needs watcher running and chat_id in .session-voice.json.
+
+Voice-agent chat vs thinking (this script only):
+  Short user-facing chunks that Cursor sometimes emits inside JSONL *thinking* blocks — OpenClaw / Open Claw,
+  Done-dot completion lines, summary headers, “started working” — are spoken via the same async path as
+  normal assistant *chat* (Sentinel cursor-reply voice on main Composer, subagent voice on Task transcripts),
+  not the thinking pacing voice. Long reasoning stays on thinking TTS.
 """
 
 from __future__ import annotations
@@ -121,6 +128,21 @@ def _load_sentinel_persona() -> None:
 
 
 _load_sentinel_persona()
+
+
+def _resolve_cursor_reply_voice() -> tuple[str | None, str | None]:
+    """Env FRIDAY_CURSOR_REPLY_VOICE → session cursor_reply_voice → Sentinel persona (company registry)."""
+    ev = os.environ.get("FRIDAY_CURSOR_REPLY_VOICE", "").strip()
+    if ev:
+        rr = os.environ.get("FRIDAY_CURSOR_REPLY_RATE", "").strip() or None
+        return ev, rr
+    try:
+        cv = (_load_session().get("cursor_reply_voice") or "").strip()
+        if cv:
+            return cv, None
+    except Exception:
+        pass
+    return _SENTINEL_VOICE, _SENTINEL_RATE
 
 
 def _env_bool(key: str, default: bool = True) -> bool:
@@ -283,6 +305,13 @@ _RE_REDACTED = re.compile(
     r"<\s*redacted[^>]*>|\[\s*redacted\s*\]|\{\s*redacted\s*\}|\(\s*redacted\s*\)|"
     r"\bredacted\s*[:;.,!?…]+|\bredacted\b",
     re.IGNORECASE,
+)
+# Thinking blocks that are really user-facing “chat” → use reply TTS (Sentinel / subagent), not thinking pacing.
+_RE_VOICE_AGENT_CHAT = re.compile(
+    r"(?is)"
+    r"\bopenclaw\b|\bopen\s+claw(?:\s+labs)?\b|"
+    r"\bstarted\s+working\b|\bit(?:'s| is)\s+working\b|\bnow\s+working\b|"
+    r"(?:^|[\n\r])\s*summary\s*[:\.]|\bto\s+summarize\b"
 )
 # Inline env-var tokens (UPPER_SNAKE env vars, camelCase/snake_case identifiers adjacent to = or () )
 _RE_ENV_VAR_TOKEN = re.compile(r"\b[A-Z][A-Z0-9_]{3,}\b")
@@ -448,16 +477,17 @@ def strip_to_prose(raw: str) -> str:
 def _speak_main(text: str) -> None:
     from friday_speaker import speaker
 
+    v, r = _resolve_cursor_reply_voice()
     kw: dict = {
         "session": "cursor-reply",
         "priority": True,
         "bypass_cursor_defer": True,
     }
-    if _SENTINEL_VOICE:
-        kw["voice"] = _SENTINEL_VOICE
+    if v:
+        kw["voice"] = v
         kw["use_session_sticky"] = False
-    if _SENTINEL_RATE:
-        kw["rate"] = _SENTINEL_RATE
+    if r:
+        kw["rate"] = r
     speaker.speak(text, **kw)
 
 
@@ -607,17 +637,24 @@ def _speak_thinking_paced(
             pass
     _thinking_voice: str | None = _thinking_voice_raw if _thinking_voice_raw else None
 
-    # Per-block voice pool — voice changes between spans (different thread/call), not mid-block.
-    # All sentences within ONE call to this function share the same block voice.
+    # Per-block voice pool — merge dedicated thinking voice with FRIDAY_CURSOR_THINKING_VOICE_POOL
+    # so SAGE / FRIDAY_TTS_THINKING_VOICE participates in rotation, not replaced by pool-only ids.
     global _thinking_pool_idx
     _watcher_blocked = {v.strip() for v in os.environ.get("FRIDAY_TTS_VOICE_BLOCK", "").split(",") if v.strip()}
     _watcher_blocked |= {"en-AU-WilliamNeural", "en-AU-WilliamMultilingualNeural", "en-GB-RyanNeural", "en-GB-ThomasNeural"}
     _tv_pool_raw = os.environ.get("FRIDAY_CURSOR_THINKING_VOICE_POOL", "").strip()
-    _thinking_pool: list[str] = []
-    if _tv_pool_raw:
-        _thinking_pool = [v.strip() for v in _tv_pool_raw.split(",") if v.strip() and v.strip() not in _watcher_blocked]
-    if len(_thinking_pool) <= 1:
-        _thinking_pool = []  # need at least 2 voices to rotate; otherwise fall back to single voice
+    _pool_extra = (
+        [v.strip() for v in _tv_pool_raw.split(",") if v.strip() and v.strip() not in _watcher_blocked]
+        if _tv_pool_raw
+        else []
+    )
+    _merged_pool: list[str] = []
+    if _thinking_voice and _thinking_voice not in _watcher_blocked:
+        _merged_pool.append(_thinking_voice)
+    for _pv in _pool_extra:
+        if _pv not in _merged_pool:
+            _merged_pool.append(_pv)
+    _thinking_pool = _merged_pool if len(_merged_pool) > 1 else []
 
     # Pick ONE voice for this entire block, advance counter for the next block/span.
     if _thinking_pool:
@@ -730,6 +767,19 @@ def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
+def _is_voice_agent_chat_prose(s: str) -> bool:
+    """True if this thinking-derived prose should use chat/reply TTS, not thinking pacing."""
+    t = s.strip()
+    if len(t) < 8:
+        return False
+    tl = t.lower()
+    if tl.startswith("done."):
+        return len(t) <= 3500
+    if len(t) > 650:
+        return False
+    return bool(_RE_VOICE_AGENT_CHAT.search(t))
+
+
 def _thinking_debounce_sec() -> float:
     v = _env_float("FRIDAY_CURSOR_THINKING_DEBOUNCE_SEC", 0.65)
     return max(0.15, min(v, 30.0))
@@ -747,9 +797,32 @@ def _thinking_speak_once(
     *,
     incremental: bool = False,
     rate_basis_len: int | None = None,
+    is_main: bool = True,
+    speak_main: bool = True,
+    speak_sub: bool = True,
 ) -> None:
     h = _content_hash(thinking_prose)
     if h in spoken_hashes:
+        return
+    if _is_voice_agent_chat_prose(thinking_prose):
+        spoken_hashes.add(h)
+        whom = "main" if is_main else "subagent"
+        print(
+            f"cursor-reply-watch: [thinking→chat] {len(thinking_prose)} chars via {whom} reply voice "
+            f"(incremental={incremental})",
+            flush=True,
+        )
+        if is_main and speak_main:
+            _speak_main(thinking_prose)
+        elif (not is_main) and speak_sub:
+            _speak_subagent(thinking_prose)
+        else:
+            # Reply channel off under narration — fall back to thinking voice so it is still heard.
+            _speak_thinking_paced(
+                thinking_prose,
+                incremental=incremental,
+                rate_basis_len=rate_basis_len,
+            )
         return
     spoken_hashes.add(h)
     print(
@@ -770,6 +843,9 @@ def _thinking_buffer_update(
     *,
     now: float,
     spoken_hashes: set,
+    is_main: bool,
+    speak_main: bool,
+    speak_sub: bool,
 ) -> None:
     """Incremental streaming: speak NEW sentences as they arrive, not all at once.
 
@@ -791,6 +867,9 @@ def _thinking_buffer_update(
                 spoken_hashes,
                 incremental=True,
                 rate_basis_len=len(prev),
+                is_main=is_main,
+                speak_main=speak_main,
+                speak_sub=speak_sub,
             )
         st["thinking_spoken_len"] = 0
         spoken_len = 0
@@ -821,6 +900,9 @@ def _thinking_buffer_update(
                 spoken_hashes,
                 incremental=True,
                 rate_basis_len=len(thinking_prose),
+                is_main=is_main,
+                speak_main=speak_main,
+                speak_sub=speak_sub,
             )
             st["thinking_batch_buf"] = ""
         else:
@@ -836,13 +918,27 @@ def _thinking_clear_pending(st: dict) -> None:
     st.pop("thinking_batch_buf", None)
 
 
-def _flush_thinking_debounce(st: dict, now: float) -> None:
+def _flush_thinking_debounce(
+    st: dict,
+    now: float,
+    *,
+    speak_main: bool,
+    speak_sub: bool,
+) -> None:
     """If pending thinking has been idle long enough, speak remaining tail."""
+    is_main = bool(st.get("is_main", True))
     pend = (st.get("thinking_pending") or "").strip()
     if not pend:
         batch = (st.pop("thinking_batch_buf", None) or "").strip()
         if batch:
-            _thinking_speak_once(batch, st["spoken_hashes"], rate_basis_len=len(batch))
+            _thinking_speak_once(
+                batch,
+                st["spoken_hashes"],
+                rate_basis_len=len(batch),
+                is_main=is_main,
+                speak_main=speak_main,
+                speak_sub=speak_sub,
+            )
         _thinking_clear_pending(st)
         return
     dead = st.get("thinking_debounce_at")
@@ -854,7 +950,14 @@ def _flush_thinking_debounce(st: dict, now: float) -> None:
     tail = pend[spoken_len:].strip()
     merged = " ".join(x for x in (batch, tail) if x).strip()
     if merged:
-        _thinking_speak_once(merged, spoken_hashes, rate_basis_len=len(pend))
+        _thinking_speak_once(
+            merged,
+            spoken_hashes,
+            rate_basis_len=len(pend),
+            is_main=is_main,
+            speak_main=speak_main,
+            speak_sub=speak_sub,
+        )
     _thinking_clear_pending(st)
 
 
@@ -993,6 +1096,7 @@ def main() -> None:
 
                     is_main = bool(folder_uuid == main_uuid)
                     is_sub = not is_main
+                    st["is_main"] = is_main
 
                     # --- thinking capture (runs even when reply TTS is off) ---
                     if speak_thinking:
@@ -1011,6 +1115,9 @@ def main() -> None:
                                             merged,
                                             spoken_hashes,
                                             rate_basis_len=len(thinking_prose),
+                                            is_main=is_main,
+                                            speak_main=speak_main,
+                                            speak_sub=speak_sub,
                                         )
                                 else:
                                     _thinking_buffer_update(
@@ -1018,6 +1125,9 @@ def main() -> None:
                                         thinking_prose,
                                         now=now,
                                         spoken_hashes=spoken_hashes,
+                                        is_main=is_main,
+                                        speak_main=speak_main,
+                                        speak_sub=speak_sub,
                                     )
 
                     # --- regular reply TTS ---
@@ -1046,7 +1156,12 @@ def main() -> None:
         if speak_thinking:
             now_flush = time.monotonic()
             for st in state_map.values():
-                _flush_thinking_debounce(st, now_flush)
+                _flush_thinking_debounce(
+                    st,
+                    now_flush,
+                    speak_main=speak_main,
+                    speak_sub=speak_sub,
+                )
 
         # Adaptive polling: faster when transcripts are actively being written
         if any_recently_active or any(

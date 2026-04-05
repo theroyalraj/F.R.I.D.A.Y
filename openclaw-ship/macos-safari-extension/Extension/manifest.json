@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "OpenClaw Ship",
+  "version": "0.1.0",
+  "description": "Skeleton Safari Web Extension — wrap in Xcode Safari Extension App to build .appex",
+  "action": {
+    "default_title": "OpenClaw",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": ["storage"],
+  "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"]
+}

@@ -63,3 +63,27 @@ export async function getMembership(userId) {
 
 /** @deprecated Use getMembership */
 export const getMembershipForUser = getMembership;
+
+/**
+ * First org member for dev auto-login (admin preferred). Used when PC_AGENT_LISTEN_AUTO_LOGIN is on.
+ * @returns {Promise<{ id: string, email: string, name: string, orgId: string, role: 'admin'|'member' }|null>}
+ */
+export async function findFirstUserWithMembershipForAutoLogin() {
+  const pool = requirePg();
+  const r = await pool.query(
+    `SELECT u.id, u.email, u.name, m.org_id AS "orgId", m.role
+     FROM openclaw_org_members m
+     JOIN openclaw_users u ON u.id = m.user_id
+     ORDER BY CASE WHEN m.role = 'admin' THEN 0 ELSE 1 END, u.created_at ASC NULLS LAST
+     LIMIT 1`,
+  );
+  const row = r.rows[0];
+  if (!row) return null;
+  return {
+    id: row.id,
+    email: row.email,
+    name: row.name,
+    orgId: row.orgId,
+    role: row.role === 'admin' ? 'admin' : 'member',
+  };
+}

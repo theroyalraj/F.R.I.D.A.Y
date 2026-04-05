@@ -32,6 +32,22 @@ export default defineConfig({
         target: 'http://127.0.0.1:3847',
         changeOrigin: true,
       },
+      '/integrations': {
+        target: 'http://127.0.0.1:3847',
+        changeOrigin: true,
+      },
+      '/settings': {
+        target: 'http://127.0.0.1:3847',
+        changeOrigin: true,
+      },
+      '/openclaw': {
+        target: 'http://127.0.0.1:3847',
+        changeOrigin: true,
+      },
+      '/todos': {
+        target: 'http://127.0.0.1:3847',
+        changeOrigin: true,
+      },
     },
   },
   build: {
