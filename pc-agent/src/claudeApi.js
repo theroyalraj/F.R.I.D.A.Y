@@ -45,6 +45,19 @@ const VOICE_SYSTEM_BASE = [
   `• Sound like the smartest person in the room who also happens to be a good friend — not a chatbot, not a manual.`,
 ].join('\n');
 
+/** FRIDAY_CHAT_BILINGUAL_JA_EN=1|true|yes|on — Japanese and or English; relaxes the English-only one-liner default. */
+function isChatBilingualJaEn() {
+  const v = String(process.env.FRIDAY_CHAT_BILINGUAL_JA_EN || '').trim().toLowerCase();
+  return v === '1' || v === 'true' || v === 'yes' || v === 'on';
+}
+
+const VOICE_SYSTEM_BILINGUAL_JA_EN = [
+  `Bilingual mode (Japanese and English): Raj may use Japanese, English, or a mix. Match the dominant language of the last user message.`,
+  `If they wrote mainly Japanese, reply in natural Japanese. If mainly English, reply in natural English.`,
+  `You may add one short gloss in the other language only when it clearly helps — still no markdown or symbols that break TTS.`,
+  `Length: for brief English-only turns keep one to three sentences. For Japanese or mixed turns you may use up to four short sentences so the reply does not feel clipped.`,
+].join('\n');
+
 /**
  * @param {{ speakStyleExtra?: string, companyContext?: string, personaInstruction?: string }} opts
  */
@@ -57,6 +70,9 @@ export function buildVoiceSystem(opts = {}) {
     parts.push(String(opts.personaInstruction).trim());
   }
   parts.push(VOICE_SYSTEM_BASE);
+  if (isChatBilingualJaEn()) {
+    parts.push(VOICE_SYSTEM_BILINGUAL_JA_EN);
+  }
   if (opts.speakStyleExtra && String(opts.speakStyleExtra).trim()) {
     parts.push(String(opts.speakStyleExtra).trim());
   }
@@ -103,6 +119,9 @@ function buildAnthropicSystemPayload(opts) {
       cache_control: { type: 'ephemeral' },
     },
   ];
+  if (isChatBilingualJaEn()) {
+    blocks.push({ type: 'text', text: VOICE_SYSTEM_BILINGUAL_JA_EN });
+  }
   if (company) blocks.push({ type: 'text', text: company });
   if (persona) blocks.push({ type: 'text', text: persona });
   if (style) blocks.push({ type: 'text', text: style });

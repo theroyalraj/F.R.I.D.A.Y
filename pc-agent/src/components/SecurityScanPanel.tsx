@@ -19,6 +19,19 @@ type StatusPayload = {
   cacheSaysRunDue?: boolean;
 };
 
+type CodeSummary = { high?: number; medium?: number; low?: number };
+
+type CodeFinding = { file: string; line: number; ruleId: string; severity: string; note: string };
+
+type CodeLastRun = {
+  ranAt?: string;
+  fileCount?: number;
+  findings?: CodeFinding[];
+  summary?: CodeSummary;
+};
+
+type CodeStatusPayload = { ok?: boolean; lastRun?: CodeLastRun | null };
+
 interface Props {
   authHeaders: () => HeadersInit;
   theme: 'light' | 'dark';
@@ -30,6 +43,11 @@ interface Props {
 function sumHighCrit(s?: Summary) {
   if (!s) return 0;
   return (s.high || 0) + (s.critical || 0);
+}
+
+function sumCodeHighMed(s?: CodeSummary) {
+  if (!s) return 0;
+  return (s.high || 0) + (s.medium || 0);
 }
 
 function formatEta(ms: number) {
@@ -45,29 +63,45 @@ const SecurityScanPanel: React.FC<Props> = ({ authHeaders, theme, showToast, var
   const [loading, setLoading] = useState(false);
   const [running, setRunning] = useState(false);
   const [status, setStatus] = useState<StatusPayload | null>(null);
+  const [codeStatus, setCodeStatus] = useState<CodeStatusPayload | null>(null);
+  const [runningCode, setRunningCode] = useState(false);
   const avatarWrapRef = useRef<HTMLDivElement>(null);
 
   const load = useCallback(async () => {
     try {
       setLoading(true);
-      const r = await fetch('/security/scan/status', { headers: authHeaders() });
-      if (!r.ok) {
-        setStatus(null);
-        return;
-      }
-      const text = await r.text();
-      if (!text) {
-        setStatus(null);
-        return;
-      }
-      try {
-        const j = JSON.parse(text) as StatusPayload;
-        if (j.ok !== false) setStatus(j);
-      } catch {
-        setStatus(null);
-      }
+      const [rNpm, rCode] = await Promise.all([
+        fetch('/security/scan/status', { headers: authHeaders() }),
+        fetch('/security/code-scan/status', { headers: authHeaders() }),
+      ]);
+      if (rNpm.ok) {
+        const text = await rNpm.text();
+        if (text) {
+          try {
+            const j = JSON.parse(text) as StatusPayload;
+            if (j.ok !== false) setStatus(j);
+            else setStatus(null);
+          } catch {
+            setStatus(null);
+          }
+        } else setStatus(null);
+      } else setStatus(null);
+
+      if (rCode.ok) {
+        const text = await rCode.text();
+        if (text) {
+          try {
+            const j = JSON.parse(text) as CodeStatusPayload;
+            if (j.ok !== false) setCodeStatus(j);
+            else setCodeStatus(null);
+          } catch {
+            setCodeStatus(null);
+          }
+        } else setCodeStatus(null);
+      } else setCodeStatus(null);
     } catch {
       setStatus(null);
+      setCodeStatus(null);
     } finally {
       setLoading(false);
     }
@@ -82,11 +116,13 @@ const SecurityScanPanel: React.FC<Props> = ({ authHeaders, theme, showToast, var
       void load();
     };
     window.addEventListener('openclaw:security-scan-complete', onRefresh);
+    window.addEventListener('openclaw:code-security-scan-complete', onRefresh);
     const id = window.setInterval(() => {
       if (document.visibilityState === 'visible') void load();
     }, 45_000);
     return () => {
       window.removeEventListener('openclaw:security-scan-complete', onRefresh);
+      window.removeEventListener('openclaw:code-security-scan-complete', onRefresh);
       window.clearInterval(id);
     };
   }, [load]);
@@ -150,14 +186,50 @@ const SecurityScanPanel: React.FC<Props> = ({ authHeaders, theme, showToast, var
     }
   };
 
+  const runCodeScan = async () => {
+    try {
+      setRunningCode(true);
+      const r = await fetch('/security/code-scan/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({}),
+      });
+      if (!r.ok) {
+        showToast('Code pattern scan request failed', 'error');
+        return;
+      }
+      const j = await r.json().catch(() => ({}));
+      const res = j.result as CodeLastRun | undefined;
+      const s = res?.summary;
+      const hm = sumCodeHighMed(s);
+      showToast(
+        hm > 0
+          ? `Code scan: ${s?.high || 0} high, ${s?.medium || 0} medium pattern hits`
+          : 'Code pattern scan complete — no high or medium hits',
+        hm > 0 ? 'error' : 'success',
+      );
+      await load();
+    } catch {
+      showToast('Code pattern scan failed', 'error');
+    } finally {
+      setRunningCode(false);
+    }
+  };
+
   const displaySummary = status?.lastResult?.summary;
   const hi = sumHighCrit(displaySummary);
+  const codeRun = codeStatus?.lastRun;
+  const codeHi = codeRun?.summary?.high ?? 0;
+  const codeMed = codeRun?.summary?.medium ?? 0;
+  const badgeCount = Math.max(hi, codeHi);
   const badgeClass =
-    hi > 0 ? styles['sec-scan-badge-bad'] : displaySummary ? styles['sec-scan-badge-ok'] : styles['sec-scan-badge-muted'];
+    badgeCount > 0 ? styles['sec-scan-badge-bad'] : displaySummary || codeRun ? styles['sec-scan-badge-ok'] : styles['sec-scan-badge-muted'];
+
+  const topFindings = (codeRun?.findings || []).slice(0, 10);
 
   const body = open ? (
     <div className={variant === 'avatar' ? styles['sec-scan-avatar-body'] : styles['sec-scan-body']}>
-      <div className={styles['sec-scan-popover-title']}>Security · npm audit</div>
+      <div className={styles['sec-scan-popover-title']}>Dependencies · npm audit</div>
       <div className={styles['sec-scan-row']}>
         <span>Last full scan</span>
         <span className={styles['sec-scan-mono']}>
@@ -198,6 +270,44 @@ const SecurityScanPanel: React.FC<Props> = ({ authHeaders, theme, showToast, var
           Force full scan
         </button>
       </div>
+
+      <div className={styles['sec-scan-popover-title']}>Source · pattern scan</div>
+      <div className={styles['sec-scan-row']}>
+        <span>Last code scan</span>
+        <span className={styles['sec-scan-mono']}>
+          {codeRun?.ranAt ? new Date(codeRun.ranAt).toLocaleString() : 'never'}
+        </span>
+      </div>
+      {codeRun?.summary && (
+        <div className={styles['sec-scan-counts']}>
+          <span>H {codeHi}</span>
+          <span>M {codeMed}</span>
+          <span>L {codeRun.summary.low ?? 0}</span>
+          <span>files {codeRun.fileCount ?? '—'}</span>
+        </div>
+      )}
+      <div className={styles['sec-scan-actions']}>
+        <button
+          type="button"
+          className={`${styles['sec-scan-btn']} ${styles['sec-scan-btn-primary']}`}
+          disabled={runningCode}
+          onClick={() => void runCodeScan()}
+        >
+          {runningCode ? 'Scanning…' : 'Run code scan'}
+        </button>
+      </div>
+      {topFindings.length > 0 && (
+        <ul className={styles['sec-scan-findings']}>
+          {topFindings.map((f, i) => (
+            <li key={`${f.file}:${f.line}:${f.ruleId}:${i}`} className={styles['sec-scan-finding']}>
+              <span className={styles['sec-scan-mono']}>
+                {f.severity} · {f.file}:{f.line}
+              </span>
+              <span className={styles['sec-scan-finding-note']}>{f.ruleId}</span>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   ) : null;
 
@@ -210,15 +320,15 @@ const SecurityScanPanel: React.FC<Props> = ({ authHeaders, theme, showToast, var
           onClick={() => setOpen((v) => !v)}
           aria-expanded={open}
           aria-haspopup="dialog"
-          title="Argus — security scan (npm audit)"
+          title="Argus — npm audit and code pattern scan"
         >
           <span className={styles['sec-scan-avatar-emoji']} aria-hidden>
             {'\uD83D\uDC6E'}
           </span>
           <span className={styles['sec-scan-sr-only']}>Open security scan panel</span>
-          {!loading && hi > 0 ? (
+          {!loading && badgeCount > 0 ? (
             <span className={styles['sec-scan-avatar-alert']} aria-hidden>
-              {hi > 9 ? '9+' : hi}
+              {badgeCount > 9 ? '9+' : badgeCount}
             </span>
           ) : null}
           {loading ? <span className={styles['sec-scan-avatar-loading']} aria-hidden /> : null}
@@ -248,7 +358,7 @@ const SecurityScanPanel: React.FC<Props> = ({ authHeaders, theme, showToast, var
       >
         <span className={styles['sec-scan-toggle-label']}>Security scan</span>
         <span className={badgeClass} aria-hidden>
-          {loading ? '…' : hi > 0 ? `${hi} hi` : displaySummary ? 'ok' : '—'}
+          {loading ? '…' : badgeCount > 0 ? `${badgeCount} hi` : displaySummary || codeRun ? 'ok' : '—'}
         </span>
         <span className={styles['sec-scan-chevron']}>{open ? '▾' : '▸'}</span>
       </button>

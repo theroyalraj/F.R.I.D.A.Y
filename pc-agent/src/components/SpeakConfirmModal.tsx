@@ -15,6 +15,8 @@ type Props = {
   voiceIcon: string;
   voiceName: string;
   speakStyle: SpeakStyle;
+  /** From GET /voice/speak-style listenUi.speakConfirmIntro — preferred over client heuristics */
+  introMessage?: string;
   onConfirm: () => void;
   onCancel: () => void;
   isOpen: boolean;
@@ -25,6 +27,7 @@ const SpeakConfirmModal: React.FC<Props> = ({
   voiceIcon,
   voiceName,
   speakStyle,
+  introMessage,
   onConfirm,
   onCancel,
   isOpen,
@@ -32,8 +35,12 @@ const SpeakConfirmModal: React.FC<Props> = ({
   const [funnyMessage, setFunnyMessage] = useState('');
 
   useEffect(() => {
-    // Generate style-aware funny message
-    let msg = "About to make some noise... ";
+    const trimmed = (introMessage || '').trim();
+    if (trimmed) {
+      setFunnyMessage(trimmed);
+      return;
+    }
+    let msg = 'About to make some noise... ';
     if (speakStyle.bored) {
       msg = "Ugh, fine, I guess I'll speak... You sure about this? ";
     } else if (speakStyle.snarky) {
@@ -43,10 +50,10 @@ const SpeakConfirmModal: React.FC<Props> = ({
     } else if (speakStyle.funny) {
       msg = "Comedy hour incoming. You ready to hear this masterpiece? ";
     } else if (speakStyle.warm) {
-      msg = "Let me share this with you. Sound good? ";
+      msg = 'Let me share this with you. Sound good? ';
     }
     setFunnyMessage(msg);
-  }, [speakStyle]);
+  }, [speakStyle, introMessage]);
 
   if (!isOpen) return null;
 

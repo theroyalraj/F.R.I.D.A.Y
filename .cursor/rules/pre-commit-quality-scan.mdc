@@ -17,7 +17,7 @@ Before **any** `git commit` (including safety checkpoints on a **new** `wip/chec
 2. Prefer **`subagent_type: generalPurpose`** (or **`explore`** for broad codebase search) with **`readonly: true`** so the scan cannot mutate files; the **parent** applies fixes after review.
 3. **Prompt the subagent** to report back in structured prose (not code dumps):  
    - **Security**: secrets in repo, unsafe defaults, auth bypass, injection (SQL, shell, template), SSRF, path traversal, insecure deserialization, weak crypto, exposed internal URLs, logging of sensitive data.  
-   - **Dependencies**: surface obvious risk areas (e.g. suggest `npm audit` / `pip audit` findings as *recommendations* for the parent to run if needed).  
+   - **Dependencies**: treat `npm audit` / `pip audit` as *supplementary* signals only; prioritize **source-level** vulnerabilities (injection, auth bypass, unsafe deserialization, secrets) in application code over dependency metadata alone.  
    - **Practices**: error handling, resource cleanup, race conditions, env handling, consistent patterns with surrounding code.  
    - **Standards**: alignment with common industry baselines for the stack (Node, Python, Docker, etc.) and this repo’s existing conventions.
 

@@ -3,13 +3,15 @@ import styles from '../styles/listen.module.css';
 
 interface LaunchOverlayProps {
   onFadeComplete?: () => void;
+  /** From GET /voice/speak-style listenUi.launchLine — server-owned copy per speak style */
+  launchLine?: string;
 }
 
 /**
  * LaunchOverlay: Full-screen gradient overlay with animated launch text.
  * Fades out after 2.5 seconds using anime.js.
  */
-const LaunchOverlay: React.FC<LaunchOverlayProps> = ({ onFadeComplete }) => {
+const LaunchOverlay: React.FC<LaunchOverlayProps> = ({ onFadeComplete, launchLine }) => {
   const overlayRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -63,7 +65,7 @@ const LaunchOverlay: React.FC<LaunchOverlayProps> = ({ onFadeComplete }) => {
       <div className={styles['launch-gradient']} />
       <div className={styles['launch-content']}>
         <div className={styles['launch-text']}>
-          ⚡ FRIDAY AWAKENING...
+          {launchLine?.trim() || '⚡ FRIDAY AWAKENING...'}
         </div>
       </div>
     </div>

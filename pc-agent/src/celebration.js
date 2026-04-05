@@ -8,6 +8,7 @@ import { existsSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { pythonChildExecutable } from './winPython.js';
 import { getSpeakStyle, normalizeSpeakStyle, mergeDeliveryWithSpeakStyle } from './speakStyle.js';
+import { buildCelebrationAskText, getFocusDigestOpener } from './listenUiCopy.js';
 import { getAllVoiceContexts } from './voiceRedis.js';
 import { readMusicAutoplayEnabledSync } from '../../lib/musicAutoplayPrefs.js';
 
@@ -80,30 +81,6 @@ function shortVoiceLabel(voiceId) {
 }
 
 /**
- * @param {string} song
- * @param {ReturnType<typeof normalizeSpeakStyle>} style
- */
-export function buildCelebrationAskText(song, style) {
-  const s = normalizeSpeakStyle(style);
-  if (s.snarky) {
-    return `Right, we're done here. I could hit you with ${song} like a budget action movie — tap Play if you're into that — or Focus recap for the grown-up status line. Your call.`;
-  }
-  if (s.funny) {
-    return `Aaand scene. Want a gloriously over the top micro-blast of ${song}? Smash Play — or choose Focus recap if you're pretending spreadsheets are exciting.`;
-  }
-  if (s.bored) {
-    return `Finished. If you care, ${song} is an option — Play — otherwise Focus recap and I'll monotone your status strip.`;
-  }
-  if (s.dry) {
-    return `Done. Optional stinger: ${song}. Play — or Focus recap for a short status line, no guitar.`;
-  }
-  if (s.warm) {
-    return `All sorted. If you'd like a little lift, I can play a snippet of ${song} — tap Play — or Focus recap and I'll give you a soft line on where everyone's voices are.`;
-  }
-  return `Task complete. Fancy a short burst of ${song}? Tap Play on screen, or Focus recap for a quick channel roundup instead.`;
-}
-
-/**
  * @param {ReturnType<typeof normalizeSpeakStyle>} style
  * @param {Awaited<ReturnType<typeof getAllVoiceContexts>>} contexts
  */
@@ -116,12 +93,7 @@ export function buildFocusModeDigest(style, contexts) {
   });
   const list = parts.length ? parts.join('. ') : 'voice channels look quiet on my board';
 
-  let opener = "Okay — focus recap. I'll skip the victory lap.";
-  if (s.snarky) opener = "Fine — you're in laser focus, not stadium mode. Skipping the fanfare.";
-  if (s.funny) opener = "Ha — focus recap, bold choice. I'll keep the band on the bench.";
-  if (s.bored) opener = "Sure, no song. Here's the tiny dashboard tick-list.";
-  if (s.dry) opener = "Skipping music. Status only.";
-  if (s.warm) opener = "Alright, I'll keep things calm — here's a quick catch-up for you.";
+  const opener = getFocusDigestOpener(style);
 
   let out = `${opener} Last activity touchpoints: ${list}. Carry on when you're ready.`;
   if (s.customPrompt && s.customPrompt.trim()) {

@@ -29,6 +29,7 @@ Env (in .env):
   FRIDAY_EMAIL_DIGEST_MAX   max individual blurbs inside a digest (default 8)
   FRIDAY_EMAIL_SPEAK_AFTER_TTS_CLEAR  wait until no TTS is playing before digest (default true; avoids cutting off WhatsApp)
   FRIDAY_EMAIL_TTS_CLEAR_TIMEOUT_SEC  max seconds to wait for playback to finish (default 20)
+  FRIDAY_MAIL_SPEAK_SNIP_CHARS / FRIDAY_EMAIL_SPEAK_SNIP_CHARS  max chars of spoken snippet after sender (default 120; same as win-notify)
   PC_AGENT_URL              pc-agent base URL (default http://127.0.0.1:3847)
 
 Run:
@@ -59,6 +60,11 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 from tts_lock_env import tts_lock_ttl_sec  # noqa: E402
+from mail_speech_short import (  # noqa: E402
+    build_mail_from_snippet,
+    mail_snip_max_chars,
+    short_mail_snippet,
+)
 
 _ENV_FILE = _REPO_ROOT / ".env"
 if _ENV_FILE.exists():
@@ -359,45 +365,44 @@ def _create_calendar_event(meeting: dict) -> None:
 
 
 def _build_speak_text(envelope: dict, analysis: dict | None) -> str:
-    """Build rich spoken notification text."""
+    """Short TTS: who it's from, a capped snippet only — same style as Windows mail toasts."""
     sender = envelope.get("from", "someone")
     subject = envelope.get("subject", "(no subject)")
 
     if analysis is None:
-        return (
-            f"Nova here, Director of Communications. New email from {sender}. "
-            f"Subject: {subject}."
-        )
+        return build_mail_from_snippet(sender, subject)
 
     speak_summary = (analysis.get("speak_summary") or "").strip()
     if not speak_summary:
-        speak_summary = f"Subject: {subject}."
+        speak_summary = subject
 
-    parts = [f"Nova here, Director of Communications. New email from {sender}."]
+    line = build_mail_from_snippet(sender, speak_summary)
 
-    # Add summary
-    parts.append(speak_summary)
-
-    # Announce action items
     todos = analysis.get("todos", [])
     reminders = analysis.get("reminders", [])
     meeting = analysis.get("meeting")
+    tails: list[str] = []
 
     if meeting:
+        title = (meeting.get("title") or "Meeting").strip()
+        title = short_mail_snippet(title, min(80, mail_snip_max_chars()))
         date_nat = meeting.get("date_natural", "")
         time_nat = meeting.get("time_natural", "")
         dt = f"{date_nat} {time_nat}".strip()
-        parts.append(f"There's a meeting invite: {meeting.get('title', 'Meeting')}{(', ' + dt) if dt else ''}. I've added it to your calendar.")
+        tails.append(
+            f"Meeting: {title}{', ' + dt if dt else ''}. On your calendar."
+        )
 
     if todos:
         n = len(todos)
-        label = "action item" if n == 1 else "action items"
-        parts.append(f"I've added {n} {label} to your to-do list.")
+        tails.append(f"Added {n} to-do item{'s' if n != 1 else ''}.")
 
     if reminders and not todos:
-        parts.append("I've set a reminder for you.")
+        tails.append("Reminder set.")
 
-    return " ".join(parts)
+    if not tails:
+        return line
+    return f"{line} {' '.join(tails)}"
 
 
 def _apply_analysis_actions(envelope: dict, analysis: dict | None) -> None:
@@ -411,28 +416,29 @@ def _apply_analysis_actions(envelope: dict, analysis: dict | None) -> None:
 
 
 def _build_digest_speak_text(entries: list[tuple[dict, dict | None]]) -> str:
-    """One announcement for several new messages (avoids stacked priority TTS vs WhatsApp)."""
+    """One short digest: count + per-mail from plus snippet cap (no Nova monologue)."""
     n = len(entries)
     if n == 0:
         return ""
     if n == 1:
         env, ana = entries[0]
         return _build_speak_text(env, ana)
-    intro = f"Nova here, Director of Communications. You have {n} new emails."
+    intro = f"You have {n} new emails."
     parts: list[str] = [intro]
     cap = min(n, EMAIL_DIGEST_MAX)
     for envelope, analysis in entries[:cap]:
         sender = envelope.get("from", "someone")
         subject = envelope.get("subject", "(no subject)")
         sm = (analysis or {}).get("speak_summary") if analysis else None
-        sm = (sm or "").strip()
-        if sm:
-            parts.append(f"From {sender}: {textwrap.shorten(sm, width=130, placeholder='')}")
+        sm = (sm or "").strip() or subject
+        sn = short_mail_snippet(sm)
+        if sn:
+            parts.append(f"From {sender}. {sn}")
         else:
-            parts.append(f"From {sender}, subject {subject}.")
+            parts.append(f"From {sender}.")
     rest = n - cap
     if rest > 0:
-        parts.append(f"Plus {rest} more in your inbox.")
+        parts.append(f"Plus {rest} more.")
     return " ".join(parts)
 
 
@@ -454,9 +460,16 @@ def _speak_text(text: str) -> None:
     if _is_dnd():
         print(f"[gmail-watch] DND on — skipping speech", flush=True)
         return
+    if len(text) > 600:
+        text = text[:597] + "…"
     use_pc_agent = _env_bool("FRIDAY_EMAIL_SPEAK_VIA_PC_AGENT", True)
     if use_pc_agent and PC_AGENT_SECRET:
-        payload: dict = {"text": text, "channel": "mail", "personaKey": "nova"}
+        payload: dict = {
+            "text": text,
+            "channel": "mail",
+            "personaKey": "nova",
+            "priority": 1,
+        }
         if NOTIFY_VOICE:
             payload["voice"] = NOTIFY_VOICE
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")

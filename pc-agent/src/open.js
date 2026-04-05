@@ -39,6 +39,9 @@ const ALIASES_MAC = {
   'windows terminal': { darwin: ['open', ['-a', 'Terminal']] },
 };
 
+/** First word of app name must be one of these (avoids "open pull" inside long @cursor prompts). */
+const ALLOWED_APP_KEYS = new Set(Object.keys(ALIASES_WIN));
+
 function normalizeAppName(text) {
   const t = String(text || '')
     .toLowerCase()
@@ -55,26 +58,27 @@ function stripLeadingArticle(s) {
 }
 
 /**
- * Match allowlisted "open …" / "launch …" intents.
+ * Match allowlisted "open …" / "launch …" intents only on the first line, at the start
+ * (optional "please "). No mid-string match — phrases like "If an open pull request…"
+ * in @cursor prompts must not resolve to open_app('pull').
  */
 export function matchOpenIntent(text) {
-  const lower = String(text || '').toLowerCase();
+  const firstLine = String(text || '')
+    .split('\n')[0]
+    .trim()
+    .toLowerCase();
+  if (!firstLine) return null;
 
-  if (/^(open|launch)\s+/.test(lower)) {
-    let rest = lower.replace(/^(open|launch)\s+/, '').trim();
-    rest = stripLeadingArticle(rest);
-    if (!rest) return null;
-    const key = rest.split(/\s+/)[0];
-    return key || null;
-  }
+  const lead = firstLine.match(/^(?:please\s+)?(open|launch)\s+(.+)$/i);
+  if (!lead) return null;
 
-  const mid = lower.match(/\bopen\s+(?:the\s+|a\s+|an\s+)?(\w+)\b/);
-  if (mid) return mid[1];
+  let rest = lead[2].trim();
+  rest = stripLeadingArticle(rest);
+  if (!rest) return null;
 
-  const launchMid = lower.match(/\blaunch\s+(?:the\s+|a\s+|an\s+)?(\w+)\b/);
-  if (launchMid) return launchMid[1];
-
-  return null;
+  const key = rest.split(/\s+/)[0];
+  if (!key || !ALLOWED_APP_KEYS.has(key)) return null;
+  return key;
 }
 
 function spawnOpen(cmd, args) {

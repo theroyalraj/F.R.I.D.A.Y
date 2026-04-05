@@ -41,6 +41,7 @@ import { createActionItemsRouter } from './actionItemsRoutes.js';
 import { perceptionDbConfigured, perceptionDbHealth } from './perceptionDb.js';
 import { loadOpenclawUserConfig } from './userConfig.js';
 import { getSpeakStyle, setSpeakStyle, buildSpeakStyleInstruction, mergeDeliveryWithSpeakStyle } from './speakStyle.js';
+import { getListenUiCopy } from './listenUiCopy.js';
 import {
   playDoneSong,
   buildCelebrationOffer,
@@ -54,6 +55,7 @@ import { authJwtOrAgentSecret } from './authMiddleware.js';
 import { ensureAuthSchema, ensureAiGenerationLogSchema, ensureLearningSchema } from './ensureAuthSchema.js';
 import { createLearningRouter } from './learningRoutes.js';
 import { createSecurityScanRouter, broadcastScanOutcome } from './securityScanRoutes.js';
+import { createCodeSecurityScanRouter } from './codeSecurityScanRoutes.js';
 import { runDailySecurityScan } from './dailySecurityScan.js';
 import { LEGACY_TODO_SCOPE } from './todosDb.js';
 import { registerDeferredOpenRouterEmitter } from './deferredOpenRouter.js';
@@ -236,6 +238,7 @@ function shouldIgnoreRequestLog(req) {
       p === '/favicon.ico' ||
       p.startsWith('/todos') ||
       p.startsWith('/security/scan') ||
+      p.startsWith('/security/code-scan') ||
       p.startsWith('/auth/') ||
       p.startsWith('/organization/')
     );
@@ -363,7 +366,15 @@ voiceRouter.post('/command', async (req, res, next) => {
       broadcastEvent('music_play', buildMusicPlaySsePayload(json.musicQuery, 'full'));
     }
     const skipCelebrationModes = new Set(['play_music', 'open_app']);
-    if (out.json?.ok && !out.json?.deferredOpenRouter && !skipCelebrationModes.has(out.json.mode)) {
+    /** cursor-ui = @cursor from Listen — work continues in IDE; celebration would cut in before git or gh finishes. */
+    const voiceSource = String(req.body?.source || '').toLowerCase();
+    const skipCelebrationForCursorHandoff = voiceSource === 'cursor-ui';
+    if (
+      out.json?.ok &&
+      !out.json?.deferredOpenRouter &&
+      !skipCelebrationModes.has(out.json.mode) &&
+      !skipCelebrationForCursorHandoff
+    ) {
       const mode = getCelebrationMode();
       if (mode === 'immediate') {
         playDoneSong(req.log);
@@ -530,6 +541,28 @@ voiceRouter.post('/speak-async', async (req, res) => {
     typeof req.body?.personaKey === 'string'
       ? req.body.personaKey.trim().slice(0, 24).toLowerCase()
       : undefined;
+  const pr = req.body?.priority;
+  const priorityRaw =
+    typeof pr === 'string'
+      ? pr.trim().toLowerCase()
+      : pr === 1 || pr === true
+        ? '1'
+        : '';
+  const ch = (speakChannel || '').toLowerCase();
+  /** Inbound mail, WhatsApp, SMS, Windows toast TTS, and Cursor-done must preempt — else cooperative queue starves them. */
+  const inboundPreemptChannels = new Set(['mail', 'whatsapp', 'sms', 'winnotify', 'cursor_done']);
+  const wantsCoop = ['cooperative', 'coop', 'low', 'soft', 'queue', '2', '0', 'false', 'no', 'off'].includes(
+    priorityRaw,
+  );
+  const wantsPreempt = ['1', 'true', 'yes', 'on', 'high', 'hard'].includes(priorityRaw);
+  const inboundPreempt = ch && inboundPreemptChannels.has(ch);
+  let ttsPriority = 'cooperative';
+  if (inboundPreempt || wantsPreempt) {
+    ttsPriority = '1';
+  }
+  if (wantsCoop) {
+    ttsPriority = 'cooperative';
+  }
   if (!text) {
     return res.status(400).json({ error: 'Missing text in body: { "text": "Hello" }' });
   }
@@ -546,7 +579,7 @@ voiceRouter.post('/speak-async', async (req, res) => {
       ...process.env,
       FRIDAY_TTS_VOICE:  currentVoice,
       FRIDAY_TTS_DEVICE: process.env.FRIDAY_TTS_DEVICE || 'default',
-      FRIDAY_TTS_PRIORITY: '1',
+      FRIDAY_TTS_PRIORITY: ttsPriority,
       FRIDAY_TTS_BYPASS_CURSOR_DEFER: 'true',
       FRIDAY_TTS_EMIT_EVENT: '0',
       ...delivery,
@@ -843,6 +876,7 @@ voiceRouter.get('/speak-style', async (_req, res) => {
       ok: true,
       style,
       promptPreview: buildSpeakStyleInstruction(style) || null,
+      listenUi: getListenUiCopy(style),
     });
   } catch (err) {
     res.status(500).json({ ok: false, error: String(err.message || err) });
@@ -874,6 +908,7 @@ voiceRouter.post('/speak-style', async (req, res) => {
       ok: true,
       style,
       promptPreview: buildSpeakStyleInstruction(style) || null,
+      listenUi: getListenUiCopy(style),
     });
   } catch (err) {
     if (err.code === 'REDIS_DOWN') {
@@ -1048,6 +1083,7 @@ app.use('/automation', createAutomationRouter(auth));
 app.use('/integrations', createIntegrationsRouter(authJwtOrAgentSecret(SECRET)));
 app.use('/todos', createTodosRouter(broadcastEvent, SECRET));
 app.use('/security/scan', authJwtOrAgentSecret(SECRET), createSecurityScanRouter(broadcastEvent));
+app.use('/security/code-scan', authJwtOrAgentSecret(SECRET), createCodeSecurityScanRouter(broadcastEvent));
 app.use('/action-items', createActionItemsRouter());
 
 app.use((err, req, res, _next) => {
@@ -1160,7 +1196,10 @@ async function bootstrap() {
       setTimeout(() => {
         runDailySecurityScan({ repoRoot: REPO_ROOT, force: false, respectCache: true })
           .then((out) =>
-            broadcastScanOutcome(broadcastEvent, out, LEGACY_TODO_SCOPE, { log: rootLogger }),
+            broadcastScanOutcome(broadcastEvent, out, LEGACY_TODO_SCOPE, {
+              log: rootLogger,
+              listenToast: false,
+            }),
           )
           .catch((e) =>
             rootLogger.warn({ err: String(e?.message || e) }, 'OPENCLAW_SECURITY_SCAN_ON_START failed'),
