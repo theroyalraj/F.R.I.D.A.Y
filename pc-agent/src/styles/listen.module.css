@@ -895,7 +895,7 @@
 
 /* ── Integrations rail (Mail + WhatsApp) ───────────────────── */
 .integrations-rail {
-  width: 320px;
+  width: var(--integrations-width, 420px);
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
@@ -903,6 +903,7 @@
   border-left: 1px solid rgba(255, 255, 255, 0.06);
   background: rgba(8, 10, 18, 0.92);
   z-index: 12;
+  position: relative;
 }
 
 .integrations-rail-inner {
@@ -941,6 +942,26 @@
 }
 
 .integrations-close:hover { color: rgba(255, 255, 255, 0.85); }
+
+.integrations-resize-handle {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  cursor: col-resize;
+  background: transparent;
+  transition: background 0.15s;
+  z-index: 20;
+}
+
+.integrations-resize-handle:hover {
+  background: rgba(138, 92, 246, 0.5);
+}
+
+.integrations-resize-handle.dragging {
+  background: rgba(138, 92, 246, 0.8);
+}
 
 .integrations-section {
   padding: 10px 12px 14px;

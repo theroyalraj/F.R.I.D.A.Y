@@ -69,8 +69,56 @@ export const IntegrationsRail: React.FC<Props> = ({
   const [waSending, setWaSending] = useState(false);
   const [selectedMail, setSelectedMail] = useState<MailRow | null>(null);
   const [markedMails, setMarkedMails] = useState<MarkedMail>({});
+  const [isDragging, setIsDragging] = useState(false);
   const gmailRef = useRef(gmail);
   gmailRef.current = gmail;
+  const railRef = useRef<HTMLDivElement>(null);
+
+  // Load saved width from localStorage on mount
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('friday.integrations.width');
+      if (saved) {
+        const width = Math.max(300, Math.min(800, parseInt(saved, 10)));
+        document.documentElement.style.setProperty('--integrations-width', `${width}px`);
+      }
+    } catch {
+      // Ignore
+    }
+  }, []);
+
+  // Handle resize dragging
+  useEffect(() => {
+    if (!isDragging) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!railRef.current) return;
+      const rect = railRef.current.parentElement?.getBoundingClientRect();
+      if (!rect) return;
+
+      const newWidth = rect.right - e.clientX;
+      if (newWidth >= 300 && newWidth <= 800) {
+        document.documentElement.style.setProperty('--integrations-width', `${newWidth}px`);
+      }
+    };
+
+    const handleMouseUp = () => {
+      setIsDragging(false);
+      if (railRef.current) {
+        const width = window
+          .getComputedStyle(railRef.current)
+          .width.replace('px', '');
+        localStorage.setItem('friday.integrations.width', width);
+      }
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isDragging]);
 
   const toggleMailMark = (uid: string, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -318,7 +366,13 @@ export const IntegrationsRail: React.FC<Props> = ({
           onClick={onDrawerClose}
         />
       )}
-      <aside className={railClass} aria-label="Mail and WhatsApp">
+      <aside ref={railRef} className={railClass} aria-label="Mail and WhatsApp">
+        <div
+          className={`${styles['integrations-resize-handle']} ${isDragging ? styles['dragging'] : ''}`}
+          onMouseDown={() => setIsDragging(true)}
+          role="separator"
+          aria-label="Resize email and chat panel"
+        />
         <div className={styles['integrations-rail-inner']}>
           {isNarrow && (
             <div className={styles['integrations-mobile-head']}>
