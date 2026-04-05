@@ -29,6 +29,23 @@ function parseIntEnv(name, defaultVal) {
   return Number.isFinite(n) ? n : defaultVal;
 }
 
+/** AC/DC Back in Black entry / done-clip uses a dedicated shorter cap (see FRIDAY_BACK_IN_BLACK_PLAY_SECONDS). */
+export function isBackInBlackSongQuery(query) {
+  const s = String(query || '').toLowerCase();
+  return s.includes('back in black');
+}
+
+/**
+ * Clip length for friday-play when not using --full (celebration done song, etc.).
+ * Back in Black defaults to twenty-four seconds; other phrases use FRIDAY_PLAY_SECONDS.
+ */
+export function clipSecondsForSongQuery(query) {
+  if (isBackInBlackSongQuery(query)) {
+    return Math.min(600, Math.max(8, parseIntEnv('FRIDAY_BACK_IN_BLACK_PLAY_SECONDS', 24)));
+  }
+  return Math.min(600, Math.max(8, parseIntEnv('FRIDAY_PLAY_SECONDS', 26)));
+}
+
 /** Same shape as server.js greetingTtsRatePitch (Jarvis-style delivery). */
 function greetingTtsRatePitch() {
   const off = ['false', '0', 'no', 'off'];
@@ -136,18 +153,28 @@ export async function buildCelebrationOffer() {
     rawDelay === undefined || rawDelay === ''
       ? 4000
       : Number(String(rawDelay).split('#')[0].trim());
-  const delayMsBeforeAsk = Math.min(
+  const baseDelay = Math.min(
     120_000,
     Math.max(1500, Number.isFinite(parsedDelay) ? parsedDelay : 4000),
   );
+  /** Optional: longer pause before the on-screen ask only when FRIDAY_DONE_SONG is Back in Black. */
+  const bibRaw = process.env.FRIDAY_CELEBRATION_ASK_DELAY_BACK_IN_BLACK_MS;
+  let delayMsBeforeAsk = baseDelay;
+  if (isBackInBlackSongQuery(song) && bibRaw !== undefined && bibRaw !== '') {
+    const bibDelay = Number(String(bibRaw).split('#')[0].trim());
+    if (Number.isFinite(bibDelay)) {
+      delayMsBeforeAsk = Math.min(120_000, Math.max(1500, bibDelay));
+    }
+  }
   return { celebration: { song, askText, delayMsBeforeAsk } };
 }
 
 export function playDoneSong(log) {
   const song = (process.env.FRIDAY_DONE_SONG || '').trim();
   if (!song || !existsSync(PLAY_SCRIPT)) return;
+  const clipSec = String(clipSecondsForSongQuery(song));
   const child = spawn(pythonChildExecutable(), [PLAY_SCRIPT, song], {
-    env: { ...process.env },
+    env: { ...process.env, FRIDAY_PLAY_SECONDS: clipSec },
     stdio: ['ignore', 'ignore', 'pipe'],
     windowsHide: true,
     detached: true,

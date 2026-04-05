@@ -175,6 +175,15 @@
 
 .top-btn:hover { background: rgba(255, 255, 255, 0.06); color: rgba(255, 255, 255, 0.6); }
 
+.top-btn-active {
+  background: rgba(167, 139, 250, 0.15);
+  border-color: rgba(167, 139, 250, 0.4);
+  color: #a78bfa;
+}
+.top-btn-active:hover { background: rgba(167, 139, 250, 0.22); color: #c4b5fd; }
+.light .top-btn-active { background: rgba(124, 58, 237, 0.1); border-color: rgba(124, 58, 237, 0.3); color: #7c3aed; }
+.light .top-btn-active:hover { background: rgba(124, 58, 237, 0.18); color: #6d28d9; }
+
 /* ── Main Layout ───────────────────────────────────────────── */
 .main-layout {
   flex: 1;
@@ -1550,3 +1559,16 @@
 .light .speak-confirm-btn-cancel { background: rgba(0, 0, 0, 0.03); border-color: rgba(0, 0, 0, 0.08); color: rgba(0, 0, 0, 0.45); }
 .light .speak-confirm-btn-cancel:hover { background: rgba(0, 0, 0, 0.06); color: rgba(0, 0, 0, 0.65); }
 .light .speak-confirm-btn-confirm { border-color: rgba(99, 60, 210, 0.3); color: #633cbe; }
+
+/* Responsive Scaling for Large Displays */
+@media (min-width: 1920px) {
+  .app { font-size: 1.1rem; }
+}
+
+@media (min-width: 2560px) {
+  .app { font-size: 1.4rem; }
+}
+
+@media (min-width: 3440px) {
+  .app { font-size: 1.8rem; }
+}

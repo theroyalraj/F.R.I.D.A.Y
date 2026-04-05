@@ -49,6 +49,7 @@ import { playLocalSong } from './fridayPlay.js';
 import { startBriefingCron } from './briefingCron.js';
 import { stopAllFridayAudioAsync } from './stopAllFridayAudio.js';
 import { buildOpenclawStatus } from './openclawStatus.js';
+import { handleEvolutionWebhook } from './evolutionWebhook.js';
 
 /** When true, startup / done / launch songs use yt-dlp on the PC even if an Alexa cookie exists (hear music on your Windows output). */
 function fridaySongsPreferLocalPc() {
@@ -786,6 +787,9 @@ app.post('/internal/alexa-notify', async (req, res) => {
   res.json({ ok: true, referenceId: r.referenceId, amazonStatus: r.status });
 });
 }
+
+// ── Evolution API webhook (WhatsApp call + message notifications) ────────────
+app.post('/webhook/evolution', express.json({ limit: '512kb' }), handleEvolutionWebhook);
 
 app.get('/health', (_req, res) => {
   res.json({ ok: true, service: 'openclaw-skill-gateway' });

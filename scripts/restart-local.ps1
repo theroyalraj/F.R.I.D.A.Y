@@ -43,8 +43,15 @@ function Stop-ListenersOnPort {
     )
     foreach ($id in $ids) {
       if ($id -and $id -gt 0) {
-        Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
+        $pp = (Get-CimInstance Win32_Process -Filter "ProcessId=$id" -ErrorAction SilentlyContinue).ParentProcessId
+        # /T kills the process tree (catches --watch child processes)
+        & taskkill /F /T /PID $id 2>$null | Out-Null
         Write-Host "  killed PID $id (port $port)"
+        # Also kill the parent orchestrator so node --watch can't race for the port
+        if ($pp -and $pp -gt 4) {
+          Stop-Process -Id $pp -Force -ErrorAction SilentlyContinue
+          Write-Host "  killed parent PID $pp"
+        }
       }
     }
   }
@@ -84,6 +91,23 @@ function Stop-OpenClawPythonDaemon {
 
 if ($ForceKill) {
   Write-Host "ForceKill: stop all media + TTS locks, release voice pipeline, free 3847/3848..." -ForegroundColor Magenta
+
+  # Kill any surviving start.mjs orchestrators FIRST — their node --watch children race for the
+  # same ports if the orchestrator is left alive and a file change triggers a restart mid-startup.
+  $startOrchestrators = @(
+    Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
+      Where-Object { $_.CommandLine -like '*scripts*start.mjs*' }
+  )
+  if ($startOrchestrators.Count -gt 0) {
+    $startOrchestrators | ForEach-Object {
+      # /T kills the entire process tree so --watch children go with it
+      & taskkill /F /T /PID $_.ProcessId 2>$null | Out-Null
+      Write-Host "  killed start.mjs orchestrator (tree) PID $($_.ProcessId)"
+    }
+    Start-Sleep -Milliseconds 500
+  } else {
+    Write-Host "  (no start.mjs orchestrators running)" -ForegroundColor DarkGray
+  }
 
   # While skill-gateway is still up: kill players, clear Redis TTS/music locks (full panic).
   try {

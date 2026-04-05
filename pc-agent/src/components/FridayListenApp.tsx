@@ -12,8 +12,10 @@ import { PersonaRosterModal } from './PersonaRosterModal';
 import {
   COMPANY_PERSONAS,
   SPEAKING_PERSONA_ORDER,
+  PERSONA_ORB_PALETTES,
   mergePersona,
   inferPersonaKeyFromVoice,
+  personaIcon,
   shortVoiceLabel,
   USER_BUBBLE_PERSONA,
   type CompanyPersonaKey,
@@ -24,6 +26,7 @@ import styles from '../styles/listen.module.css';
 const INTEGRATIONS_NARROW_MQ = '(max-width: 1100px)';
 /** Shared with /friday voice.html — same Claude model preference */
 const LS_CLAUDE_MODEL = 'friday.claudeModel';
+const LS_ALWAYS_SPEAK = 'friday.alwaysSpeakViaUi';
 
 /* ── Voice metadata ───────────────────────────────────────── */
 interface VoiceMeta { icon: string; color: string; shortName: string; }
@@ -87,6 +90,8 @@ const FridayListenApp: React.FC = () => {
     bubbles, addBubble, showToast, setUptime,
     activePersonaKey, setActivePersonaKey, personaOverrides, refreshPersonaOverrides, getReplyPersona,
     personaCatalog, setPersonaCatalog,
+    speakingPersonaKey,
+    musicOrbCaption,
   } = useVoiceApp();
   const { authHeaders } = useAuth();
 
@@ -142,6 +147,17 @@ const FridayListenApp: React.FC = () => {
   });
   const [speakConfirmOpen, setSpeakConfirmOpen] = useState(false);
   const [pendingSpeakText, setPendingSpeakText] = useState('');
+  const [alwaysSpeakViaUi, setAlwaysSpeakViaUi] = useState(() => {
+    try { return localStorage.getItem(LS_ALWAYS_SPEAK) === 'true'; } catch { return false; }
+  });
+
+  const toggleAlwaysSpeak = useCallback(() => {
+    setAlwaysSpeakViaUi((prev) => {
+      const next = !prev;
+      try { localStorage.setItem(LS_ALWAYS_SPEAK, String(next)); } catch { /* ignore */ }
+      return next;
+    });
+  }, []);
 
   const clearCelebrationOffer = useCallback(() => {
     if (celebrationAskTimerRef.current) {
@@ -248,11 +264,28 @@ const FridayListenApp: React.FC = () => {
     else if (event.type === 'voice_changed') {
       const ev = event as { voice?: string; text?: string };
       const v = typeof ev.voice === 'string' && ev.voice ? ev.voice : (ev.text || '');
+      // Voice changed: update active persona BEFORE any speak event arrives
       postEvent('voice_changed', v);
+    } else if (event.type === 'music_play') {
+      const me = event as { type: string; text?: string; seconds?: number };
+      const seconds = typeof me.seconds === 'number' && Number.isFinite(me.seconds) ? me.seconds : 30;
+      const caption = typeof me.text === 'string' && me.text.trim() ? me.text.trim() : 'Playing…';
+      postEvent('music_play', caption, { musicSeconds: seconds, musicPersonaKey: 'maestro' });
     } else {
+      // If a speak event carries an explicit voice field, snap persona first
+      if ((event.type === 'speak' || event.type === 'thinking') && event.voice) {
+        postEvent('voice_changed', String(event.voice));
+      }
       postEvent(event.type, event.text || '');
       if (event.type === 'speak' || event.type === 'thinking') setSpeakingText(event.text || 'Speaking...');
       if (event.type === 'listening' || event.type === 'reply') setSpeakingText('');
+      // "Always Speak via UI" — play SSE reply through the browser even when Python daemons are silent
+      if (event.type === 'reply' && alwaysSpeakViaUi && event.text?.trim()) {
+        fetch('/voice/speak-async', {
+          method: 'POST',
+          body: JSON.stringify({ text: event.text }),
+        }).catch(() => {});
+      }
     }
   });
 
@@ -337,7 +370,7 @@ const FridayListenApp: React.FC = () => {
       const data = await res.json();
       if (data.summary) {
         addBubble({ type: 'friday', text: data.summary, ts: Date.now(), persona: getReplyPersona() });
-        if (data.speakAsync !== false) {
+        if (alwaysSpeakViaUi || data.speakAsync !== false) {
           pendingJarvisSpeak = true;
           setConnectionStatus('speaking');
           fetch('/voice/speak-async', {
@@ -376,7 +409,7 @@ const FridayListenApp: React.FC = () => {
       }
       inputRef.current?.focus();
     }
-  }, [inputText, sending, addBubble, setConnectionStatus, authHeaders, getReplyPersona, clearCelebrationOffer, claudeModel]);
+  }, [inputText, sending, addBubble, setConnectionStatus, authHeaders, getReplyPersona, clearCelebrationOffer, claudeModel, alwaysSpeakViaUi]);
 
   const onCelebrationPlay = useCallback(async () => {
     if (celebrationAskTimerRef.current) {
@@ -538,6 +571,15 @@ const FridayListenApp: React.FC = () => {
   const curMeta = vm(currentVoice);
   const replyPersona = mergePersona(activePersonaKey, personaOverrides, currentVoice, personaCatalog);
 
+  // Sidebar orb: use the speaking persona's colour + icon while TTS is active
+  const speakOrbPalette = speakingPersonaKey
+    ? (speakingPersonaKey === 'custom' ? PERSONA_ORB_PALETTES.custom : (PERSONA_ORB_PALETTES[speakingPersonaKey] ?? PERSONA_ORB_PALETTES.jarvis))
+    : null;
+  const speakOrbIcon = speakingPersonaKey ? personaIcon(speakingPersonaKey) : null;
+  const speakOrbName = speakingPersonaKey && speakingPersonaKey !== 'custom'
+    ? (personaCatalog?.[speakingPersonaKey]?.name?.trim() || COMPANY_PERSONAS[speakingPersonaKey].name)
+    : null;
+
   const formatTime = (ts: number) => new Date(ts).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
   const timeAgo = (iso: string) => {
     const ms = Date.now() - new Date(iso).getTime();
@@ -551,7 +593,18 @@ const FridayListenApp: React.FC = () => {
       <VoiceSiriOverlay
         open={connectionStatus === 'speaking'}
         theme={theme}
-        caption={speakingText.trim() || undefined}
+        caption={(speakingText.trim() || musicOrbCaption.trim()) || undefined}
+        personaKey={speakingPersonaKey}
+        personaName={
+          speakingPersonaKey && speakingPersonaKey !== 'custom'
+            ? (personaCatalog?.[speakingPersonaKey]?.name?.trim() || COMPANY_PERSONAS[speakingPersonaKey].name)
+            : undefined
+        }
+        personaTitle={
+          speakingPersonaKey && speakingPersonaKey !== 'custom'
+            ? (personaCatalog?.[speakingPersonaKey]?.title?.trim() || COMPANY_PERSONAS[speakingPersonaKey].title)
+            : undefined
+        }
       />
       {/* Glow */}
       <div ref={glowRef} className={`${styles['glow-wrap']} ${styles[`glow-${connectionStatus}`]}`}>
@@ -581,6 +634,14 @@ const FridayListenApp: React.FC = () => {
             </button>
           )}
           <span className={styles['top-meta']}>{exchanges} msgs</span>
+          <button
+            className={`${styles['top-btn']} ${alwaysSpeakViaUi ? styles['top-btn-active'] : ''}`}
+            onClick={toggleAlwaysSpeak}
+            title={alwaysSpeakViaUi ? 'Always Speak via UI — ON (click to turn off)' : 'Always Speak via UI — OFF (click to enable)'}
+            aria-pressed={alwaysSpeakViaUi}
+          >
+            {alwaysSpeakViaUi ? '\uD83D\uDD0A' : '\uD83D\uDD07'}
+          </button>
           <button className={styles['top-btn']} onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>
             {theme === 'dark' ? '\u2600\uFE0F' : '\uD83C\uDF19'}
           </button>
@@ -622,19 +683,30 @@ const FridayListenApp: React.FC = () => {
             className={`${styles['orb-area']} ${styles[`orb-${connectionStatus}`]} ${
               connectionStatus === 'listening' && !listenMuted ? styles['orb-siri-listen'] : ''
             }`}
+            style={
+              speakOrbPalette
+                ? ({ '--orb-persona-color': speakOrbPalette.primary } as React.CSSProperties)
+                : undefined
+            }
             onClick={handleOrbClick}
             role="button"
             tabIndex={0}
           >
             <div className={styles['orb-circle']}>
-              <span className={`${styles['orb-icon']} ${listenMuted ? styles['orb-icon-muted'] : ''}`}>
-                {listenMuted ? '\u2298' : stateIcons[connectionStatus]}
+              <span
+                className={`${styles['orb-icon']} ${listenMuted ? styles['orb-icon-muted'] : ''}`}
+                style={speakOrbPalette ? { color: speakOrbPalette.primary, filter: `drop-shadow(0 0 8px ${speakOrbPalette.primary})` } : undefined}
+              >
+                {listenMuted ? '\u2298' : (speakOrbIcon && connectionStatus === 'speaking' ? speakOrbIcon : stateIcons[connectionStatus])}
               </span>
               {connectionStatus === 'listening' && !listenMuted && <Waveform />}
             </div>
           </div>
-          <div className={styles['orb-label']}>
-            {listenMuted ? 'Muted' : statusLabels[connectionStatus]}
+          <div
+            className={styles['orb-label']}
+            style={speakOrbPalette && connectionStatus === 'speaking' ? { color: speakOrbPalette.primary } : undefined}
+          >
+            {listenMuted ? 'Muted' : (speakOrbName && connectionStatus === 'speaking' ? speakOrbName : statusLabels[connectionStatus])}
           </div>
 
           {/* Speaking indicator */}

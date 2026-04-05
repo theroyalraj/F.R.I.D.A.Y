@@ -131,7 +131,12 @@
       "Bash(TOKEN=\"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJmMzUzNzQ0Zi03Y2M2LTQyNzItYTk5Yy0yNzdjZDVmYjEyNzQiLCJlbWFpbCI6ImRldkB0ZXN0LmxvY2FsIiwib3JnSWQiOiIzMTkxZDc2NS1iYjNmLTQ0MTctYTg3My1hMzZkZmFhNmNiYWYiLCJyb2xlIjoiYWRtaW4iLCJpYXQiOjE3NzUzNzY1NjIsImV4cCI6MTc3Nzk2ODU2Mn0.xmxEBqjhY3qOeK57EYSOGuNkTUxoWXPuHtilSXXDwLg\")",
       "Bash(curl -s -X PUT http://127.0.0.1:3847/organization/company -H \"Authorization: Bearer $TOKEN\" -H 'Content-Type: application/json' -d '{\"\"name\"\":\"\"Dev Co\"\",\"\"description\"\":\"\"Testing\"\",\"\"mission\"\":\"\"Test\"\",\"\"vision\"\":\"\"Test\"\"}')",
       "Bash(curl -s http://127.0.0.1:3847/friday/listen)",
-      "Bash(curl -i http://127.0.0.1:3847/friday/listen)"
+      "Bash(curl -i http://127.0.0.1:3847/friday/listen)",
+      "Bash(grep -E \"\\\\.\\(js|ts\\)$\")",
+      "Bash(grep -n \"template\\\\|backtick\\\\|\\\\`\" D:/code/openclaw/pc-agent/src/components/FridayListenApp.tsx)",
+      "Bash(curl -s -X POST http://127.0.0.1:3847/auth/dev-session)",
+      "Bash(grep -n '`' D:/code/openclaw/pc-agent/src/components/FridayListenApp.tsx)",
+      "Bash(grep -n '${' D:/code/openclaw/pc-agent/src/components/FridayListenApp.tsx)"
     ]
   }
 }

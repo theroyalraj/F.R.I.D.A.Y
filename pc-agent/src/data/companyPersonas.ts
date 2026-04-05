@@ -168,6 +168,51 @@ export function shortVoiceLabel(voiceId: string): string {
   return m ? m[1] : id.slice(-12) || '—';
 }
 
+/* ── Orb palette ──────────────────────────────────────────────────────────── */
+
+export type OrbPalette = {
+  /** Accent color used for ring border, core glow, wave disk inner. */
+  primary: string;
+  /** Darker / secondary accent for core gradient and conic tail. */
+  secondary: string;
+  /** Complementary for the halo conic gradient (used alongside primary). */
+  complement: string;
+};
+
+export const PERSONA_ORB_PALETTES: Record<CompanyPersonaKey | 'custom', OrbPalette> = {
+  jarvis:   { primary: '#a78bfa', secondary: '#7c3aed', complement: '#38bdf8' },
+  argus:    { primary: '#34d399', secondary: '#059669', complement: '#a3e635' },
+  nova:     { primary: '#e879f9', secondary: '#a21caf', complement: '#f472b6' },
+  sage:     { primary: '#60a5fa', secondary: '#1d4ed8', complement: '#94a3b8' },
+  dexter:   { primary: '#fbbf24', secondary: '#b45309', complement: '#fb923c' },
+  maestro:  { primary: '#fb923c', secondary: '#c2410c', complement: '#fbbf24' },
+  harper:   { primary: '#fb7185', secondary: '#be123c', complement: '#f472b6' },
+  sentinel: { primary: '#7dd3fc', secondary: '#0369a1', complement: '#60a5fa' },
+  echo:     { primary: '#2dd4bf', secondary: '#0f766e', complement: '#34d399' },
+  custom:   { primary: '#8b5cf6', secondary: '#6d28d9', complement: '#38bdf8' },
+};
+
+/** Default palette used before any speak event resolves the persona. */
+export const DEFAULT_ORB_PALETTE: OrbPalette = PERSONA_ORB_PALETTES.jarvis;
+
+/** VOICE_META icon per persona key (client-only convenience; voice IDs must match COMPANY_PERSONAS). */
+const PERSONA_ICONS: Record<CompanyPersonaKey, string> = {
+  jarvis:   '👩‍💼',
+  argus:    '👨‍💼',
+  nova:     '👸',
+  sage:     '🧑‍🔬',
+  dexter:   '👨‍🔬',
+  maestro:  '🎭',
+  harper:   '🙋‍♀️',
+  sentinel: '📡',
+  echo:     '🧑‍🎤',
+};
+
+export function personaIcon(key: CompanyPersonaKey | 'custom'): string {
+  if (key === 'custom') return '🎙️';
+  return PERSONA_ICONS[key] ?? '🎙️';
+}
+
 /** Shown on user-authored bubbles (typed or voice-heard). */
 export const USER_BUBBLE_PERSONA: ChatBubblePersona = {
   id: 'you',

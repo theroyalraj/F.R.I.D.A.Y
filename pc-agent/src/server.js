@@ -39,6 +39,7 @@ import {
   resolveCelebration,
   getCelebrationMode,
 } from './celebration.js';
+import { buildMusicPlaySsePayload } from './musicVisualSse.js';
 import { createAuthRouter } from './authRoutes.js';
 import { createOrganizationRouter } from './organizationRoutes.js';
 import { authJwtOrAgentSecret } from './authMiddleware.js';
@@ -297,10 +298,16 @@ voiceRouter.post('/command', async (req, res, next) => {
     const orgId = req.user?.orgId ?? null;
     const out = await runTask(req.body, req.log, { orgId });
     const json = { ...(out.json || {}) };
-    if (out.json?.ok && !out.json?.deferredOpenRouter) {
+    if (json.ok && json.mode === 'play_music' && json.musicQuery) {
+      broadcastEvent('music_play', buildMusicPlaySsePayload(json.musicQuery, 'full'));
+    }
+    const skipCelebrationModes = new Set(['play_music', 'open_app']);
+    if (out.json?.ok && !out.json?.deferredOpenRouter && !skipCelebrationModes.has(out.json.mode)) {
       const mode = getCelebrationMode();
       if (mode === 'immediate') {
         playDoneSong(req.log);
+        const song = (process.env.FRIDAY_DONE_SONG || '').trim();
+        if (song) broadcastEvent('music_play', buildMusicPlaySsePayload(song, 'clip'));
       } else if (mode === 'ask') {
         const offer = await buildCelebrationOffer();
         Object.assign(json, offer);
@@ -316,7 +323,11 @@ voiceRouter.post('/command', async (req, res, next) => {
 voiceRouter.post('/celebration', async (req, res, next) => {
   try {
     const accept = Boolean(req.body?.accept);
+    const song = (process.env.FRIDAY_DONE_SONG || '').trim();
     const result = await resolveCelebration(req.log, accept);
+    if (accept && result.played && song) {
+      broadcastEvent('music_play', buildMusicPlaySsePayload(song, 'clip'));
+    }
     res.json({ ok: true, ...result });
   } catch (e) {
     next(e);

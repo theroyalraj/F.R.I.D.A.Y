@@ -71,7 +71,8 @@ export async function runTask(body, reqLog, options = {}) {
   }
 
   if (action === 'play_music' && typeof body?.query === 'string' && body.query.trim()) {
-    const r = await playMusicSearch(body.query.trim());
+    const q = body.query.trim();
+    const r = await playMusicSearch(q);
     reqLog.info({ mode: 'play_music', ok: r.ok, ms: Date.now() - t0 }, 'task done');
     return {
       status: 200,
@@ -80,6 +81,7 @@ export async function runTask(body, reqLog, options = {}) {
         mode: 'play_music',
         userId,
         correlationId,
+        musicQuery: q,
         summary: r.detail,
       },
     };
@@ -96,6 +98,7 @@ export async function runTask(body, reqLog, options = {}) {
         mode: 'play_music',
         userId,
         correlationId,
+        musicQuery: playQuery,
         summary: r.detail,
       },
     };
