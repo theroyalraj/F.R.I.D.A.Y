@@ -26,6 +26,7 @@ import { openAiTtsApiKey, openAiTtsConfigured, synthesizeOpenAiMp3 } from './ope
 import { createPerceptionRouter } from './perceptionRoutes.js';
 import { createSettingsRouter } from './settingsRoutes.js';
 import { createAutomationRouter } from './automationRoutes.js';
+import { createTodosRouter } from './todosRoutes.js';
 import { perceptionDbConfigured, perceptionDbHealth } from './perceptionDb.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -172,7 +173,8 @@ function shouldIgnoreRequestLog(req) {
     p === '/voice/ping' ||
     p === '/voice/stream' ||
     p === '/favicon.svg' ||
-    p === '/favicon.ico'
+    p === '/favicon.ico' ||
+    p.startsWith('/todos')
   );
 }
 
@@ -494,22 +496,33 @@ app.get('/friday', (_req, res) => {
   res.sendFile(path.join(publicDir, 'voice.html'));
 });
 
+// React SPA routes — serve React app for /friday/listen
+// Falls back to index.html for client-side routing
+const reactDistDir = path.join(__dirname, '../dist');
+const reactIndexPath = path.join(reactDistDir, 'index.html');
+
 app.get('/friday/listen', (_req, res) => {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   res.setHeader('Pragma', 'no-cache');
-  res.sendFile(path.join(publicDir, 'listen.html'));
+  res.setHeader('Content-Type', 'text/html');
+
+  // Try to serve built React app, fallback to vanilla listen.html during development
+  const builtPath = reactIndexPath;
+  if (existsSync(builtPath)) {
+    res.sendFile(builtPath);
+  } else {
+    // Fallback to vanilla listen.html if React app is not built
+    res.sendFile(path.join(publicDir, 'listen.html'));
+  }
 });
 
-app.get('/listen.css', (_req, res) => {
-  res.setHeader('Content-Type', 'text/css');
-  res.setHeader('Cache-Control', 'public, max-age=3600');
-  res.sendFile(path.join(publicDir, 'listen.css'));
-});
-
-app.get('/listen.js', (_req, res) => {
-  res.setHeader('Content-Type', 'application/javascript');
-  res.setHeader('Cache-Control', 'public, max-age=3600');
-  res.sendFile(path.join(publicDir, 'listen.js'));
+// Serve React app assets from dist/ if available
+app.get('/listen*', (req, res, next) => {
+  const assetPath = path.join(reactDistDir, req.path);
+  if (existsSync(assetPath) && !assetPath.includes('listen.html')) {
+    return res.sendFile(assetPath);
+  }
+  next();
 });
 
 app.get('/jarvis', (_req, res) => {
@@ -528,6 +541,7 @@ app.post('/task', auth, async (req, res, next) => {
 app.use('/perception', createPerceptionRouter(auth));
 app.use('/settings', createSettingsRouter(auth));
 app.use('/automation', createAutomationRouter(auth));
+app.use('/todos', createTodosRouter(broadcastEvent));
 
 app.use((err, req, res, _next) => {
   req.log?.error({ err }, 'unhandled route error');

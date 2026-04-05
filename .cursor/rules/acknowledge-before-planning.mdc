@@ -9,13 +9,12 @@ Before thinking about or presenting any plan, **always** narrate an acknowledgem
 
 ## ⚡ Zero-Delay Async Pattern — ALWAYS use this
 
-**Fire pick-session-voice + speak acknowledgement IN THE SAME PARALLEL BATCH as your first real work tool calls.**
+**Fire speak acknowledgement IN THE SAME PARALLEL BATCH as your first real work tool calls.**
 
-Do NOT make them a sequential prerequisite that blocks work from starting. Both voice calls use `block_until_ms: 0` (fire-and-forget) — they run simultaneously alongside `Read`, `Glob`, `Shell`, or any other work you start in the same message.
+Do NOT make it a sequential prerequisite that blocks work from starting. The speak call uses `block_until_ms: 0` (fire-and-forget) — it runs simultaneously alongside `Read`, `Glob`, `Shell`, or any other work you start in the same message.
 
 ```
 Message N (single response):
-  ├── Shell: pick-session-voice.py          ← block_until_ms: 0  (no wait)
   ├── Shell: friday-speak.py "Got it…"      ← block_until_ms: 0  (no wait)
   ├── Read: the relevant file               ← starts NOW, not after speak
   └── Glob: find related files             ← starts NOW, not after speak
@@ -23,43 +22,40 @@ Message N (single response):
 
 This is zero sequential overhead. The voice fires async and work starts at the same time.
 
-## Required calls (every response, block_until_ms: 0)
+## Required call (every response, block_until_ms: 0)
 
 ```powershell
-# Assign sticky voice for this chat session (no-op if already assigned)
-cd d:\code\openclaw; python skill-gateway/scripts/pick-session-voice.py
-
-# Speak acknowledgement (uses session voice automatically). Bypass is required so you are heard while Cursor is focused.
+# Speak acknowledgement — session voice is auto-loaded from .session-voice.json by friday-speak.py.
+# If no session file exists, friday-speak.py auto-triggers pick-session-voice.py in the background.
+# NO separate pick-session-voice.py call needed — everything is one async fire-and-forget.
 cd d:\code\openclaw; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "Got it. [one sentence restatement of the task]."
 ```
 
-Both must have `block_until_ms: 0`. Both can be in the same message as real work tool calls — that's the point.
+Must have `block_until_ms: 0`. Can be in the same message as real work tool calls — that's the point.
 
 ## Example — correct async batch
 
 ```
-Tool call 1: Shell pick-session-voice.py      block_until_ms: 0
-Tool call 2: Shell friday-speak.py "Got it…"  block_until_ms: 0
-Tool call 3: Read d:\code\openclaw\some-file  (reads immediately, no wait)
-Tool call 4: Glob **/*.py                     (searches immediately, no wait)
+Tool call 1: Shell friday-speak.py "Got it…"  block_until_ms: 0
+Tool call 2: Read d:\code\openclaw\some-file  (reads immediately, no wait)
+Tool call 3: Glob **/*.py                     (searches immediately, no wait)
 ```
 
-All four tool calls fire in the same message. Voice narration and actual work happen in parallel.
+All tool calls fire in the same message. Voice narration and actual work happen in parallel.
 
 ## Session voice persistence
 
-`pick-session-voice.py` saves the main chat voice to `.session-voice.json` (default: `FRIDAY_TTS_VOICE` from the environment — Emma multilingual by default). Sticky voices in `FRIDAY_TTS_VOICE_BLOCK` are ignored and replaced. Every subsequent `friday-speak.py` in this chat uses that sticky voice for acknowledgements and status unless you opt into random main voices via `FRIDAY_TTS_MAIN_RANDOM_VOICES=true`.
+`friday-speak.py` reads `.session-voice.json` on startup. If the file doesn't exist, it auto-spawns `pick-session-voice.py` in the background (non-blocking) to create it. **You never need to call `pick-session-voice.py` separately.**
 
-**Task subagents (explore / shell / generalPurpose):** use a separate adult voice from the subagent pool — never Ana or any child/teen voice. In **every** Shell that runs pick or speak from a subagent, prefix the session kind (PowerShell):
+**Task subagents (explore / shell / generalPurpose):** use a separate adult voice from the subagent pool — never Ana or any child/teen voice. Just set the session env:
 
 ```powershell
-cd d:\code\openclaw; $env:FRIDAY_TTS_SESSION='subagent'; python skill-gateway/scripts/pick-session-voice.py --subagent
 cd d:\code\openclaw; $env:FRIDAY_TTS_SESSION='subagent'; $env:FRIDAY_TTS_PRIORITY='1'; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "Got it. …"
 ```
 
 `FRIDAY_TTS_PRIORITY=1` is **mandatory** for all subagent speak calls — it pre-empts any ambient TTS or competing lock so subagents are always heard instead of silently queuing behind other speech.
 
-The parent chat keeps using the main commands above **without** `FRIDAY_TTS_SESSION` or `--subagent`.
+The parent chat keeps using the main commands above **without** `FRIDAY_TTS_SESSION`.
 
 ## If you have clarifying questions
 

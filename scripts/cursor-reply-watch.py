@@ -25,6 +25,19 @@ Optional:
   FRIDAY_CURSOR_REPLY_VOICE — Edge voice id for main transcript TTS (see pick-session-voice --cursor-reply)
   CURSOR_TRANSCRIPTS_DIR — override path to agent-transcripts
 
+Thinking TTS pacing (sentence-by-sentence, avoids one rushed blob):
+  FRIDAY_CURSOR_THINKING_TTS_RATE — Edge rate for thinking only (default -5% vs repo default +7.5%)
+  FRIDAY_CURSOR_THINKING_PAUSE_MIN / FRIDAY_CURSOR_THINKING_PAUSE_MAX — seconds between sentences (default 0.35–0.85)
+  FRIDAY_CURSOR_THINKING_OPENER_CHANCE — 0–1 chance to prefix first sentence with a soft "Hmm / So —" style lead-in (default 0.35)
+  FRIDAY_CURSOR_THINKING_MAX_CHUNK_CHARS — merge/split target width (default 300)
+
+JSONL thinking does not set FRIDAY_TTS_THINKING — that flag enables a separate singleton in friday-speak that
+drops audio when busy (e.g. live agent thinking narration). Watcher thinking only needs the global TTS lock.
+
+Incremental thinking (same line growing across JSONL updates):
+  Thinking blocks may carry final/partial flags — we only speak immediately when final is true (or partial is explicitly false).
+  When flags are missing, we buffer and speak once after FRIDAY_CURSOR_THINKING_DEBOUNCE_SEC of no updates (default 0.85).
+
 Run:  python scripts/cursor-reply-watch.py
 """
 
@@ -33,9 +46,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import random
 import re
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -126,42 +141,84 @@ def _assistant_text_from_line(line: str) -> str:
     return "\n\n".join(parts).strip()
 
 
-def _thinking_text_from_line(line: str) -> str:
-    """Extract thinking/reasoning content from an assistant JSONL line.
+def _thinking_parse_line(line: str) -> tuple[str, str]:
+    """Extract thinking from one assistant JSONL line.
 
-    Cursor extended-thinking appears as either:
-      - {"type": "thinking", "thinking": "..."} blocks in the content array
-      - Inline in text blocks before [REDACTED] markers (the visible pre-redaction text)
-    Both are captured here. Returns empty string if nothing found or already redacted.
+    Returns (raw_text, stream_kind):
+      - stream_kind ``final`` — explicit end of thinking; speak now (after strip_to_prose + hash dedup).
+      - ``partial`` — streaming chunk; buffer and wait for ``final`` or debounce idle.
+      - ``unknown`` — no final/partial hints; buffer and coalesce by prefix + debounce.
+
+    Sources: ``type: thinking`` blocks; text before ``[REDACTED]`` (buffered like ``unknown`` — it often grows line-by-line).
+    Block/message keys honoured: ``final`` (bool), ``partial`` (bool).
     """
     try:
         obj = json.loads(line)
     except Exception:
-        return ""
+        return "", ""
     if obj.get("role") != "assistant":
-        return ""
+        return "", ""
     msg = obj.get("message") or {}
     content = msg.get("content")
     if not isinstance(content, list):
-        return ""
-    parts: list[str] = []
+        return "", ""
+
+    thinking_parts: list[str] = []
+    redacted_parts: list[str] = []
+    final_true = False
+    final_false = False
+    partial_true = False
+    partial_false = False
+
     for block in content:
         if not isinstance(block, dict):
             continue
         btype = block.get("type", "")
-        # Explicit thinking blocks (Anthropic extended-thinking format)
         if btype == "thinking":
             t = block.get("thinking") or block.get("text") or ""
             if isinstance(t, str) and t.strip() and not _is_fully_redacted(t):
-                parts.append(t.strip())
-        # Text blocks that contain pre-redaction thinking (visible text before [REDACTED])
+                thinking_parts.append(t.strip())
+            fv = block.get("final")
+            if fv is True:
+                final_true = True
+            elif fv is False:
+                final_false = True
+            pv = block.get("partial")
+            if pv is True:
+                partial_true = True
+            elif pv is False:
+                partial_false = True
         elif btype == "text":
             t = block.get("text") or ""
             if isinstance(t, str) and "[REDACTED]" in t:
                 before = t.split("[REDACTED]")[0].strip()
                 if before and len(before) > 30:
-                    parts.append(before)
-    return "\n\n".join(parts).strip()
+                    redacted_parts.append(before)
+
+    mf = msg.get("final")
+    if mf is True:
+        final_true = True
+    elif mf is False:
+        final_false = True
+
+    raw_thinking = "\n\n".join(thinking_parts).strip()
+    raw_redacted = "\n\n".join(redacted_parts).strip()
+
+    if raw_thinking:
+        if final_true:
+            kind = "final"
+        elif final_false or partial_true:
+            kind = "partial"
+        elif partial_false:
+            kind = "final"
+        else:
+            kind = "unknown"
+        return raw_thinking, kind
+
+    if raw_redacted:
+        return raw_redacted, "unknown"
+
+    return "", ""
 
 
 def _is_fully_redacted(text: str) -> bool:
@@ -268,12 +325,45 @@ def _strip_env_var_tokens(s: str) -> str:
     return _RE_ENV_VAR_TOKEN.sub("", s)
 
 
+# ── File-path to speech conversion (keep file mentions but make them speakable) ─
+_FRIENDLY_FILE_NAMES: dict[str, str] = {
+    "friday-speak.py": "the speak script",
+    "friday-listen.py": "the listen script",
+    "friday-ambient.py": "the ambient script",
+    "friday-play.py": "the play script",
+    "friday-music-scheduler.py": "the music scheduler",
+    "cursor-reply-watch.py": "the cursor reply watcher",
+    "gmail-watch.py": "the email watcher",
+    "pick-session-voice.py": "the voice picker",
+    "friday_speaker.py": "the speaker module",
+    "friday-speak": "the speak script",
+    "fridaySpeak.js": "the speak bridge",
+    "fridayPlay.js": "the play bridge",
+    "server.js": "the server",
+    ".env": "the env file",
+    "docker-compose.yml": "docker compose",
+}
+
+
+def _file_to_speech(match: re.Match) -> str:
+    """Convert a file path match to a speakable name."""
+    full = match.group(0)
+    basename = full.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    friendly = _FRIENDLY_FILE_NAMES.get(basename)
+    if friendly:
+        return friendly
+    name, _, ext = basename.rpartition(".")
+    if ext and name:
+        return f"{name} dot {ext}"
+    return basename
+
+
 def _narration_enabled() -> bool:
     return _env_bool("FRIDAY_CURSOR_NARRATION", False)
 
 
 def strip_to_prose(raw: str) -> str:
-    """Remove code, paths, commands, markdown noise — keep only plain English reasoning."""
+    """Remove code noise, convert file paths to speakable names — keep reasoning prose."""
     if not raw or not raw.strip():
         return ""
     s = raw
@@ -281,8 +371,8 @@ def strip_to_prose(raw: str) -> str:
     s = _RE_FENCED.sub("", s)
     s = _RE_INLINE_CODE.sub("", s)
     s = _RE_URL.sub("", s)
-    s = _RE_WIN_PATH.sub("", s)
-    s = _RE_SLASH_FILE.sub("", s)
+    s = _RE_WIN_PATH.sub(_file_to_speech, s)
+    s = _RE_SLASH_FILE.sub(_file_to_speech, s)
     s = _RE_MD_HEADER.sub("", s)
     s = _RE_MD_BOLD.sub(r"\1", s)
     s = _RE_MD_ITALIC.sub(r"\1", s)
@@ -334,6 +424,218 @@ def _speak_subagent(text: str) -> None:
         priority=True,
         bypass_cursor_defer=True,
     )
+
+
+_THINKING_OPENERS = (
+    # Reflective / analytical
+    "Hmm. ",
+    "Interesting — ",
+    "Actually — ",
+    "Wait — ",
+    "Hang on — ",
+    "Hold on a second — ",
+    "That's a good question — ",
+    "Now that I look at this — ",
+    "Okay, this is nuanced — ",
+    "There's a subtlety here — ",
+    "This is worth unpacking — ",
+    "So here's what's happening — ",
+    "Let me reason through this — ",
+    "Okay, thinking this through — ",
+    "The thing to notice here is — ",
+    "This is more involved than it looks — ",
+    "Let me connect the dots here — ",
+    # Confident / knowledgeable
+    "Right. ",
+    "So — ",
+    "Now — ",
+    "Right, so — ",
+    "Okay, so — ",
+    "Here's the thing — ",
+    "The key insight is — ",
+    "What matters here is — ",
+    "From what I can tell — ",
+    "Based on what I'm seeing — ",
+    "If I'm reading this correctly — ",
+    "The way this works is — ",
+    "So the pattern here is — ",
+    "What's going on under the hood is — ",
+    # Curious / exploratory
+    "Let me think — ",
+    "Let me see — ",
+    "Let me check — ",
+    "Let me dig into this — ",
+    "Let me trace through this — ",
+    "Okay, pulling this apart — ",
+    "Let me walk through the logic — ",
+    "Bear with me on this one — ",
+    "I want to make sure I get this right — ",
+    "Okay, working through this step by step — ",
+    # Casual / human
+    "Okay — ",
+    "Alright — ",
+    "Right then — ",
+    "So look — ",
+    "Okay, here's my read — ",
+    "So basically — ",
+    "Yeah, so — ",
+    "Alright, so — ",
+    "Let me break this down — ",
+    "Okay, let me lay this out — ",
+    # Cheeky / roast
+    "Oh boy. ",
+    "Oh no. ",
+    "Wow, okay — ",
+    "Who wrote this? ",
+    "Yikes — ",
+    "Well that's creative — ",
+    "Brave choice — ",
+    "Oh, we're doing this are we — ",
+    "Someone was feeling adventurous — ",
+    "This is a cry for help — ",
+    "Bold strategy, let's see if it pays off — ",
+    "I have questions. Many questions — ",
+    "Tell me you didn't test this — ",
+    "I'm not mad, I'm just disappointed — ",
+    "Whoever did this owes me an explanation — ",
+    "This has big 'it works on my machine' energy — ",
+    "Ah yes, the classic 'fix it later' approach — ",
+    "I see someone chose violence today — ",
+    "Pain. Pure pain — ",
+    "This code has a certain chaotic energy — ",
+    # Meme / internet culture
+    "It's giving spaghetti code — ",
+    "First time? ",
+    "Skill issue detected — ",
+    "This ain't it, chief — ",
+    "We need to talk — ",
+    "So anyway, I started blasting — ",
+    "Confused screaming — ",
+    "Task failed successfully — ",
+    "Not gonna lie — ",
+    "Top ten anime betrayals — ",
+    "How do I even begin — ",
+    "Bro really said 'trust me' — ",
+    "You see what happened was — ",
+    "Ladies and gentlemen, we got him — ",
+    "Outstanding move — ",
+    "I'm going to pretend I didn't see that — ",
+    "Modern problems require modern solutions — ",
+    "That's rough, buddy — ",
+    "They don't know — ",
+    "Big brain time — ",
+)
+
+
+def _env_float(key: str, default: float) -> float:
+    raw = os.environ.get(key, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _wrap_oversized_chunk(chunk: str, lim: int) -> list[str]:
+    """Split a long chunk at spaces so no fragment exceeds lim characters."""
+    chunk = chunk.strip()
+    if not chunk:
+        return []
+    if len(chunk) <= lim:
+        return [chunk]
+    out: list[str] = []
+    rest = chunk
+    while rest:
+        if len(rest) <= lim:
+            out.append(rest.strip())
+            break
+        break_at = rest.rfind(" ", 0, lim)
+        if break_at < max(40, lim // 3):
+            break_at = lim
+        piece = rest[:break_at].strip()
+        rest = rest[break_at:].strip()
+        if piece:
+            out.append(piece)
+    return out
+
+
+def _split_thinking_into_chunks(text: str, *, max_chunk_chars: int) -> list[str]:
+    """Split thinking prose on sentence boundaries, merge small bits, cap chunk size."""
+    text = text.strip()
+    if not text:
+        return []
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?…])\s+", text) if s.strip()]
+    if not sentences:
+        sentences = [text]
+    chunks: list[str] = []
+    buf = ""
+    for s in sentences:
+        if not buf:
+            buf = s
+        elif len(buf) + 1 + len(s) <= max_chunk_chars:
+            buf = f"{buf} {s}"
+        else:
+            chunks.extend(_wrap_oversized_chunk(buf, max_chunk_chars))
+            buf = s
+    if buf:
+        chunks.extend(_wrap_oversized_chunk(buf, max_chunk_chars))
+    return [c for c in chunks if c.strip()]
+
+
+def _speak_thinking_paced(full_text: str) -> None:
+    """Speak extended thinking one sentence-sized chunk at a time with pauses (human pacing)."""
+    from friday_speaker import speaker
+
+    max_chars = int(_env_float("FRIDAY_CURSOR_THINKING_MAX_CHUNK_CHARS", 300))
+    max_chars = max(80, min(max_chars, 1200))
+    chunks = _split_thinking_into_chunks(full_text, max_chunk_chars=max_chars)
+    if not chunks:
+        return
+
+    thinking_rate = os.environ.get("FRIDAY_CURSOR_THINKING_TTS_RATE", "-5%").strip() or "-5%"
+
+    # Tiny single blip: blocking + same rate as paced path (no FRIDAY_TTS_THINKING — avoids singleton skip).
+    if len(chunks) == 1 and len(chunks[0]) < 160:
+        speaker.speak_blocking(
+            chunks[0].strip(),
+            session="subagent",
+            priority=True,
+            bypass_cursor_defer=True,
+            rate=thinking_rate,
+        )
+        return
+
+    pause_lo = _env_float("FRIDAY_CURSOR_THINKING_PAUSE_MIN", 0.35)
+    pause_hi = _env_float("FRIDAY_CURSOR_THINKING_PAUSE_MAX", 0.85)
+    if pause_hi < pause_lo:
+        pause_lo, pause_hi = pause_hi, pause_lo
+    opener_chance = _env_float("FRIDAY_CURSOR_THINKING_OPENER_CHANCE", 0.35)
+    if opener_chance > 1.0:
+        opener_chance = min(opener_chance / 100.0, 1.0)
+
+    def run() -> None:
+        for i, raw in enumerate(chunks):
+            c = raw.strip()
+            if not c:
+                continue
+            if i == 0 and random.random() < opener_chance:
+                c = random.choice(_THINKING_OPENERS) + c
+            speaker.speak_blocking(
+                c,
+                session="subagent",
+                priority=True,
+                bypass_cursor_defer=True,
+                rate=thinking_rate,
+            )
+            if i >= len(chunks) - 1:
+                break
+            gap = random.uniform(pause_lo, pause_hi)
+            if c.rstrip().endswith("?"):
+                gap += random.uniform(0.12, 0.38)
+            time.sleep(gap)
+
+    threading.Thread(target=run, daemon=True, name="cursor-thinking-tts").start()
 
 
 def _ensure_cursor_reply_voice() -> None:
@@ -389,6 +691,91 @@ def _maybe_seed_chat_id_if_single_transcript() -> None:
 
 def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def _thinking_debounce_sec() -> float:
+    v = _env_float("FRIDAY_CURSOR_THINKING_DEBOUNCE_SEC", 0.85)
+    return max(0.15, min(v, 30.0))
+
+
+def _thinking_speak_once(thinking_prose: str, spoken_hashes: set) -> None:
+    h = _content_hash(thinking_prose)
+    if h in spoken_hashes:
+        return
+    spoken_hashes.add(h)
+    print(
+        f"cursor-reply-watch: [thinking] speaking {len(thinking_prose)} chars (paced)",
+        flush=True,
+    )
+    _speak_thinking_paced(thinking_prose)
+
+
+def _thinking_buffer_update(
+    st: dict,
+    thinking_prose: str,
+    *,
+    now: float,
+    spoken_hashes: set,
+) -> None:
+    """Incremental streaming: speak NEW sentences as they arrive, not all at once.
+
+    Tracks how much text has been spoken so far (``thinking_spoken_len``).
+    When new prose extends the previous buffer, extract unseen tail, split into
+    sentences, and speak ready ones immediately (keeping the last partial sentence
+    buffered in case it's still being appended).
+    """
+    prev = (st.get("thinking_pending") or "").strip()
+    spoken_len = st.get("thinking_spoken_len", 0)
+
+    if prev and not thinking_prose.startswith(prev):
+        tail = prev[spoken_len:].strip()
+        if tail:
+            _thinking_speak_once(tail, spoken_hashes)
+        st["thinking_spoken_len"] = 0
+        spoken_len = 0
+
+    st["thinking_pending"] = thinking_prose
+
+    unseen = thinking_prose[spoken_len:].strip()
+    if not unseen:
+        st["thinking_debounce_at"] = now + _thinking_debounce_sec()
+        return
+
+    parts = re.split(r"(?<=[.!?…])\s+", unseen)
+    if len(parts) <= 1:
+        st["thinking_debounce_at"] = now + _thinking_debounce_sec()
+        return
+
+    ready = parts[:-1]
+    ready_text = " ".join(ready).strip()
+    if ready_text:
+        _thinking_speak_once(ready_text, spoken_hashes)
+        st["thinking_spoken_len"] = spoken_len + len(unseen) - len(parts[-1])
+
+    st["thinking_debounce_at"] = now + _thinking_debounce_sec()
+
+
+def _thinking_clear_pending(st: dict) -> None:
+    st.pop("thinking_pending", None)
+    st.pop("thinking_debounce_at", None)
+    st.pop("thinking_spoken_len", None)
+
+
+def _flush_thinking_debounce(st: dict, now: float) -> None:
+    """If pending thinking has been idle long enough, speak remaining tail."""
+    pend = (st.get("thinking_pending") or "").strip()
+    if not pend:
+        _thinking_clear_pending(st)
+        return
+    dead = st.get("thinking_debounce_at")
+    if dead is None or now < dead:
+        return
+    spoken_hashes = st["spoken_hashes"]
+    spoken_len = st.get("thinking_spoken_len", 0)
+    tail = pend[spoken_len:].strip()
+    if tail:
+        _thinking_speak_once(tail, spoken_hashes)
+    _thinking_clear_pending(st)
 
 
 def _merge_new_paths(state_map: dict[str, dict], *, seek_end: bool) -> None:
@@ -500,68 +887,82 @@ def main() -> None:
             if sz < off:
                 off = 0
                 st["carry"] = ""
-            if sz == off:
-                continue
-            st["last_activity"] = now
-            any_recently_active = True
-            try:
-                with p.open("r", encoding="utf-8", errors="replace") as f:
-                    f.seek(off)
-                    chunk = f.read()
-                st["offset"] = sz
-            except OSError:
-                continue
-
-            data = st["carry"] + chunk
-            lines = data.split("\n")
-            st["carry"] = lines.pop() if lines else ""
-            folder_uuid = p.parent.name
-            spoken_hashes: set = st["spoken_hashes"]
-
-            for line in lines:
-                if not line.strip():
+            if sz != off:
+                st["last_activity"] = now
+                any_recently_active = True
+                try:
+                    with p.open("r", encoding="utf-8", errors="replace") as f:
+                        f.seek(off)
+                        chunk = f.read()
+                    st["offset"] = sz
+                except OSError:
                     continue
 
-                if not main_uuid:
-                    continue
+                data = st["carry"] + chunk
+                lines = data.split("\n")
+                st["carry"] = lines.pop() if lines else ""
+                folder_uuid = p.parent.name
+                spoken_hashes: set = st["spoken_hashes"]
 
-                is_main = bool(folder_uuid == main_uuid)
-                is_sub = not is_main
+                for line in lines:
+                    if not line.strip():
+                        continue
 
-                # --- thinking capture (runs even when reply TTS is off) ---
-                if speak_thinking:
-                    thinking_raw = _thinking_text_from_line(line)
-                    if thinking_raw:
-                        thinking_prose = strip_to_prose(thinking_raw)
-                        if thinking_prose:
-                            h = _content_hash(thinking_prose)
-                            if h not in spoken_hashes:
-                                spoken_hashes.add(h)
-                                print(f"cursor-reply-watch: [thinking] speaking {len(thinking_prose)} chars", flush=True)
-                                _speak_subagent(thinking_prose)
+                    if not main_uuid:
+                        continue
 
-                # --- regular reply TTS ---
-                raw_text = _assistant_text_from_line(line)
-                if not raw_text:
-                    continue
-                prose = strip_to_prose(raw_text)
-                if not prose:
-                    continue
+                    is_main = bool(folder_uuid == main_uuid)
+                    is_sub = not is_main
 
-                h = _content_hash(prose)
-                if h in spoken_hashes:
-                    continue
-                spoken_hashes.add(h)
+                    # --- thinking capture (runs even when reply TTS is off) ---
+                    if speak_thinking:
+                        thinking_raw, stream_kind = _thinking_parse_line(line)
+                        if thinking_raw:
+                            thinking_prose = strip_to_prose(thinking_raw)
+                            if thinking_prose:
+                                if stream_kind == "final":
+                                    spoken_len = st.get("thinking_spoken_len", 0)
+                                    tail = thinking_prose[spoken_len:].strip()
+                                    _thinking_clear_pending(st)
+                                    if tail:
+                                        _thinking_speak_once(
+                                            tail, spoken_hashes
+                                        )
+                                else:
+                                    _thinking_buffer_update(
+                                        st,
+                                        thinking_prose,
+                                        now=now,
+                                        spoken_hashes=spoken_hashes,
+                                    )
 
-                if len(spoken_hashes) > _SPOKEN_HASHES_MAX:
-                    to_remove = list(spoken_hashes)[:_SPOKEN_HASHES_MAX // 2]
-                    for old_h in to_remove:
-                        spoken_hashes.discard(old_h)
+                    # --- regular reply TTS ---
+                    raw_text = _assistant_text_from_line(line)
+                    if not raw_text:
+                        continue
+                    prose = strip_to_prose(raw_text)
+                    if not prose:
+                        continue
 
-                if is_main and speak_main:
-                    _speak_main(prose)
-                elif is_sub and speak_sub:
-                    _speak_subagent(prose)
+                    h = _content_hash(prose)
+                    if h in spoken_hashes:
+                        continue
+                    spoken_hashes.add(h)
+
+                    if len(spoken_hashes) > _SPOKEN_HASHES_MAX:
+                        to_remove = list(spoken_hashes)[:_SPOKEN_HASHES_MAX // 2]
+                        for old_h in to_remove:
+                            spoken_hashes.discard(old_h)
+
+                    if is_main and speak_main:
+                        _speak_main(prose)
+                    elif is_sub and speak_sub:
+                        _speak_subagent(prose)
+
+        if speak_thinking:
+            now_flush = time.monotonic()
+            for st in state_map.values():
+                _flush_thinking_debounce(st, now_flush)
 
         # Adaptive polling: faster when transcripts are actively being written
         if any_recently_active or any(

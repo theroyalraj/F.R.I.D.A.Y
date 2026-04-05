@@ -34,16 +34,34 @@ export function autoPlayEnabled(env = process.env) {
  * Play a song fire-and-forget via friday-play.py → yt-dlp → Echo Dot.
  * @param {string} searchPhrase   e.g. "Back in Black AC DC"
  * @param {import('pino').Logger} [log]
+ * @param {{ onClose?: () => void }} [opts]  fired when friday-play.py exits (song finished or error)
  */
-export function playLocalSong(searchPhrase, log) {
-  if (!fridayPlayEnabled()) return;
+export function playLocalSong(searchPhrase, log, opts = {}) {
+  const { onClose } = opts;
+  let closeFired = false;
+
+  const fireClose = () => {
+    if (closeFired) return;
+    closeFired = true;
+    try {
+      onClose?.();
+    } catch (e) {
+      log?.warn({ err: String(e?.message || e) }, 'fridayPlay: onClose threw');
+    }
+  };
+
+  if (!fridayPlayEnabled()) {
+    return;
+  }
   if (!autoPlayEnabled()) {
     log?.info('autoPlay disabled — skipping auto song');
     return;
   }
 
   const safePhrase = String(searchPhrase || '').trim();
-  if (!safePhrase) return;
+  if (!safePhrase) {
+    return;
+  }
 
   const child = spawn(pythonChildExecutable(), [PLAY_SCRIPT, safePhrase], {
     env: {
@@ -66,5 +84,11 @@ export function playLocalSong(searchPhrase, log) {
 
   child.on('error', (e) => {
     log?.warn({ err: String(e.message) }, 'fridayPlay: spawn failed');
+    fireClose();
+  });
+
+  child.on('close', (_code) => {
+    log?.debug({ code: _code }, 'fridayPlay: friday-play.py exited');
+    fireClose();
   });
 }

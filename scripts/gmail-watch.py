@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """
-gmail-watch.py — Long-running IMAP daemon that watches for new emails and
-narrates them at highest TTS priority (pre-empts all other speech).
+gmail-watch.py — Long-running IMAP daemon that watches for new emails,
+summarizes them with Claude, speaks a rich notification, and creates
+todos/reminders/calendar events in OpenClaw.
 
 How it works:
   1. Connects to Gmail IMAP, selects INBOX (read-only).
   2. Snapshots the current UNSEEN UIDs on startup (does not announce old mail).
   3. Polls every FRIDAY_EMAIL_POLL_SEC (default 30) for new UNSEEN UIDs.
-  4. For each new UID: fetches sender + subject, speaks via friday-speak.py
-     with FRIDAY_TTS_PRIORITY=1 (pre-empts ambient, music, and any other TTS).
+  4. For each new UID:
+       a. Fetches full body.
+       b. Calls email-analyze.py (Claude Haiku) for summary + action items.
+       c. Speaks a rich TTS notification (sender, subject, summary, actions).
+       d. POSTs any todos/reminders to pc-agent /todos API.
+       e. If a meeting is detected, creates a calendar .ics event.
   5. Reconnects automatically on IMAP errors / dropped connections.
 
 Env (in .env):
@@ -18,6 +23,8 @@ Env (in .env):
   FRIDAY_EMAIL_POLL_SEC     polling interval in seconds (default 30)
   FRIDAY_EMAIL_FOLDERS      comma-separated IMAP folders (default INBOX)
   FRIDAY_EMAIL_NOTIFY_VOICE voice override for email announcements (blank = session voice)
+  FRIDAY_EMAIL_ANALYZE      true/false — enable AI summary+actions (default true)
+  PC_AGENT_URL              pc-agent base URL (default http://127.0.0.1:3847)
 
 Run:
   python scripts/gmail-watch.py
@@ -28,11 +35,15 @@ from __future__ import annotations
 import email
 import email.header
 import imaplib
+import json
 import os
 import platform
 import subprocess
 import sys
+import textwrap
 import time
+import urllib.request
+import urllib.error
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
@@ -50,6 +61,9 @@ if _ENV_FILE.exists():
             os.environ[k] = v
 
 _SPEAK_SCRIPT = _REPO_ROOT / "skill-gateway" / "scripts" / "friday-speak.py"
+_ANALYZE_SCRIPT = _REPO_ROOT / "scripts" / "email-analyze.py"
+_CALENDAR_SCRIPT = _REPO_ROOT / "scripts" / "create-calendar-event.py"
+
 GMAIL_ADDRESS = os.environ.get("GMAIL_ADDRESS", "").strip()
 GMAIL_APP_PWD = os.environ.get("GMAIL_APP_PWD", "").strip().replace(" ", "")
 IMAP_HOST = "imap.gmail.com"
@@ -59,6 +73,7 @@ POLL_SEC = max(10, int(os.environ.get("FRIDAY_EMAIL_POLL_SEC", "30")))
 FOLDERS = [f.strip() for f in os.environ.get("FRIDAY_EMAIL_FOLDERS", "INBOX").split(",") if f.strip()]
 NOTIFY_VOICE = os.environ.get("FRIDAY_EMAIL_NOTIFY_VOICE", "").strip()
 USER_NAME = os.environ.get("FRIDAY_USER_NAME", "").strip() or "sir"
+PC_AGENT_URL = os.environ.get("PC_AGENT_URL", "http://127.0.0.1:3847").rstrip("/")
 
 
 def _env_bool(key: str, default: bool = True) -> bool:
@@ -66,6 +81,9 @@ def _env_bool(key: str, default: bool = True) -> bool:
     if raw == "":
         return default
     return raw in ("1", "true", "yes", "on")
+
+
+EMAIL_ANALYZE = _env_bool("FRIDAY_EMAIL_ANALYZE", True)
 
 
 def _decode_header(raw: str) -> str:
@@ -120,9 +138,190 @@ def _fetch_envelope(conn: imaplib.IMAP4_SSL, uid: str) -> dict:
     }
 
 
-def _speak_email(sender: str, subject: str) -> None:
+def _fetch_full_body(conn: imaplib.IMAP4_SSL, uid: str) -> str:
+    """Fetch full RFC822 message and extract plain text body (up to 4000 chars)."""
+    try:
+        _, data = conn.uid("fetch", uid.encode(), "(RFC822)")
+        if not data or not data[0] or not isinstance(data[0], tuple):
+            return ""
+        msg = email.message_from_bytes(data[0][1])
+        body = ""
+        if msg.is_multipart():
+            for part in msg.walk():
+                ct = part.get_content_type()
+                cd = str(part.get("Content-Disposition", ""))
+                if ct == "text/plain" and "attachment" not in cd:
+                    body = part.get_payload(decode=True).decode(
+                        part.get_content_charset() or "utf-8", errors="replace"
+                    )
+                    break
+        else:
+            body = msg.get_payload(decode=True).decode(
+                msg.get_content_charset() or "utf-8", errors="replace"
+            )
+        return textwrap.shorten(body.strip(), width=4000, placeholder="… [truncated]")
+    except Exception as exc:
+        print(f"[gmail-watch] body fetch failed: {exc}", file=sys.stderr)
+        return ""
+
+
+def _analyze_email(envelope: dict, body: str) -> dict | None:
+    """Call email-analyze.py to get Claude's summary + actions. Returns None on failure."""
+    if not EMAIL_ANALYZE or not _ANALYZE_SCRIPT.exists():
+        return None
+    payload = json.dumps(
+        {
+            "from": envelope.get("from", ""),
+            "subject": envelope.get("subject", ""),
+            "body": body,
+            "date": envelope.get("date", ""),
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+    kwargs: dict = {}
+    if platform.system() == "Windows":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        result = subprocess.run(
+            [sys.executable, str(_ANALYZE_SCRIPT)],
+            input=payload,
+            capture_output=True,
+            timeout=30,
+            cwd=str(_REPO_ROOT),
+            **kwargs,
+        )
+        if result.returncode != 0:
+            print(f"[gmail-watch] analyze stderr: {result.stderr.decode(errors='replace')[:300]}", file=sys.stderr)
+            return None
+        return json.loads(result.stdout.decode("utf-8"))
+    except Exception as exc:
+        print(f"[gmail-watch] analyze failed: {exc}", file=sys.stderr)
+        return None
+
+
+def _post_json(path: str, data: dict) -> bool:
+    """POST JSON to pc-agent. Returns True on success."""
+    url = f"{PC_AGENT_URL}{path}"
+    payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status < 300
+    except Exception as exc:
+        print(f"[gmail-watch] POST {path} failed: {exc}", file=sys.stderr)
+        return False
+
+
+def _post_todos_and_reminders(analysis: dict, email_subject: str) -> None:
+    """POST todos and reminders extracted by Claude to pc-agent."""
+    source = f"email: {email_subject[:60]}"
+    todo_ids = []
+    for item in analysis.get("todos", []):
+        title = item.get("title", "").strip()
+        if not title:
+            continue
+        resp_ok = _post_json(
+            "/todos",
+            {
+                "title": title,
+                "detail": item.get("detail", ""),
+                "priority": item.get("priority", "medium"),
+                "source": source,
+            },
+        )
+        if resp_ok:
+            todo_ids.append(title)
+            print(f"[gmail-watch] todo created: {title}", flush=True)
+
+    for item in analysis.get("reminders", []):
+        title = item.get("title", "").strip()
+        if not title:
+            continue
+        _post_json(
+            "/todos/reminders",
+            {
+                "title": title,
+                "dueIso": item.get("due_iso"),
+                "dueNatural": item.get("due_natural", ""),
+            },
+        )
+        print(f"[gmail-watch] reminder created: {title}", flush=True)
+
+
+def _create_calendar_event(meeting: dict) -> None:
+    """Call create-calendar-event.py to create a Windows Calendar .ics event."""
+    if not _CALENDAR_SCRIPT.exists():
+        return
+    args = [
+        sys.executable,
+        str(_CALENDAR_SCRIPT),
+        "--title", meeting.get("title", "Meeting"),
+    ]
+    if meeting.get("date_iso"):
+        args += ["--date", meeting["date_iso"]]
+    if meeting.get("time_iso"):
+        args += ["--time", meeting["time_iso"]]
+    if meeting.get("duration_minutes"):
+        args += ["--duration", str(meeting["duration_minutes"])]
+    if meeting.get("location"):
+        args += ["--location", meeting["location"]]
+
+    kwargs: dict = {}
+    if platform.system() == "Windows":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        subprocess.Popen(args, cwd=str(_REPO_ROOT), **kwargs)
+        print(f"[gmail-watch] calendar event triggered: {meeting.get('title')}", flush=True)
+    except Exception as exc:
+        print(f"[gmail-watch] calendar event failed: {exc}", file=sys.stderr)
+
+
+def _build_speak_text(envelope: dict, analysis: dict | None) -> str:
+    """Build rich spoken notification text."""
+    sender = envelope.get("from", "someone")
+    subject = envelope.get("subject", "(no subject)")
+
+    if analysis is None:
+        return f"New email from {sender}. Subject: {subject}."
+
+    speak_summary = (analysis.get("speak_summary") or "").strip()
+    if not speak_summary:
+        speak_summary = f"Subject: {subject}."
+
+    parts = [f"New email from {sender}."]
+
+    # Add summary
+    parts.append(speak_summary)
+
+    # Announce action items
+    todos = analysis.get("todos", [])
+    reminders = analysis.get("reminders", [])
+    meeting = analysis.get("meeting")
+
+    if meeting:
+        date_nat = meeting.get("date_natural", "")
+        time_nat = meeting.get("time_natural", "")
+        dt = f"{date_nat} {time_nat}".strip()
+        parts.append(f"There's a meeting invite: {meeting.get('title', 'Meeting')}{(', ' + dt) if dt else ''}. I've added it to your calendar.")
+
+    if todos:
+        n = len(todos)
+        label = "action item" if n == 1 else "action items"
+        parts.append(f"I've added {n} {label} to your to-do list.")
+
+    if reminders and not todos:
+        parts.append("I've set a reminder for you.")
+
+    return " ".join(parts)
+
+
+def _speak_text(text: str) -> None:
     """Fire-and-forget highest priority TTS for email notification."""
-    text = f"New email from {sender}. Subject: {subject}."
     env = {
         **os.environ,
         "FRIDAY_TTS_PRIORITY": "1",
@@ -141,9 +340,28 @@ def _speak_email(sender: str, subject: str) -> None:
             env=env,
             **kwargs,
         )
-        print(f"[gmail-watch] spoke: {text}", flush=True)
+        print(f"[gmail-watch] spoke: {text[:120]}", flush=True)
     except Exception as exc:
         print(f"[gmail-watch] speak failed: {exc}", file=sys.stderr, flush=True)
+
+
+def _process_new_email(conn: imaplib.IMAP4_SSL, uid: str) -> None:
+    """Full pipeline for a new email: fetch → analyze → speak → todos → calendar."""
+    envelope = _fetch_envelope(conn, uid)
+    print(f"[gmail-watch] new email UID {uid}: from={envelope['from']} subject={envelope['subject'][:60]}", flush=True)
+
+    body = _fetch_full_body(conn, uid) if EMAIL_ANALYZE else ""
+    analysis = _analyze_email(envelope, body) if (body or not EMAIL_ANALYZE) else None
+
+    speak_text = _build_speak_text(envelope, analysis)
+    _speak_text(speak_text)
+
+    if analysis:
+        if analysis.get("todos") or analysis.get("reminders"):
+            _post_todos_and_reminders(analysis, envelope.get("subject", ""))
+        meeting = analysis.get("meeting")
+        if meeting:
+            _create_calendar_event(meeting)
 
 
 def _run_watch_loop() -> None:
@@ -157,7 +375,7 @@ def _run_watch_loop() -> None:
         known_unseen[folder] = uids
         print(f"[gmail-watch] {folder}: {len(uids)} unseen (snapshot, not announced)", flush=True)
 
-    print(f"[gmail-watch] polling every {POLL_SEC}s for new emails in {', '.join(FOLDERS)}", flush=True)
+    print(f"[gmail-watch] polling every {POLL_SEC}s for new emails in {', '.join(FOLDERS)} | analyze={EMAIL_ANALYZE}", flush=True)
 
     reconnect_backoff = 0
     while True:
@@ -166,7 +384,6 @@ def _run_watch_loop() -> None:
             conn.noop()
             reconnect_backoff = 0
         except Exception:
-            # Connection dropped — reconnect
             reconnect_backoff = min(reconnect_backoff + 1, 5)
             wait = POLL_SEC * reconnect_backoff
             print(f"[gmail-watch] connection lost, reconnecting in {wait}s ...", flush=True)
@@ -201,10 +418,9 @@ def _run_watch_loop() -> None:
             print(f"[gmail-watch] {folder}: {len(new_uids)} new email(s)", flush=True)
             for uid in sorted(new_uids):
                 try:
-                    env = _fetch_envelope(conn, uid)
-                    _speak_email(env["from"], env["subject"])
+                    _process_new_email(conn, uid)
                 except Exception as exc:
-                    print(f"[gmail-watch] fetch/speak failed for UID {uid}: {exc}", file=sys.stderr, flush=True)
+                    print(f"[gmail-watch] process failed for UID {uid}: {exc}", file=sys.stderr, flush=True)
 
 
 def main() -> None:

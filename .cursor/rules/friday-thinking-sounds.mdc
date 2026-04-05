@@ -40,16 +40,16 @@ Pick one at random:
 
 ## Phase 3 — Writing code / editing a file
 
-Pick one at random:
+Pick one at random **and always name the file naturally** (e.g. "the speak script", "server dot JS", "the env file"):
 
-- "Writing this out now."
-- "Patching that in."
-- "Let me wire this up."
-- "Okay, making the change."
-- "Writing the fix."
-- "Updating the file."
-- "Almost there — writing the last bit."
-- "Dropping that in now."
+- "Writing this out in [file name] now."
+- "Patching that into [file name]."
+- "Let me wire this up in [file name]."
+- "Okay, making the change in [file name]."
+- "Writing the fix in [file name]."
+- "Updating [file name]."
+- "Almost there — writing the last bit in [file name]."
+- "Dropping that into [file name] now."
 
 ## Phase 4 — Waiting on a slow process / long-running task
 

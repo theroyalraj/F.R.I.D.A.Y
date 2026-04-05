@@ -24,8 +24,10 @@ The spoken summary **must match reality**. If you speak "Done. Updated silence t
 
 ```powershell
 # 1. Read the relevant file (Read tool) — ALWAYS do this first
-# 2. Then speak the summary based on what you actually confirmed
+# 2. Then speak the summary — ALWAYS block_until_ms: 0 (fire-and-forget, never block)
 cd d:\code\openclaw; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "Done. [confirmed summary]."
 ```
+
+**ALWAYS** use `block_until_ms: 0` on the Shell call — completion summaries are never an exception.
 
 **The spoken summary must be derived from what you read, not from memory of what you intended to write.**

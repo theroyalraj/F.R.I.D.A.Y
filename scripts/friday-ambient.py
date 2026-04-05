@@ -27,6 +27,11 @@ Background check-in thread (FRIDAY_AMBIENT_CHECKIN_ENABLED, default on): grabs t
 timer and speaks the time plus a wellness line in sub-agent TTS so normal ambient yields.
 
 Set FRIDAY_AMBIENT=true to enable.
+
+Meme zone (optional): FRIDAY_AMBIENT_MEME_ZONE=true replaces the normal ambient brain with random local MP3s
+from FRIDAY_AMBIENT_MEME_ZONE_DIR (default data/meme-zone under the repo). Deck shuffles without repeat until
+all files have played, then reshuffles. Gap defaults to fifteen seconds; stopping playback early (e.g. friday-play
+--stop) triggers a short Hinglish-style quip via TTS.
 """
 from __future__ import annotations
 
@@ -490,6 +495,25 @@ SONG_SECONDS  = int(os.environ.get("FRIDAY_AMBIENT_SONG_SECONDS",    "10"))
 SONG_SEC_MIN  = int(os.environ.get("FRIDAY_AMBIENT_SONG_SECONDS_MIN",  "8"))
 SONG_SEC_MAX  = int(os.environ.get("FRIDAY_AMBIENT_SONG_SECONDS_MAX",  "14"))
 PLAY_SCRIPT   = ROOT / "skill-gateway" / "scripts" / "friday-play.py"
+
+MEME_ZONE = _env_bool("FRIDAY_AMBIENT_MEME_ZONE", False)
+MEME_DIR = Path(
+    os.environ.get("FRIDAY_AMBIENT_MEME_ZONE_DIR", str(ROOT / "data" / "meme-zone"))
+).expanduser()
+try:
+    _meme_gap = float(os.environ.get("FRIDAY_AMBIENT_MEME_ZONE_GAP_SEC", "15").split("#")[0].strip())
+except ValueError:
+    _meme_gap = 15.0
+MEME_GAP_SEC = max(4.0, _meme_gap)
+try:
+    MEME_PLAY_SECONDS = int(os.environ.get("FRIDAY_AMBIENT_MEME_ZONE_SECONDS", "12").split("#")[0].strip())
+except ValueError:
+    MEME_PLAY_SECONDS = 12
+MEME_PLAY_SECONDS = max(3, min(120, MEME_PLAY_SECONDS))
+MEME_RECURSIVE = _env_bool("FRIDAY_AMBIENT_MEME_ZONE_RECURSIVE", False)
+MEME_DECK_KEY = "friday:meme_zone:deck"
+MEME_QUIP_VOICE = os.environ.get("FRIDAY_AMBIENT_MEME_ZONE_QUIP_VOICE", "en-IN-NeerjaExpressiveNeural").strip()
+MEME_ZONE_CHECKIN = _env_bool("FRIDAY_AMBIENT_MEME_ZONE_CHECKIN", False)
 
 
 def _python_for_friday_play() -> str:
@@ -2074,6 +2098,107 @@ def play_song_ambient(query: str, seconds: int) -> None:
         log.warning("play_song_ambient failed: %s", e)
 
 
+_MEME_ZONE_QUIPS = [
+    "Arre waah, you skipped the best part — dramatic exit, full marks.",
+    "{user}, that was interval already? Picture abhi baaki hai, mere dost.",
+    "Bas? I was building to the chorus like a proper slow-motion moment.",
+    "Tumne stop maar diya — villain energy, I respect it.",
+    "Okay okay, spoiler alert cancelled. I'll pretend that never happened.",
+    "Item song chal rahi thi tumne remote pe penalty lagayi.",
+    "That pause was so abrupt even the background dancers were confused.",
+    "Haw, {user} — itna jaldi nahi, this is cinema, not a stand-up timer.",
+    "Lagta hai tumhe masala pasand nahi, fine fine, I'll keep the rest.",
+    "Ek dum se wicket gir gayi jaise last over mein.",
+    "Stopped mid hook — classic trailer energy, boss.",
+    "Thoda ruko, taali marne ka time tha tumne mute kar diya.",
+    "Main yahan emotional build-up de rahi thi tumne power cut kar diya.",
+    "Acha, suspense rakho — next meme mein phir se try karenge.",
+    "Bollywood without drama is just boring traffic, and you chose silence.",
+    "Climax se pehle credits roll kar diye — daring move, {user}.",
+    "Arre yaar, it was just getting filmy and you walked out like the producer.",
+    "Scene khatam? Nahin, tumne interval pe ad break laga diya.",
+    "Mazaa aata hai na jab hero entry se pehle lights off ho jaye — same vibe.",
+]
+
+
+def _meme_zone_list_mp3s() -> list[Path]:
+    root = MEME_DIR.resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    found: list[Path] = []
+    if MEME_RECURSIVE:
+        for p in root.rglob("*.mp3"):
+            if p.is_file():
+                found.append(p)
+    else:
+        for p in root.glob("*.mp3"):
+            if p.is_file():
+                found.append(p)
+    return sorted(found, key=lambda x: str(x).lower())
+
+
+def _meme_zone_relpath(path: Path, root: Path) -> str:
+    return str(path.resolve().relative_to(root)).replace("\\", "/")
+
+
+def _meme_zone_pop_next(r) -> Path | None:
+    root = MEME_DIR.resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    for _ in range(600):
+        rel = None
+        try:
+            rel = r.lpop(MEME_DECK_KEY)
+        except Exception:
+            rel = None
+        if rel:
+            try:
+                cand = (root / rel).resolve()
+                if cand.is_file() and root in cand.parents:
+                    return cand
+            except (OSError, ValueError):
+                pass
+            continue
+        files = _meme_zone_list_mp3s()
+        if not files:
+            return None
+        rels = [_meme_zone_relpath(f, root) for f in files]
+        random.shuffle(rels)
+        try:
+            r.rpush(MEME_DECK_KEY, *rels)
+        except Exception as e:
+            log.debug("meme deck refill: %s", e)
+            return random.choice(files)
+        try:
+            rel2 = r.lpop(MEME_DECK_KEY)
+        except Exception:
+            rel2 = None
+        if rel2:
+            try:
+                p2 = (root / rel2).resolve()
+                if p2.is_file() and root in p2.parents:
+                    return p2
+            except (OSError, ValueError):
+                pass
+    return None
+
+
+def play_meme_zone_clip(path: Path, seconds: int) -> None:
+    if not AUTOPLAY_ENABLED:
+        log.info("[meme] autoPlay disabled — skip")
+        return
+    if not PLAY_SCRIPT.exists():
+        log.warning("PLAY_SCRIPT missing: %s", PLAY_SCRIPT)
+        return
+    try:
+        subprocess.Popen(
+            [_python_for_friday_play(), str(PLAY_SCRIPT), f"--mp3={path}", f"--seconds={seconds}"],
+            env={**os.environ},
+            **_no_window(),
+        )
+        log.info("[meme] playing %s (%ds)", path.name, seconds)
+    except Exception as e:
+        log.warning("play_meme_zone_clip failed: %s", e)
+
+
 def pick_mode() -> str:
     _ALL_MODES = (
         "funny", "informational", "wisdom", "music_comment",
@@ -2221,6 +2346,17 @@ class RedisLite:
     def rpop(self, key):
         lst = self._lists.get(key, [])
         return lst.pop() if lst else None
+
+    def rpush(self, key, *vals):
+        lst = self._lists.setdefault(key, [])
+        lst.extend(str(v) for v in vals)
+        return len(lst)
+
+    def lpop(self, key):
+        lst = self._lists.get(key, [])
+        if not lst:
+            return None
+        return lst.pop(0)
 
     def llen(self, key): return len(self._lists.get(key, []))
 
@@ -2421,6 +2557,25 @@ def _no_window() -> dict:
     return {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
 
 
+def _meme_zone_mp3_duration(path: Path) -> float | None:
+    try:
+        pr = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            **_no_window(),
+        )
+        return float(pr.stdout.strip())
+    except Exception:
+        return None
+
+
 def speak_blocking(text: str, voice: str | None = None) -> float:
     from friday_speaker import speaker
 
@@ -2453,6 +2608,41 @@ def speak_blocking(text: str, voice: str | None = None) -> float:
         except OSError:
             pass
     return time.perf_counter() - t0
+
+
+def _meme_zone_spawn_followup(r, started: float, effective_clip_sec: float, last_end: list[float]) -> None:
+    def _run():
+        try:
+            while _is_music_playing():
+                time.sleep(0.35)
+            elapsed = time.time() - started
+            last_end[0] = time.time()
+            try:
+                TTS_TS_FILE.write_text(str(time.time()), encoding="utf-8")
+            except OSError:
+                pass
+            grace = 0.88
+            if elapsed < grace:
+                return
+            if elapsed + 0.35 >= effective_clip_sec * 0.78:
+                return
+            _wait_for_tts_lock_release(r, timeout=45.0)
+            if should_defer_ambient_for_cursor():
+                return
+            if _is_music_playing() or _is_tts_active():
+                return
+            line = random.choice(_MEME_ZONE_QUIPS)
+            if "{user}" in line:
+                line = line.format(user=USER_NAME)
+            if _acquire_tts_lock(r):
+                try:
+                    speak_blocking(line, voice=MEME_QUIP_VOICE or None)
+                finally:
+                    _release_tts_lock(r)
+        except Exception as e:
+            log.debug("meme followup: %s", e)
+
+    threading.Thread(target=_run, daemon=True, name="meme-followup").start()
 
 
 _SUB_VOICE_PHRASES = [
@@ -2881,7 +3071,76 @@ def _ambient_checkin_loop(
             break
 
 
+def _main_meme_zone() -> None:
+    """Ambient replacement: shuffle-play local MP3s with fixed gap; quip if user stops early."""
+    _acquire_single_instance()
+    MEME_DIR.mkdir(parents=True, exist_ok=True)
+    conn = db_connect()
+    db_init(conn)
+    r = connect_redis()
+    log.info(
+        "Meme zone on — dir=%s gap=%.1fs clip_cap=%ds recursive=%s",
+        MEME_DIR,
+        MEME_GAP_SEC,
+        MEME_PLAY_SECONDS,
+        MEME_RECURSIVE,
+    )
+    threading.Thread(target=_poll_pc_agent_ambient_timing, daemon=True).start()
+
+    last_end: list[float] = [0.0]
+    speak_lock = threading.Lock()
+    last_ambient_holder = [0.0]
+    stop_checkin = threading.Event()
+
+    if MEME_ZONE_CHECKIN and CHECKIN_ENABLED:
+        threading.Thread(
+            target=_ambient_checkin_loop,
+            args=(r, conn, speak_lock, last_ambient_holder, stop_checkin),
+            daemon=True,
+            name="ambient-checkin",
+        ).start()
+
+    try:
+        while True:
+            time.sleep(1.2)
+            if should_defer_ambient_for_cursor():
+                continue
+            if _is_music_playing():
+                continue
+            if _is_tts_active():
+                continue
+            gap = MEME_GAP_SEC + random.uniform(-0.8, 1.2)
+            if time.time() - last_end[0] < gap:
+                continue
+            since_tts = _seconds_since_last_tts()
+            if since_tts < max(2.5, MEME_GAP_SEC * 0.22):
+                continue
+
+            picked = _meme_zone_pop_next(r)
+            if not picked:
+                log.warning("meme zone: no mp3 files in %s — retrying later", MEME_DIR)
+                time.sleep(12.0)
+                continue
+
+            raw_dur = _meme_zone_mp3_duration(picked)
+            eff = float(MEME_PLAY_SECONDS)
+            if raw_dur is not None and raw_dur > 0:
+                eff = min(eff, float(raw_dur))
+            eff = max(1.5, eff)
+            sec_i = int(round(eff))
+
+            t0 = time.time()
+            play_meme_zone_clip(picked, sec_i)
+            _meme_zone_spawn_followup(r, t0, eff, last_end)
+    finally:
+        stop_checkin.set()
+        _release_single_instance()
+
+
 def main() -> None:
+    if MEME_ZONE:
+        _main_meme_zone()
+        return
     # ── Enforce single instance — kill any previous ambient process ────────────
     _acquire_single_instance()
 
