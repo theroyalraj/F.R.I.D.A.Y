@@ -126,6 +126,21 @@ function greetingTtsRatePitch() {
   };
 }
 
+/** Voice-specific rate and pitch overrides (e.g., Nova/Sonia speaks faster) */
+function getVoiceDeliveryOverrides(voice) {
+  if (!voice) return {};
+  const voiceStr = String(voice).toLowerCase();
+
+  // Nova (Sonia) speaks faster: +20% rate (instead of default +10%)
+  if (voiceStr.includes('sonia')) {
+    return {
+      FRIDAY_TTS_RATE: '+20%',
+    };
+  }
+
+  return {};
+}
+
 function speakStartup() {
   if (process.env.FRIDAY_SPEAK_PY === 'false' || process.env.FRIDAY_SPEAK_PY === '0') return;
   if (process.env.PC_AGENT_STARTUP_SPEAK === 'false' || process.env.PC_AGENT_STARTUP_SPEAK === '0') return;
@@ -347,11 +362,13 @@ voiceRouter.post('/speak-async', async (req, res) => {
   }
 
   const style = await getSpeakStyle();
-  const delivery = mergeDeliveryWithSpeakStyle(greetingTtsRatePitch(), style);
+  const currentVoice = process.env.FRIDAY_TTS_VOICE || 'en-US-AvaMultilingualNeural';
+  const voiceOverrides = getVoiceDeliveryOverrides(currentVoice);
+  const delivery = mergeDeliveryWithSpeakStyle({ ...greetingTtsRatePitch(), ...voiceOverrides }, style);
   const child = spawn(pythonChildExecutable(), [SPEAK_SCRIPT, text], {
     env: {
       ...process.env,
-      FRIDAY_TTS_VOICE:  process.env.FRIDAY_TTS_VOICE  || 'en-US-AvaMultilingualNeural',
+      FRIDAY_TTS_VOICE:  currentVoice,
       FRIDAY_TTS_DEVICE: process.env.FRIDAY_TTS_DEVICE || 'default',
       FRIDAY_TTS_PRIORITY: '1',
       FRIDAY_TTS_BYPASS_CURSOR_DEFER: 'true',
