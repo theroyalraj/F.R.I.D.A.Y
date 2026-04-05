@@ -124,9 +124,9 @@
       pointer-events: none;
     }
 
-    /* ── THEME TOGGLE ────────────────────────────────────────── */
+    /* ── THEME TOGGLE (anchored to page wrap, not viewport corner) ── */
     .theme-toggle {
-      position: fixed; top: 0.9rem; right: 0.9rem; z-index: 200;
+      position: absolute; top: 0; right: 0; z-index: 200;
       height: 2rem; padding: 0 0.75rem;
       border-radius: 999px;
       border: 1px solid var(--stroke);
@@ -150,6 +150,7 @@
       min-height: 100%;
       display: flex; flex-direction: column; align-items: center;
       padding: clamp(1.25rem,4vw,2.5rem);
+      padding-top: max(clamp(1.25rem,4vw,2.5rem), 2.85rem);
       padding-bottom: max(2rem, env(safe-area-inset-bottom));
       gap: 1.1rem;
     }
@@ -1998,11 +1999,10 @@
       </div>
       <div className="bg-grid" aria-hidden="true"></div>
 
-      <button className="theme-toggle" onClick=${() => setDark(!dark)} aria-label="Toggle theme">
-        ${dark ? '☀ Light' : '☾ Dark'}
-      </button>
-
       <div className="wrap">
+        <button className="theme-toggle" onClick=${() => setDark(!dark)} aria-label="Toggle theme">
+          ${dark ? '☀ Light' : '☾ Dark'}
+        </button>
 
         <!-- HEADER -->
         <header ref=${hdrRef} style=${{ opacity: 0 }}>

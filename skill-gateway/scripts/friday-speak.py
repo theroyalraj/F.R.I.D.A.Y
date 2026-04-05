@@ -17,7 +17,9 @@ Env vars (all optional):
   FRIDAY_TTS_CACHE   MP3 cache dir       (default: %TEMP%/friday-tts-cache)
                      set to "" to disable cache
   FRIDAY_TTS_SESSION  when set to "subagent", session voice is read from
-                     subagent_voice in .session-voice.json (Task subagents)
+                     subagent_voice in .session-voice.json (Task subagents).
+                     When set to an OpenClaw persona key (e.g. riya, nova), voice and rate
+                     come from scripts/openclaw_company.py (+ OPENCLAW_<NAME>_VOICE / _RATE).
   FRIDAY_TTS_VOICE_BLOCK  comma-separated Edge voice ids never spoken — overrides
                      sticky session / env if they point at a blocked voice
   FRIDAY_TTS_USE_SESSION_STICKY_VOICE  set false so FRIDAY_TTS_VOICE from this
@@ -233,6 +235,25 @@ if VOICE in _blocked_tts:
 RATE   = os.environ.get("FRIDAY_TTS_RATE",   "+7.5%")
 PITCH  = os.environ.get("FRIDAY_TTS_PITCH",  "+2Hz")
 VOLUME = os.environ.get("FRIDAY_TTS_VOLUME", "+0%")
+
+# Org-chart persona: FRIDAY_TTS_SESSION=riya|jarvis|… applies registry voice + rate (after env defaults).
+try:
+    from openclaw_company import PERSONAS, get_persona
+
+    if _SESSION_KIND and _SESSION_KIND in PERSONAS:
+        _p = get_persona(_SESSION_KIND)
+        _pv = (_p.get("voice") or "").strip()
+        if _pv:
+            if _pv not in _blocked_tts:
+                VOICE = _pv
+            else:
+                _pref2 = os.environ.get("FRIDAY_TTS_VOICE", "en-US-AvaMultilingualNeural").strip() or "en-US-AvaMultilingualNeural"
+                VOICE = _pref2 if _pref2 not in _blocked_tts else "en-US-AvaMultilingualNeural"
+        _pr = (_p.get("rate") or "").strip()
+        if _pr:
+            RATE = _pr
+except Exception:
+    pass
 
 # Populated in speak() when FRIDAY_CURSOR_THINKING_VOICE_POOL is set and _is_thinking is True.
 _thinking_voice_pool: list[str] = []
@@ -1198,12 +1219,20 @@ def _emit_tts_speak_if_needed() -> None:
         return
     _tts_ui_posted_event = True
     preview = TEXT if len(TEXT) <= 500 else TEXT[:497] + "…"
+    extra_ui: dict = {}
+    ch = os.environ.get("FRIDAY_TTS_SPEAK_CHANNEL", "").strip()
+    if ch:
+        extra_ui["channel"] = ch[:32]
+    pk = os.environ.get("FRIDAY_TTS_SPEAK_PERSONA", "").strip().lower()
+    if pk:
+        extra_ui["personaKey"] = pk[:24]
     _post_voice_event_async(
         {
             "type": "tts_speak",
             "text": preview,
             "voice": VOICE,
             "session": _tts_session_label(),
+            **extra_ui,
         }
     )
 

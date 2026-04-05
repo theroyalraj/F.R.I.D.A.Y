@@ -72,12 +72,32 @@ async function fetchGmailSnapshotCore(opts = {}, mode = { parallel: true }) {
     recentJson = await runPythonGmail(recentArgs);
   }
 
+  const unread = safeJsonParse(unreadJson, 'gmail unread');
+  const recent = safeJsonParse(recentJson, 'gmail recent');
+  if (!Array.isArray(unread) || !Array.isArray(recent)) {
+    throw new Error('gmail.py returned non-array JSON');
+  }
+
   return {
     ok: true,
     ts: new Date().toISOString(),
-    unread: JSON.parse(unreadJson),
-    recent: JSON.parse(recentJson),
+    unread,
+    recent,
   };
+}
+
+/** @param {string} raw */
+function safeJsonParse(raw, label) {
+  const t = String(raw || '')
+    .replace(/^\uFEFF/, '')
+    .trim();
+  if (!t) throw new Error(`${label}: empty output from gmail.py`);
+  try {
+    return JSON.parse(t);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(`${label}: invalid JSON (${msg}). First 240 chars: ${t.slice(0, 240)}`);
+  }
 }
 
 /**

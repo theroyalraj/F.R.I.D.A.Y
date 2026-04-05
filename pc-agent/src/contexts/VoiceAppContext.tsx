@@ -35,6 +35,8 @@ export interface ChatBubble {
   ts: number;
   /** Present for user / friday / error lines — name, designation, voice id, description */
   persona?: ChatBubblePersona;
+  /** Reply thread: id of the message this one responds to */
+  replyToId?: string;
 }
 
 export interface VoicePostEventOptions {
@@ -83,7 +85,7 @@ export interface VoiceAppContextType {
   /** Merged roster from GET /settings/personas (Postgres + defaults); null = use bundled COMPANY_PERSONAS only. */
   personaCatalog: PersonaCatalog | null;
 
-  setConnectionStatus: (status: ConnectionStatus) => void;
+  setConnectionStatus: React.Dispatch<React.SetStateAction<ConnectionStatus>>;
   setSpeakingPersonaKey: (key: SpeakingPersonaKey) => void;
   setListenMuted: (muted: boolean) => void;
   setExchanges: (count: number) => void;
@@ -97,8 +99,11 @@ export interface VoiceAppContextType {
   setPersonaCatalog: (c: PersonaCatalog | null) => void;
   refreshPersonaOverrides: () => void;
   getReplyPersona: () => ChatBubblePersona;
-  addBubble: (bubble: Omit<ChatBubble, 'id'>) => void;
+  /** @returns New bubble id, or null if deduped / skipped */
+  addBubble: (bubble: Omit<ChatBubble, 'id'>) => string | null;
+  removeBubble: (id: string) => void;
   clearBubbles: () => void;
+  stopSpeaking: () => void;
   showToast: (message: string, type?: 'info' | 'error' | 'success') => void;
   dismissToast: (id: string) => void;
   /**
@@ -174,9 +179,9 @@ export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   }, [personaCatalog]);
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     if (typeof window !== 'undefined') {
-      return (localStorage.getItem('friday.theme') as 'light' | 'dark' | null) ?? 'dark';
+      return (localStorage.getItem('friday.theme') as 'light' | 'dark' | null) ?? 'light';
     }
-    return 'dark';
+    return 'light';
   });
   const [bubbles, setBubbles] = useState<ChatBubble[]>(() => {
     if (typeof window !== 'undefined') {
@@ -368,13 +373,13 @@ export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setExchanges((e) => e + 1);
   }, []);
 
-  const addBubble = useCallback((bubble: Omit<ChatBubble, 'id'>) => {
+  const addBubble = useCallback((bubble: Omit<ChatBubble, 'id'>): string | null => {
     const id = `bubble-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-    const key = `${bubble.type}:${bubble.text}`;
+    const key = `${bubble.type}:${bubble.replyToId ?? ''}:${bubble.text}`;
 
     const lastSeen = dedupeSeen.current.get(key);
     if (lastSeen && Date.now() - lastSeen < DEDUPE_WINDOW_MS) {
-      return;
+      return null;
     }
     dedupeSeen.current.set(key, Date.now());
 
@@ -389,6 +394,7 @@ export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     if (bubble.type === 'friday') {
       incrementExchanges();
     }
+    return id;
   }, [incrementExchanges]);
 
   const clearBubbles = useCallback(() => {
@@ -399,6 +405,17 @@ export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     } catch {
       // Ignore
     }
+  }, []);
+
+  const removeBubble = useCallback((id: string) => {
+    setBubbles((prev) => prev.filter((b) => b.id !== id));
+  }, []);
+
+  const stopSpeaking = useCallback(() => {
+    setSpeakingPersonaKey(null);
+    setConnectionStatus('listening');
+    // Send stop signal to backend
+    navigator.sendBeacon('/voice/stop', '');
   }, []);
 
   const dismissToast = useCallback((id: string) => {
@@ -630,7 +647,9 @@ export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     refreshPersonaOverrides,
     getReplyPersona,
     addBubble,
+    removeBubble,
     clearBubbles,
+    stopSpeaking,
     showToast,
     dismissToast,
     postEvent,

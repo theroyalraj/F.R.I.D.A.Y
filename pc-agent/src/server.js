@@ -463,6 +463,35 @@ voiceRouter.post('/music/stop', async (_req, res) => {
   res.json({ ok: r.ok, detail: r.detail });
 });
 
+/** Stop TTS playback and clear speaking state. */
+voiceRouter.post('/stop', async (_req, res) => {
+  try {
+    // Kill all ffplay instances (TTS + music)
+    const { exec } = await import('child_process');
+    const killCmd = process.platform === 'win32'
+      ? 'taskkill /IM ffplay.exe /F 2>nul || true'
+      : 'pkill -f ffplay || true';
+
+    exec(killCmd, { shell: true }, (error) => {
+      if (error && error.code !== 0) {
+        req.log?.warn({ err: String(error) }, 'ffplay kill error');
+      }
+    });
+
+    // Also try the music stop mechanism
+    await stopMusicPlayback();
+
+    // Broadcast listening state to UI
+    broadcastEvent('listening', {});
+    broadcastEvent('stopped_speaking', {});
+    res.json({ ok: true, detail: 'All playback stopped' });
+  } catch (e) {
+    req.log?.error({ err: String(e?.message || e) }, '/voice/stop error');
+    broadcastEvent('listening', {});
+    res.json({ ok: false, detail: String(e?.message || e) });
+  }
+});
+
 /** Default Edge voices per OpenClaw persona roster (see companyPersonas.ts). */
 const SPEAK_ASYNC_PERSONA_VOICE = {
   jarvis: 'en-US-AvaMultilingualNeural',

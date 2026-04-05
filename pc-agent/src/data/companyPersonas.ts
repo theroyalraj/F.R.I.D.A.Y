@@ -6,64 +6,81 @@ export const COMPANY_PERSONAS = {
     title: 'Chief of Staff',
     voice: 'en-US-AvaMultilingualNeural',
     personality: 'Composed, warm, confident — your primary executive assistant.',
+    tags: ['leadership', 'executive', 'assistant'],
   },
   argus: {
     name: 'Argus',
     title: 'VP, Security & Compliance',
     voice: 'en-US-GuyNeural',
     personality: 'Dry, watchful, direct; no-nonsense on pending reviews.',
+    tags: ['security', 'compliance', 'risk'],
   },
   nova: {
     name: 'Nova',
     title: 'Director of Communications',
     voice: 'en-GB-SoniaNeural',
     personality: 'Polished, concise; delivers briefings like a news lead.',
+    tags: ['communications', 'briefing', 'pr'],
   },
   sage: {
     name: 'Sage',
     title: 'Head of Research',
     voice: 'en-US-AndrewMultilingualNeural',
     personality: 'Measured, academic; narrates reasoning aloud.',
+    tags: ['research', 'analysis', 'insights'],
   },
   dexter: {
     name: 'Dexter',
     title: 'Lead Engineer',
     voice: 'en-US-EricNeural',
     personality: 'Methodical, lightly nerdy; standup-style updates.',
+    tags: ['engineering', 'technical', 'development'],
   },
   maestro: {
     name: 'Maestro',
     title: 'Creative Director',
     voice: 'en-US-BrianMultilingualNeural',
     personality: 'Witty, relaxed; music, culture, and colour commentary.',
+    tags: ['creative', 'design', 'culture'],
   },
   harper: {
     name: 'Harper',
     title: 'Executive Assistant',
     voice: 'en-US-JennyNeural',
     personality: 'Organised, supportive; reminders without nagging.',
+    tags: ['operations', 'administrative', 'assistant'],
+  },
+  riya: {
+    name: 'Riya',
+    title: 'Cultural Liaison',
+    voice: 'en-IN-NeerjaExpressiveNeural',
+    personality:
+      'Warm Indian English with expressive delivery — natural for Hinglish, playful check-ins, and banter.',
+    tags: ['culture', 'hinglish', 'banter'],
   },
   sentinel: {
     name: 'Sentinel',
     title: 'IT Operations',
     voice: 'en-IE-ConnorNeural',
     personality: 'Understated relay; reads Composer output when enabled.',
+    tags: ['it', 'operations', 'infrastructure'],
   },
   echo: {
     name: 'Echo',
     title: 'Director of Presence',
     voice: 'en-US-MichelleNeural',
     personality: 'Warm check-ins when the room has been quiet; invites interaction without nagging.',
+    tags: ['presence', 'engagement', 'community'],
   },
 } as const;
 
 export type CompanyPersonaKey = keyof typeof COMPANY_PERSONAS;
-export type PersonaOverride = { title?: string; personality?: string };
+export type PersonaOverride = { title?: string; personality?: string; tags?: string[] };
 
 /** Merged / server shape (Postgres voice_agent_personas + defaults). */
 export type PersonaCatalog = Record<
   string,
-  { name?: string; title?: string; voice?: string; personality?: string; rate?: string }
+  { name?: string; title?: string; voice?: string; personality?: string; rate?: string; tags?: string[] }
 >;
 
 const STORAGE_KEY = 'openclaw.personaOverrides';
@@ -96,6 +113,7 @@ export const SPEAKING_PERSONA_ORDER: CompanyPersonaKey[] = [
   'nova',
   'maestro',
   'harper',
+  'riya',
   'sentinel',
   'echo',
 ];
@@ -106,6 +124,7 @@ export interface ChatBubblePersona {
   title: string;
   voice: string;
   personality: string;
+  tags?: string[];
 }
 
 export function inferPersonaKeyFromVoice(
@@ -136,6 +155,7 @@ export function mergePersona(
       title: 'Catalogue pick',
       voice: customVoiceId || '',
       personality: 'Edge voice chosen directly from the full catalogue.',
+      tags: ['custom'],
     };
   }
   const staticBase = COMPANY_PERSONAS[key];
@@ -145,6 +165,7 @@ export function mergePersona(
     title: row?.title?.trim() || staticBase.title,
     voice: row?.voice?.trim() || staticBase.voice,
     personality: row?.personality?.trim() || staticBase.personality,
+    tags: row?.tags || staticBase.tags,
   };
   const o = overrides[key] || {};
   const title =
@@ -153,12 +174,14 @@ export function mergePersona(
     typeof o.personality === 'string' && o.personality.trim() !== ''
       ? o.personality.trim()
       : base.personality;
+  const tags = Array.isArray(o.tags) ? o.tags : base.tags;
   return {
     id: key,
     name: base.name,
     title,
     voice: base.voice,
     personality,
+    tags,
   };
 }
 
@@ -187,6 +210,7 @@ export const PERSONA_ORB_PALETTES: Record<CompanyPersonaKey | 'custom', OrbPalet
   dexter:   { primary: '#fbbf24', secondary: '#b45309', complement: '#fb923c' },
   maestro:  { primary: '#fb923c', secondary: '#c2410c', complement: '#fbbf24' },
   harper:   { primary: '#fb7185', secondary: '#be123c', complement: '#f472b6' },
+  riya:     { primary: '#f472b6', secondary: '#be185d', complement: '#fb7185' },
   sentinel: { primary: '#7dd3fc', secondary: '#0369a1', complement: '#60a5fa' },
   echo:     { primary: '#2dd4bf', secondary: '#0f766e', complement: '#34d399' },
   custom:   { primary: '#8b5cf6', secondary: '#6d28d9', complement: '#38bdf8' },
@@ -204,6 +228,7 @@ const PERSONA_ICONS: Record<CompanyPersonaKey, string> = {
   dexter:   '👨‍🔬',
   maestro:  '🎭',
   harper:   '🙋‍♀️',
+  riya:     '💃',
   sentinel: '📡',
   echo:     '🧑‍🎤',
 };

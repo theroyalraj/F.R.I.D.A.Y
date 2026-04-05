@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { safeReadJson } from '../lib/fetchJson';
+import TodoPanel from './TodoPanel';
+import SecurityScanPanel from './SecurityScanPanel';
 import type { SpeakingPersonaKey } from '../contexts/VoiceAppContext';
 import { COMPANY_PERSONAS, personaIcon, type CompanyPersonaKey } from '../data/companyPersonas';
 import styles from '../styles/listen.module.css';
@@ -41,6 +43,8 @@ type Props = {
 };
 
 const POLL_MS = 32_000;
+/** Gmail IMAP is expensive; server caches in Redis ~10 min — client polls mail on this interval when auto is on. */
+const GMAIL_POLL_MS = 600_000;
 
 export const IntegrationsRail: React.FC<Props> = ({
   authHeaders,
@@ -131,10 +135,42 @@ export const IntegrationsRail: React.FC<Props> = ({
 
   const toggleMailMark = (uid: string, e: React.MouseEvent) => {
     e.stopPropagation();
+    const isMarking = !markedMails[uid];
+
+    // Optimistic UI update
     setMarkedMails((prev) => ({
       ...prev,
-      [uid]: !prev[uid],
+      [uid]: isMarking,
     }));
+
+    if (isMarking) {
+      // Mark as unread and remove from unread list
+      void (async () => {
+        try {
+          const r = await fetch('/integrations/mail/mark-unread', {
+            method: 'POST',
+            headers: { ...authHeaders() as Record<string, string>, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uid }),
+          });
+          if (!r.ok) {
+            showToast('Failed to mark email', 'error');
+            // Revert optimistic update on error
+            setMarkedMails((prev) => { const n = { ...prev }; delete n[uid]; return n; });
+            return;
+          }
+          // Remove from unread list after marking as done
+          setGmail((g) => ({
+            ...g,
+            unread: g.unread.filter((m) => m.uid !== uid),
+          }));
+          showToast('Email marked as done', 'success');
+        } catch (err) {
+          showToast(String((err as Error).message || err), 'error');
+          // Revert on error
+          setMarkedMails((prev) => { const n = { ...prev }; delete n[uid]; return n; });
+        }
+      })();
+    }
   };
 
   const archiveMail = async (uid: string, e: React.MouseEvent) => {
@@ -165,11 +201,12 @@ export const IntegrationsRail: React.FC<Props> = ({
     }
   };
 
-  const refreshMail = useCallback(async () => {
+  const refreshMail = useCallback(async (forceFresh = false) => {
     try {
       setGmail((g) => ({ ...g, loading: true }));
+      const freshQ = forceFresh ? '&fresh=1' : '';
       const r = await fetch(
-        `/integrations/gmail?unreadCount=${MAIL_BATCH}&recentCount=${MAIL_BATCH}&unreadOffset=0&recentOffset=0`,
+        `/integrations/gmail?unreadCount=${MAIL_BATCH}&recentCount=${MAIL_BATCH}&unreadOffset=0&recentOffset=0${freshQ}`,
         { headers: authHeaders() },
       );
       const { data } = await safeReadJson(r);
@@ -212,7 +249,7 @@ export const IntegrationsRail: React.FC<Props> = ({
       const uOff = gmailRef.current.unread.length;
       const rOff = gmailRef.current.recent.length;
       const r = await fetch(
-        `/integrations/gmail?unreadCount=${MAIL_BATCH}&recentCount=${MAIL_BATCH}&unreadOffset=${uOff}&recentOffset=${rOff}`,
+        `/integrations/gmail?unreadCount=${MAIL_BATCH}&recentCount=${MAIL_BATCH}&unreadOffset=${uOff}&recentOffset=${rOff}&fresh=1`,
         { headers: authHeaders() },
       );
       const { data } = await safeReadJson(r);
@@ -329,22 +366,23 @@ export const IntegrationsRail: React.FC<Props> = ({
     return () => document.removeEventListener('visibilitychange', onVis);
   }, [refreshAll]);
 
+  // WhatsApp (and rail state) — moderate polling; Gmail uses Redis on server + separate slow interval below.
   useEffect(() => {
     const iv = setInterval(() => {
       if (document.hidden) return;
-      refreshAll();
+      void refreshWhatsApp();
     }, POLL_MS);
     return () => clearInterval(iv);
-  }, [refreshAll]);
+  }, [refreshWhatsApp]);
 
-  // Gmail auto-refresh every 10 seconds
+  // Gmail: auto-refresh every 10 minutes (server caches IMAP in Redis; use Refresh button for immediate fetch).
   useEffect(() => {
     if (!gmailAutoRefresh || document.hidden) return;
     const gmailInterval = setInterval(() => {
       if (document.hidden) return;
-      refreshMail();
+      void refreshMail(false);
       setLastGmailRefresh(Date.now());
-    }, 10000);
+    }, GMAIL_POLL_MS);
     return () => clearInterval(gmailInterval);
   }, [gmailAutoRefresh, refreshMail]);
 
@@ -430,6 +468,20 @@ export const IntegrationsRail: React.FC<Props> = ({
           aria-label="Resize email and chat panel"
         />
         <div className={styles['integrations-rail-inner']}>
+          <div className={styles['integrations-security-stack']}>
+            <div className={styles['integrations-security-above-todo']}>
+              <SecurityScanPanel
+                authHeaders={authHeaders}
+                theme={theme}
+                showToast={showToast}
+                variant="avatar"
+              />
+            </div>
+            <p className={styles['integrations-security-policy']}>
+              First full npm audit each day uses a twenty four hour cache. High or critical issues add a pinned todo and
+              optional Windows notify.
+            </p>
+          </div>
           {isNarrow && (
             <div className={styles['integrations-mobile-head']}>
               <span>Mail and WhatsApp</span>
@@ -438,6 +490,9 @@ export const IntegrationsRail: React.FC<Props> = ({
               </button>
             </div>
           )}
+          <div className={styles['integrations-todo-block']}>
+            <TodoPanel authHeaders={authHeaders} theme={theme} />
+          </div>
           <div
             className={`${styles['integrations-section']} ${mailSpeaking ? styles['integrations-section-speaking'] : ''}`}
           >
@@ -447,7 +502,7 @@ export const IntegrationsRail: React.FC<Props> = ({
               <button
                 type="button"
                 className={styles['integrations-refresh']}
-                onClick={() => refreshMail()}
+                onClick={() => void refreshMail(true)}
                 disabled={gmail.loading}
                 title={`Last refreshed: ${new Date(lastGmailRefresh).toLocaleTimeString()}`}
               >
@@ -457,7 +512,7 @@ export const IntegrationsRail: React.FC<Props> = ({
                 type="button"
                 className={`${styles['integrations-refresh']} ${gmailAutoRefresh ? styles['integrations-refresh-active'] : ''}`}
                 onClick={() => setGmailAutoRefresh(!gmailAutoRefresh)}
-                title={gmailAutoRefresh ? 'Auto-refresh ON (every 10s) — click to disable' : 'Auto-refresh OFF — click to enable'}
+                title={gmailAutoRefresh ? 'Auto-refresh ON (every 10 min, server Redis cache) — click to disable' : 'Auto-refresh OFF — click to enable'}
                 style={{ fontSize: '0.75rem' }}
               >
                 {gmailAutoRefresh ? '⚡' : '⏸'}

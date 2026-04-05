@@ -27,6 +27,7 @@
     "docker:postgres:up": "docker compose up -d openclaw-postgres",
     "test:notify": "node scripts/test-task-complete-notify.mjs",
     "live:notify": "node scripts/live-notify-demo.mjs",
+    "mock:whatsapp": "node scripts/whatsapp-ui-mimic.mjs",
     "test:whatsapp-jira": "node scripts/test-whatsapp-jira-webhook.mjs",
     "test:mandatory-tts": "node scripts/test-mandatory-tts.mjs",
     "test:ambient-voices": "python scripts/test-ambient-voices.py",

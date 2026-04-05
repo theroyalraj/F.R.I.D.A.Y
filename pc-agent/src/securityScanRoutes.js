@@ -78,6 +78,20 @@ export async function broadcastScanOutcome(broadcastEvent, out, todoScope, opts 
     highOrCritical: hi,
   });
 
+  // Async speak announcement (fire and forget)
+  if (envBoolSecurity('OPENCLAW_SECURITY_SCAN_SPEAK', true)) {
+    setImmediate(() => {
+      const message = hi > 0
+        ? `Security scan complete. Found ${summary.critical || 0} critical and ${summary.high || 0} high severity vulnerabilities.`
+        : 'Security scan complete. No critical or high severity vulnerabilities found.';
+
+      broadcastEvent('speak_async', {
+        text: message,
+        priority: hi > 0 ? 2 : 1,
+      });
+    });
+  }
+
   if (hi > 0 && envBoolSecurity('OPENCLAW_SECURITY_SCAN_WIN_NOTIFY', true)) {
     broadcastEvent('win_notify', {
       app: 'OpenClaw',

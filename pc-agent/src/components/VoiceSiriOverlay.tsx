@@ -71,15 +71,22 @@ const VoiceSiriOverlay: React.FC<VoiceSiriOverlayProps> = ({
           {displayTitle ? <span className={styles.personaTitle}>{displayTitle}</span> : null}
         </div>
 
-        {/* Orb */}
+        {/* Orb — Apple Siri–like full-sphere colour mass + soft rings (not a small inner pearl) */}
         <div className={styles.orbShell}>
           <div className={styles.halo} />
           <div className={styles.ring} data-i="0" />
           <div className={styles.ring} data-i="1" />
           <div className={styles.ring} data-i="2" />
-          <div className={styles.waveDisk} />
-          <div className={styles.core}>
-            <div className={styles.coreShine} />
+          <div className={styles.orbBody}>
+            <div className={styles.blobWrap} aria-hidden={true}>
+              <div className={styles.siriBlob} data-b="0" />
+              <div className={styles.siriBlob} data-b="1" />
+              <div className={styles.siriBlob} data-b="2" />
+              <div className={styles.siriBlob} data-b="3" />
+            </div>
+            <div className={styles.depthVignette} aria-hidden={true} />
+            <div className={styles.surfaceShine} aria-hidden={true} />
+            <div className={styles.rimGloss} aria-hidden={true} />
           </div>
         </div>
 

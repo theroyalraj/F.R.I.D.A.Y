@@ -124,9 +124,9 @@
       pointer-events: none;
     }
 
-    /* ── THEME TOGGLE ────────────────────────────────────────── */
+    /* ── THEME TOGGLE (anchored to page wrap, not viewport corner) ── */
     .theme-toggle {
-      position: fixed; top: 0.9rem; right: 0.9rem; z-index: 200;
+      position: absolute; top: 0; right: 0; z-index: 200;
       height: 2rem; padding: 0 0.75rem;
       border-radius: 999px;
       border: 1px solid var(--stroke);
@@ -150,6 +150,7 @@
       min-height: 100%;
       display: flex; flex-direction: column; align-items: center;
       padding: clamp(1.25rem,4vw,2.5rem);
+      padding-top: max(clamp(1.25rem,4vw,2.5rem), 2.85rem);
       padding-bottom: max(2rem, env(safe-area-inset-bottom));
       gap: 1.1rem;
     }
@@ -181,6 +182,12 @@
     .tts-hint {
       font-size: 0.66rem; color: var(--muted); font-style: italic; margin: 0;
     }
+    .tts-hint-playback {
+      font-size: 0.62rem; color: var(--muted); margin: 0.38rem 0 0;
+      line-height: 1.45; max-width: 26rem; font-style: normal;
+    }
+    .tts-hint-playback.warn { color: var(--amber); }
+    .tts-hint-playback.bad { color: var(--danger); }
     .bar-row {
       display: flex; align-items: center; justify-content: center;
       gap: 0.55rem; flex-wrap: wrap;
@@ -1411,6 +1418,8 @@
     const [rate,  setRate]  = useState(1.075);
     const [pitch, setPitch] = useState(1.05);
     const [ttsHint, setTtsHint] = useState('');
+    const [playbackHint, setPlaybackHint] = useState('');
+    const [playbackHintClass, setPlaybackHintClass] = useState('');
     const [panelOpen, setPanelOpen] = useState(false);
     const [typed, setTyped] = useState('');
     const [activePersona, setActivePersona] = useState(null);
@@ -1557,12 +1566,33 @@
       fetch(API('/voice/ping'), { headers: VOICE_HEADERS() })
         .then(r => r.json())
         .then(j => {
-          if (!j.tts) return;
-          const p = j.tts.provider;
-          if (p === 'piper')  setTtsHint('Voice: Piper (local neural — free, offline).');
-          else if (p === 'edge')   setTtsHint(`Voice: Microsoft Edge TTS — ${j.tts.edgeVoice || 'Aria'} (free neural, requires internet).`);
-          else if (p === 'openai') setTtsHint('Voice: OpenAI TTS (paid cloud neural).');
-          else setTtsHint('Voice: browser fallback — set FRIDAY_EDGE_TTS_VOICE in .env to pick a different Edge voice.');
+          if (j.tts) {
+            const p = j.tts.provider;
+            if (p === 'piper')  setTtsHint('Voice: Piper (local neural — free, offline).');
+            else if (p === 'edge')   setTtsHint(`Voice: Microsoft Edge TTS — ${j.tts.edgeVoice || 'Aria'} (free neural, requires internet).`);
+            else if (p === 'openai') setTtsHint('Voice: OpenAI TTS (paid cloud neural).');
+            else setTtsHint('Voice: browser fallback — set FRIDAY_EDGE_TTS_VOICE in .env to pick a different Edge voice.');
+          }
+          const w = j.watcherOutput;
+          if (w && typeof w === 'object') {
+            if (w.audioDisabled) {
+              setPlaybackHintClass('bad');
+              setPlaybackHint(
+                `Default playback: disabled or unavailable${w.deviceName ? ` (${w.deviceName})` : ''}. Sentinel skips Composer TTS until Sound has an active output.`,
+              );
+            } else if (w.muted) {
+              setPlaybackHintClass('warn');
+              setPlaybackHint(
+                `Default playback: muted${w.deviceName ? ` — ${w.deviceName}` : ''}. Unmute to hear Sentinel read Composer replies.`,
+              );
+            } else {
+              setPlaybackHintClass('');
+              setPlaybackHint(w.deviceName ? `Default playback: ${w.deviceName} — active, unmuted.` : '');
+            }
+          } else {
+            setPlaybackHintClass('');
+            setPlaybackHint('');
+          }
         }).catch(() => {});
     }, []);
 
@@ -1969,11 +1999,10 @@
       </div>
       <div className="bg-grid" aria-hidden="true"></div>
 
-      <button className="theme-toggle" onClick=${() => setDark(!dark)} aria-label="Toggle theme">
-        ${dark ? '☀ Light' : '☾ Dark'}
-      </button>
-
       <div className="wrap">
+        <button className="theme-toggle" onClick=${() => setDark(!dark)} aria-label="Toggle theme">
+          ${dark ? '☀ Light' : '☾ Dark'}
+        </button>
 
         <!-- HEADER -->
         <header ref=${hdrRef} style=${{ opacity: 0 }}>
@@ -1983,6 +2012,7 @@
             While listening or speaking, use <strong>Stop</strong> or tap the orb to cancel.
           </p>
           ${ttsHint && html`<p className="tts-hint">${ttsHint}</p>`}
+          ${playbackHint && html`<p className=${'tts-hint-playback' + (playbackHintClass ? ` ${playbackHintClass}` : '')}>${playbackHint}</p>`}
 
           <div className="bar-row" style=${{ marginTop:'0.45rem' }}>
             <span className="bar-label">Claude model</span>

@@ -9,7 +9,7 @@ You (**Founder / CEO**) work with **OpenClaw Labs**, a small formal-but-friendly
 
 ## Lead
 
-- **JARVIS** — *Chief of Staff* — Main Cursor narrator (ack, status, done summaries). The primary executive assistant. Voice: `hi-IN-MadhurNeural` (sticky session).
+- **JARVIS** — *Chief of Staff* — Main Cursor narrator (ack, status, done summaries). The primary executive assistant. Voice: `en-US-AvaMultilingualNeural` (sticky session).
 
 ## Leadership & specialists
 
@@ -21,6 +21,7 @@ You (**Founder / CEO**) work with **OpenClaw Labs**, a small formal-but-friendly
 | **DEXTER** | Lead Engineer | Action tracker briefings / Gmail+WhatsApp pipeline | `en-US-EricNeural` |
 | **MAESTRO** | Head of House Operations | Ambient steward: responsible check-ins, rest/chai nudges, commit hygiene, backbone of the org | `en-US-MichelleNeural` |
 | **HARPER** | Executive Assistant | Due reminders (`friday-reminder-watch`) | `en-US-JennyNeural` |
+| **RIYA** | Cultural Liaison | Optional `FRIDAY_TTS_SESSION=riya` speaks; pair voice with Hinglish or playful lines (see `friday_speak_env_for_persona("riya")`) | `en-IN-NeerjaExpressiveNeural` |
 | **SENTINEL** | IT Operations | Composer JSONL transcript TTS when enabled (`cursor-reply-watch`) | `en-IE-ConnorNeural` |
 | **ATLAS** | VP, Strategy | `friday-listen` — ears only; spoken replies are Jarvis's words |  |
 | **ECHO** | Director of Presence | `friday-silence-watch.py` — AI-driven silence nudges with transcript context; voice and personality from Redis / UI | `en-US-MichelleNeural` |

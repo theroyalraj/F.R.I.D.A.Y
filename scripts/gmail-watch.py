@@ -96,6 +96,10 @@ def _env_bool(key: str, default: bool = True) -> bool:
     return raw in ("1", "true", "yes", "on")
 
 
+# When true (default), POST to pc-agent to clear Redis mail snapshot so Listen UI shows new mail without waiting for TTL.
+GMAIL_CACHE_INVALIDATE = _env_bool("GMAIL_LISTEN_CACHE_INVALIDATE", True)
+
+
 def _env_int(key: str, default: int) -> int:
     try:
         return int(os.environ.get(key, "").split("#")[0].strip() or str(default))
@@ -264,6 +268,30 @@ def _post_json(path: str, data: dict) -> bool:
     except Exception as exc:
         print(f"[gmail-watch] POST {path} failed: {exc}", file=sys.stderr)
         return False
+
+
+def _invalidate_listen_gmail_cache() -> None:
+    """Clear Redis-backed mail list cache on pc-agent (Listen UI)."""
+    if not GMAIL_CACHE_INVALIDATE:
+        return
+    if not PC_AGENT_SECRET:
+        return
+    url = f"{PC_AGENT_URL}/integrations/gmail/cache/invalidate"
+    req = urllib.request.Request(
+        url,
+        data=b"{}",
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {PC_AGENT_SECRET}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            if resp.status < 300:
+                print("[gmail-watch] Listen mail cache invalidated (Redis)", flush=True)
+    except Exception as exc:
+        print(f"[gmail-watch] cache invalidate failed: {exc}", file=sys.stderr)
 
 
 def _post_todos_and_reminders(analysis: dict, email_subject: str) -> None:
@@ -453,6 +481,8 @@ def _speak_text(text: str) -> None:
         **os.environ,
         "FRIDAY_TTS_PRIORITY": "1",
         "FRIDAY_TTS_BYPASS_CURSOR_DEFER": "true",
+        "FRIDAY_TTS_SPEAK_CHANNEL": "mail",
+        "FRIDAY_TTS_SPEAK_PERSONA": "nova",
     }
     if NOTIFY_VOICE:
         env["FRIDAY_TTS_VOICE"] = NOTIFY_VOICE
@@ -552,6 +582,7 @@ def _run_watch_loop() -> None:
                 continue
 
             print(f"[gmail-watch] {folder}: {len(new_uids)} new email(s)", flush=True)
+            _invalidate_listen_gmail_cache()
             uids_list = sorted(new_uids)
             if EMAIL_DIGEST and len(uids_list) > 1:
                 entries: list[tuple[dict, dict | None]] = []

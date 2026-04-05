@@ -42,6 +42,16 @@ GMAIL_APP_PWD = os.environ.get("GMAIL_APP_PWD", "").strip().replace(" ", "")
 IMAP_HOST     = "imap.gmail.com"
 IMAP_PORT     = 993
 
+def _configure_stdio_utf8() -> None:
+    """Avoid UnicodeEncodeError on Windows (cp1252) when mail subjects contain emoji."""
+    for stream in (sys.stdout, sys.stderr):
+        reconf = getattr(stream, "reconfigure", None)
+        if callable(reconf):
+            try:
+                reconf(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
 def _connect() -> imaplib.IMAP4_SSL:
     if not GMAIL_ADDRESS or not GMAIL_APP_PWD:
         print("ERROR: set GMAIL_ADDRESS and GMAIL_APP_PWD in .env", file=sys.stderr)
@@ -177,6 +187,18 @@ def cmd_archive(args):
         m.logout()
         print(json.dumps({"ok": True, "uid": args[0], "action": "marked_read"}))
 
+def cmd_mark_unread(args):
+    """Mark a message as unread (unseen) by UID — for task tracking."""
+    if not args:
+        print("Usage: gmail.py mark-unread <UID>", file=sys.stderr); sys.exit(1)
+    uid = args[0].encode()
+    m = _connect()
+    m.select("INBOX")
+    # Mark as unseen (unread)
+    m.uid("STORE", uid, "-FLAGS", "(\\Seen)")
+    m.logout()
+    print(json.dumps({"ok": True, "uid": args[0], "action": "marked_unread"}))
+
 def cmd_search(args):
     if not args:
         print("Usage: gmail.py search <query>", file=sys.stderr); sys.exit(1)
@@ -196,12 +218,13 @@ def _arg(args, flag, default):
     return default
 
 def main():
+    _configure_stdio_utf8()
     argv = sys.argv[1:]
     if not argv:
         print(__doc__); sys.exit(0)
     cmd  = argv[0]
     rest = argv[1:]
-    {"list": cmd_list, "unread": cmd_unread, "read": cmd_read, "search": cmd_search, "archive": cmd_archive}.get(
+    {"list": cmd_list, "unread": cmd_unread, "read": cmd_read, "search": cmd_search, "archive": cmd_archive, "mark-unread": cmd_mark_unread}.get(
         cmd, lambda _: (print(f"Unknown command: {cmd}", file=sys.stderr), sys.exit(1))
     )(rest)
 

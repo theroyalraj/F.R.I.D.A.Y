@@ -1,11 +1,11 @@
 ---
-description: Launch a fresh subagent for security, quality, and standards scan before every git commit
+description: Subagent security or quality scan before commits; with WIP safety, temp checkpoint branch, push, and optional spoken summary
 alwaysApply: true
 ---
 
 # Pre-commit quality and security scan (subagent)
 
-Before **any** `git commit` (including WIP checkpoints on `wip`, feature commits, and amend), **always** spawn a **new** Task subagent in a **separate turn or the same message batch before `git commit`**, so another model pass does a full-repo read pass the parent may have skipped.
+Before **any** `git commit` (including safety checkpoints on a **new** `wip/checkpoint-…` branch, feature commits, and amend), **always** spawn a **new** Task subagent in a **separate turn or the same message batch before `git commit`**, so another model pass does a full-repo read pass the parent may have skipped.
 
 ## When this applies
 
@@ -23,9 +23,16 @@ Before **any** `git commit` (including WIP checkpoints on `wip`, feature commits
 
 4. **Parent obligation**: Read the subagent’s summary; **fix blocking issues** or **note in the commit message** why something is deferred. **Do not commit** if the scan reports a critical security issue you have not addressed.
 
+5. **Checkpoint branch, commit, push, voice** — when this scan precedes a safety checkpoint (see **`wip-safety-commit.mdc`**), the same session must also:
+   - Create a **new temporary** branch so shared `wip` is not overwritten: name pattern `wip/checkpoint-<short-slug>-<YYYYMMDD>` (slug from the upcoming work, e.g. `sse-stream`, `tts-lock`; add `-2`, `-3` if the name already exists locally or on origin).
+   - From the branch you were on (usually `main`), run: `git checkout -b <that-branch-name>`, then `git add -A`, then `git commit` with the agreed message.
+   - Push: `git push -u origin HEAD`.
+   - **Spoken checkpoint explanation** (only if **`cursor-agent-narration.mdc`** allows narration): one fire-and-forget line with **`FRIDAY_TTS_PRIORITY=1`** and **`FRIDAY_TTS_BYPASS_CURSOR_DEFER=true`** after a successful push — explain in plain English what was saved, why it is a checkpoint, and the branch name (say “wip slash checkpoint slash …” so TTS reads it clearly). Keep it conversational; no markdown or symbols per **`no-markdown-in-speech.mdc`**.
+   - Return to the previous branch to continue work: `git checkout -` or `git checkout main` as appropriate.
+
 ## Order with WIP safety
 
-If **both** this rule and **WIP Safety Commit** apply: **subagent scan first**, then stage, commit, and push to `wip` as documented in `wip-safety-commit.mdc`.
+If **both** this rule and **WIP Safety Commit** apply: **subagent scan first**, then the **temp checkpoint branch**, **commit**, **push**, and **spoken checkpoint summary** as in step five above (see **`wip-safety-commit.mdc`** for message format and exceptions).
 
 ## Exceptions (no subagent required)
 
@@ -35,4 +42,4 @@ If **both** this rule and **WIP Safety Commit** apply: **subagent scan first**, 
 
 ## Narration
 
-Follow **`cursor-agent-narration.mdc`**: if Cursor narration is off, skip `friday-speak` for scan lifecycle; if on, you may briefly announce spinning up the pre-commit scan (one short line).
+Follow **`cursor-agent-narration.mdc`**: if Cursor narration is off, skip all `friday-speak` for scan and checkpoint (including the post-push checkpoint explanation). If on: you may briefly announce spinning up the pre-commit scan (one short line, **`FRIDAY_TTS_PRIORITY=1`**), and you **must** deliver the post-push checkpoint explanation after a successful safety push when that flow ran.

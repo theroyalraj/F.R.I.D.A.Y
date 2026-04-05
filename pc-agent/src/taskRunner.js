@@ -12,6 +12,7 @@ import { buildVoiceSystem } from './claudeApi.js';
 import { scheduleOpenRouterFallback } from './deferredOpenRouter.js';
 import { inferClaudeModelForTask, isAutoModelEnabled } from './claudeRouter.js';
 import { sanitizeClaudeModel } from './claudeModel.js';
+import { mergeHaikuReplyVoice } from './edgeTts.js';
 import { getSpeakStyle, buildSpeakStyleInstruction } from './speakStyle.js';
 import { getCachedCompanyContextString } from './companyDb.js';
 import { getModelCascade, isClaudeFallbackEnabled, refreshModelPool } from './openRouterModelPool.js';
@@ -281,6 +282,15 @@ export async function runTask(body, reqLog, options = {}) {
     return o;
   }
 
+  function voiceReplyExtras(modelKey, resultModel) {
+    return mergeHaikuReplyVoice(replyExtras, {
+      modelKey,
+      resultModel,
+      claudeModel,
+      src,
+    });
+  }
+
   const systemWithLearning = learningBlock ? `${systemForCache}\n\n${learningBlock}` : systemForCache;
 
   /**
@@ -316,7 +326,7 @@ export async function runTask(body, reqLog, options = {}) {
         correlationId,
         summary: cached.summary,
         cacheHit: cached.fromCache,
-        ...replyExtras,
+        ...voiceReplyExtras(modelKey, cached.model),
         ...generationJsonExtras(genId),
       },
     };
@@ -366,7 +376,7 @@ export async function runTask(body, reqLog, options = {}) {
             correlationId,
             error: OPENROUTER_SETUP_MESSAGE,
             taskRoute: 'assigned-claude',
-            ...replyExtras,
+            ...voiceReplyExtras(apiModelKey, undefined),
           },
         };
       }
@@ -390,7 +400,7 @@ export async function runTask(body, reqLog, options = {}) {
             speakAsync: false,
             deferredOpenRouter: true,
             taskRoute: 'assigned-claude',
-            ...replyExtras,
+            ...voiceReplyExtras(apiModelKey, undefined),
           },
         };
       }
@@ -405,7 +415,7 @@ export async function runTask(body, reqLog, options = {}) {
             summary: '',
             speakAsync: false,
             taskRoute: 'assigned-claude',
-            ...replyExtras,
+            ...voiceReplyExtras(apiModelKey, undefined),
           },
         };
       }
@@ -434,7 +444,7 @@ export async function runTask(body, reqLog, options = {}) {
             correlationId,
             summary: result.text,
             taskRoute: 'assigned-claude',
-            ...replyExtras,
+            ...voiceReplyExtras(apiModelKey, result.model),
             ...generationJsonExtras(genId),
           },
         };
@@ -505,7 +515,7 @@ export async function runTask(body, reqLog, options = {}) {
             correlationId,
             summary: result.text,
             taskRoute: assignedFast ? 'assigned-openrouter' : 'openrouter',
-            ...replyExtras,
+            ...voiceReplyExtras(orFreeModelKey, result.model),
             ...generationJsonExtras(genOr),
           },
         };
@@ -573,7 +583,7 @@ export async function runTask(body, reqLog, options = {}) {
               correlationId,
               summary: opusResult.text,
               taskRoute: assignedFast ? 'assigned-openrouter-fallback' : 'openrouter-fallback',
-              ...replyExtras,
+              ...voiceReplyExtras(opusFallbackKey, opusResult.model),
               ...generationJsonExtras(genOpus),
             },
           };
@@ -596,7 +606,7 @@ export async function runTask(body, reqLog, options = {}) {
               correlationId,
               summary: '',
               deferredOpenRouter: true,
-              ...replyExtras,
+              ...voiceReplyExtras(opusFallbackKey, undefined),
             },
           };
         }
@@ -655,7 +665,7 @@ export async function runTask(body, reqLog, options = {}) {
             userId,
             correlationId,
             error: OPENROUTER_SETUP_MESSAGE,
-            ...replyExtras,
+            ...voiceReplyExtras(apiModelKey, undefined),
           },
         };
       }
@@ -687,7 +697,7 @@ export async function runTask(body, reqLog, options = {}) {
             speakAsync: false,
             deferredOpenRouter: true,
             taskRoute: 'claude-fast',
-            ...replyExtras,
+            ...voiceReplyExtras(apiModelKey, undefined),
           },
         };
       }
@@ -703,7 +713,7 @@ export async function runTask(body, reqLog, options = {}) {
             summary: '',
             speakAsync: false,
             taskRoute: 'claude-fast',
-            ...replyExtras,
+            ...voiceReplyExtras(apiModelKey, undefined),
           },
         };
       }
@@ -735,7 +745,7 @@ export async function runTask(body, reqLog, options = {}) {
           correlationId,
           summary: result.text,
           taskRoute: 'claude-fast',
-          ...replyExtras,
+          ...voiceReplyExtras(apiModelKey, result.model),
           ...generationJsonExtras(genFast),
         },
       };

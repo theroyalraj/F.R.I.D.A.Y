@@ -1,12 +1,8 @@
-/* Siri-style centre overlay — Listen UI (speaking / thinking phase)
-   Inspired by SmoothUI Siri Orb: layered glow, wave disk, expanding rings.
-   https://smoothui.dev/docs/components/siri-orb
-   ──────────────────────────────────────────────────────────────────────────
-   Per-speaker theming via CSS custom properties:
-     --orb-primary    (ring border, core accent, wave inner)
-     --orb-secondary  (core gradient, conic tail)
-     --orb-complement (halo conic colour 2)
-   These are injected inline by VoiceSiriOverlay based on the speaking persona.
+/* Siri-style centre overlay — Listen UI (speaking phase)
+   Aims for Apple Siri: one large luminous sphere filled with slow-moving colour blobs,
+   soft outer bloom, faint expanding pulses — not a tiny core inside empty rings.
+   Persona tint via:
+     --orb-primary, --orb-secondary, --orb-complement (from VoiceSiriOverlay)
 */
 
 .root {
@@ -30,21 +26,21 @@
   position: absolute;
   inset: 0;
   background: radial-gradient(
-    ellipse 55% 50% at 50% 48%,
-    rgba(5, 8, 18, 0.02) 0%,
-    rgba(5, 8, 18, 0.55) 45%,
-    rgba(5, 8, 18, 0.82) 100%
+    ellipse 58% 52% at 50% 46%,
+    rgba(8, 12, 28, 0.04) 0%,
+    rgba(6, 10, 22, 0.62) 48%,
+    rgba(4, 6, 14, 0.88) 100%
   );
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(14px) saturate(1.05);
+  -webkit-backdrop-filter: blur(14px) saturate(1.05);
 }
 
 .light .vignette {
   background: radial-gradient(
-    ellipse 55% 50% at 50% 48%,
-    rgba(255, 255, 255, 0.15) 0%,
-    rgba(241, 245, 255, 0.72) 45%,
-    rgba(226, 232, 246, 0.92) 100%
+    ellipse 58% 52% at 50% 46%,
+    rgba(255, 255, 255, 0.22) 0%,
+    rgba(236, 242, 255, 0.78) 48%,
+    rgba(220, 230, 248, 0.94) 100%
   );
 }
 
@@ -59,7 +55,7 @@
   transform: translateY(-4vh);
 }
 
-/* ── Persona badge (above orb) ─────────────────────────────── */
+/* ── Persona badge ──────────────────────────────────────────── */
 .personaBadge {
   display: flex;
   flex-direction: column;
@@ -71,7 +67,7 @@
 .personaIcon {
   font-size: 2rem;
   line-height: 1;
-  filter: drop-shadow(0 0 12px var(--orb-primary, #a78bfa));
+  filter: drop-shadow(0 0 14px var(--orb-primary, #5b8cff));
   animation: siriIconFloat 2.4s ease-in-out infinite alternate;
 }
 
@@ -85,8 +81,8 @@
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--orb-primary, #a78bfa);
-  text-shadow: 0 0 16px var(--orb-primary, #a78bfa);
+  color: var(--orb-primary, #7c9fff);
+  text-shadow: 0 0 18px color-mix(in srgb, var(--orb-primary, #7c9fff) 55%, transparent);
 }
 
 .personaTitle {
@@ -103,147 +99,267 @@
 /* ── Orb shell ─────────────────────────────────────────────── */
 .orbShell {
   position: relative;
-  width: min(52vw, 260px);
-  height: min(52vw, 260px);
+  width: min(56vw, 280px);
+  height: min(56vw, 280px);
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
-/* ── Halo (outer conic spin) ───────────────────────────────── */
+/* Huge soft colour wash behind the sphere (Siri outer aura) */
 .halo {
   position: absolute;
-  inset: -38%;
+  inset: -42%;
   border-radius: 50%;
   background: conic-gradient(
-    from 200deg,
-    color-mix(in srgb, var(--orb-primary, #38bdf8) 72%, transparent) 0%,
-    color-mix(in srgb, var(--orb-secondary, #a78bfa) 78%, transparent) 26%,
-    color-mix(in srgb, var(--orb-complement, #f472b6) 62%, transparent) 52%,
-    color-mix(in srgb, var(--orb-primary, #34d399) 48%, transparent) 78%,
-    color-mix(in srgb, var(--orb-primary, #38bdf8) 72%, transparent) 100%
+    from 160deg,
+    color-mix(in srgb, var(--orb-primary, #3d8bff) 55%, transparent) 0%,
+    color-mix(in srgb, var(--orb-secondary, #a855f7) 50%, transparent) 22%,
+    color-mix(in srgb, var(--orb-complement, #ff5c9a) 48%, transparent) 44%,
+    color-mix(in srgb, var(--orb-primary, #22d3ee) 42%, transparent) 66%,
+    color-mix(in srgb, var(--orb-secondary, #818cf8) 52%, transparent) 88%,
+    color-mix(in srgb, var(--orb-primary, #3d8bff) 55%, transparent) 100%
   );
-  filter: blur(38px) saturate(1.08);
-  opacity: 0.92;
-  animation: siriHaloSpin 18s linear infinite;
+  filter: blur(48px) saturate(1.25);
+  opacity: 0.88;
+  animation: siriHaloSpin 22s linear infinite;
 }
 
 .light .halo {
-  opacity: 0.55;
-  filter: blur(42px);
+  opacity: 0.5;
+  filter: blur(52px) saturate(1.1);
 }
 
 @keyframes siriHaloSpin {
   to { transform: rotate(360deg); }
 }
 
-/* ── Expanding rings ───────────────────────────────────────── */
+/* Faint breathing pulses — Siri-style outer ripples */
 .ring {
   position: absolute;
-  inset: 0;
+  inset: 4%;
   border-radius: 50%;
-  border: 2px solid color-mix(in srgb, var(--orb-primary, #93c5fd) 62%, transparent);
+  border: 1.5px solid color-mix(in srgb, var(--orb-primary, #93c5fd) 35%, transparent);
   opacity: 0;
-  animation: siriRing 3.2s cubic-bezier(0.22, 0.61, 0.36, 1) infinite;
+  animation: siriRing 2.8s cubic-bezier(0.25, 0.46, 0.45, 0.94) infinite;
   box-shadow:
-    0 0 28px color-mix(in srgb, var(--orb-primary, #38bdf8) 38%, transparent),
-    0 0 56px color-mix(in srgb, var(--orb-secondary, #a78bfa) 18%, transparent);
+    0 0 36px color-mix(in srgb, var(--orb-primary, #60a5fa) 28%, transparent),
+    0 0 72px color-mix(in srgb, var(--orb-secondary, #a78bfa) 14%, transparent);
 }
 
 .light .ring {
-  border-color: color-mix(in srgb, var(--orb-primary, #3b82f6) 45%, transparent);
-  box-shadow: 0 0 20px color-mix(in srgb, var(--orb-primary, #3b82f6) 20%, transparent);
+  border-color: color-mix(in srgb, var(--orb-primary, #3b82f6) 32%, transparent);
+  box-shadow:
+    0 0 28px color-mix(in srgb, var(--orb-primary, #3b82f6) 18%, transparent),
+    0 0 56px color-mix(in srgb, var(--orb-secondary, #6366f1) 10%, transparent);
 }
 
 .ring[data-i='0'] { animation-delay: 0s; }
-.ring[data-i='1'] { animation-delay: 0.85s; }
-.ring[data-i='2'] { animation-delay: 1.7s; }
+.ring[data-i='1'] { animation-delay: 0.75s; }
+.ring[data-i='2'] { animation-delay: 1.5s; }
 
 @keyframes siriRing {
-  0%   { transform: scale(0.68); opacity: 0.82; }
-  72%  { opacity: 0.18; }
-  100% { transform: scale(1.52); opacity: 0; }
+  0%   { transform: scale(0.72); opacity: 0.55; }
+  55%  { opacity: 0.12; }
+  100% { transform: scale(1.45); opacity: 0; }
 }
 
-/* ── Wave disk (inner pulse) ───────────────────────────────── */
-.waveDisk {
-  position: absolute;
-  inset: 6%;
-  border-radius: 50%;
-  background: radial-gradient(
-    circle at 44% 38%,
-    color-mix(in srgb, var(--orb-complement, #f472b6) 28%, transparent) 0%,
-    color-mix(in srgb, var(--orb-primary, #38bdf8) 38%, transparent) 38%,
-    color-mix(in srgb, var(--orb-secondary, #a78bfa) 22%, transparent) 58%,
-    transparent 72%
-  );
-  animation: siriWavePulse 1.45s ease-in-out infinite alternate;
-  filter: blur(0.4px);
-}
-
-@keyframes siriWavePulse {
-  from { transform: scale(0.94); opacity: 0.78; }
-  to   { transform: scale(1.05); opacity: 1; }
-}
-
-/* ── Core orb ──────────────────────────────────────────────── */
-.core {
+/* ── Main Siri sphere (fills most of the stage) ───────────── */
+.orbBody {
   position: relative;
   z-index: 2;
-  width: 48%;
-  height: 48%;
+  width: 78%;
+  height: 78%;
   border-radius: 50%;
-  background:
-    radial-gradient(circle at 32% 26%, rgba(255, 255, 255, 0.62) 0%, transparent 38%),
-    radial-gradient(circle at 72% 78%,
-      color-mix(in srgb, var(--orb-complement, #f472b6) 45%, transparent) 0%,
-      transparent 40%),
-    radial-gradient(circle at 70% 72%,
-      color-mix(in srgb, var(--orb-secondary, #a78bfa) 88%, transparent) 0%,
-      transparent 46%),
-    radial-gradient(circle at 50% 50%,
-      color-mix(in srgb, var(--orb-primary, #38bdf8) 58%, transparent),
-      rgba(15, 23, 42, 0.96));
+  overflow: hidden;
+  isolation: isolate;
+  background: radial-gradient(circle at 48% 52%, #0f172a 0%, #0a0f1a 45%, #020617 100%);
   box-shadow:
-    0 0 52px color-mix(in srgb, var(--orb-primary, #38bdf8) 58%, transparent),
-    0 0 110px color-mix(in srgb, var(--orb-secondary, #8b5cf6) 34%, transparent),
-    0 0 160px color-mix(in srgb, var(--orb-complement, #f472b6) 12%, transparent),
-    inset 0 0 44px rgba(255, 255, 255, 0.1);
-  animation: siriCoreBreathe 1.15s ease-in-out infinite alternate;
+    0 0 60px color-mix(in srgb, var(--orb-primary, #3b82f6) 45%, transparent),
+    0 0 120px color-mix(in srgb, var(--orb-secondary, #8b5cf6) 28%, transparent),
+    0 0 180px color-mix(in srgb, var(--orb-complement, #ec4899) 12%, transparent),
+    inset 0 -28px 50px rgba(0, 0, 0, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.22);
+  animation: siriSphereBreathe 2.4s ease-in-out infinite alternate;
 }
 
-.light .core {
-  background:
-    radial-gradient(circle at 32% 26%, rgba(255, 255, 255, 0.95) 0%, transparent 38%),
-    radial-gradient(circle at 72% 78%,
-      color-mix(in srgb, var(--orb-complement, #e879f9) 35%, transparent) 0%,
-      transparent 40%),
-    radial-gradient(circle at 70% 72%,
-      color-mix(in srgb, var(--orb-secondary, #818cf8) 72%, transparent) 0%,
-      transparent 46%),
-    radial-gradient(circle at 50% 50%,
-      color-mix(in srgb, var(--orb-primary, #60a5fa) 58%, transparent),
-      rgba(241, 245, 249, 0.98));
+.light .orbBody {
+  background: radial-gradient(circle at 42% 34%, #ffffff 0%, #eef2ff 38%, #e0e7ff 72%, #dbeafe 100%);
   box-shadow:
-    0 0 46px color-mix(in srgb, var(--orb-primary, #3b82f6) 44%, transparent),
-    0 0 96px color-mix(in srgb, var(--orb-secondary, #6366f1) 22%, transparent),
-    inset 0 0 34px rgba(255, 255, 255, 0.55);
+    0 0 48px color-mix(in srgb, var(--orb-primary, #2563eb) 32%, transparent),
+    0 0 96px color-mix(in srgb, var(--orb-secondary, #6366f1) 18%, transparent),
+    inset 0 -20px 40px rgba(148, 163, 184, 0.15),
+    inset 0 1px 0 rgba(255, 255, 255, 0.85);
 }
 
-.coreShine {
+@keyframes siriSphereBreathe {
+  from { transform: scale(1); }
+  to   { transform: scale(1.028); }
+}
+
+/* Layered blurred blobs — interior “liquid” colour (core Siri look) */
+.blobWrap {
   position: absolute;
-  top: 10%;
-  left: 18%;
-  width: 38%;
-  height: 22%;
-  border-radius: 50%;
-  background: radial-gradient(ellipse, rgba(255, 255, 255, 0.45) 0%, transparent 72%);
+  inset: -42%;
   pointer-events: none;
 }
 
-@keyframes siriCoreBreathe {
-  from { transform: scale(1); }
-  to   { transform: scale(1.065); }
+.siriBlob {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(22px) saturate(1.2);
+  mix-blend-mode: screen;
+  opacity: 0.92;
+}
+
+.light .siriBlob {
+  mix-blend-mode: multiply;
+  opacity: 0.72;
+  filter: blur(24px) saturate(1.05);
+}
+
+/* Blob positions & hues — tuned to Apple-like blue / violet / magenta flow */
+.siriBlob[data-b='0'] {
+  left: 8%;
+  top: 12%;
+  width: 68%;
+  height: 62%;
+  background: radial-gradient(
+    ellipse 80% 85% at 40% 35%,
+    color-mix(in srgb, var(--orb-primary, #38bdf8) 92%, white 8%) 0%,
+    color-mix(in srgb, var(--orb-primary, #0ea5e9) 45%, transparent) 55%,
+    transparent 72%
+  );
+  animation: siriBlobA 7s ease-in-out infinite alternate;
+}
+
+.siriBlob[data-b='1'] {
+  right: 2%;
+  top: 28%;
+  width: 58%;
+  height: 68%;
+  background: radial-gradient(
+    ellipse 75% 80% at 62% 48%,
+    color-mix(in srgb, var(--orb-secondary, #a78bfa) 88%, white 12%) 0%,
+    color-mix(in srgb, var(--orb-secondary, #7c3aed) 42%, transparent) 58%,
+    transparent 75%
+  );
+  animation: siriBlobB 8.5s ease-in-out infinite alternate;
+}
+
+.siriBlob[data-b='2'] {
+  left: 22%;
+  bottom: 6%;
+  width: 62%;
+  height: 58%;
+  background: radial-gradient(
+    ellipse 85% 75% at 50% 65%,
+    color-mix(in srgb, var(--orb-complement, #f472b6) 82%, white 10%) 0%,
+    color-mix(in srgb, var(--orb-complement, #db2777) 38%, transparent) 55%,
+    transparent 72%
+  );
+  animation: siriBlobC 6.5s ease-in-out infinite alternate;
+}
+
+.siriBlob[data-b='3'] {
+  left: 32%;
+  top: 38%;
+  width: 52%;
+  height: 52%;
+  background: radial-gradient(
+    circle at 50% 50%,
+    color-mix(in srgb, var(--orb-primary, #22d3ee) 55%, var(--orb-secondary, #818cf8) 45%) 0%,
+    transparent 68%
+  );
+  opacity: 0.65;
+  animation: siriBlobD 5.5s ease-in-out infinite alternate;
+}
+
+.light .siriBlob[data-b='3'] {
+  opacity: 0.5;
+}
+
+@keyframes siriBlobA {
+  0%   { transform: translate(0, 0) scale(1) rotate(0deg); }
+  100% { transform: translate(6%, -8%) scale(1.08) rotate(6deg); }
+}
+
+@keyframes siriBlobB {
+  0%   { transform: translate(0, 0) scale(1.02); }
+  100% { transform: translate(-7%, 5%) scale(1.12); }
+}
+
+@keyframes siriBlobC {
+  0%   { transform: translate(0, 0) scale(1); border-radius: 50%; }
+  100% { transform: translate(4%, -4%) scale(1.1); border-radius: 48% 52% 50% 50%; }
+}
+
+@keyframes siriBlobD {
+  0%   { transform: translate(-3%, 2%) scale(0.95); opacity: 0.55; }
+  100% { transform: translate(5%, -3%) scale(1.08); opacity: 0.78; }
+}
+
+/* Bottom / edge darkening for spherical depth */
+.depthVignette {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle at 50% 72%,
+    transparent 28%,
+    rgba(0, 0, 0, 0.38) 100%
+  );
+  pointer-events: none;
+  mix-blend-mode: multiply;
+}
+
+.light .depthVignette {
+  background: radial-gradient(
+    circle at 50% 70%,
+    transparent 35%,
+    rgba(100, 116, 139, 0.18) 100%
+  );
+  mix-blend-mode: multiply;
+}
+
+/* Upper-left specular highlight (glass) */
+.surfaceShine {
+  position: absolute;
+  top: 7%;
+  left: 14%;
+  width: 52%;
+  height: 38%;
+  border-radius: 50%;
+  background: radial-gradient(
+    ellipse 100% 70% at 38% 32%,
+    rgba(255, 255, 255, 0.55) 0%,
+    rgba(255, 255, 255, 0.12) 42%,
+    transparent 68%
+  );
+  pointer-events: none;
+  filter: blur(1px);
+}
+
+.light .surfaceShine {
+  background: radial-gradient(
+    ellipse 100% 70% at 38% 32%,
+    rgba(255, 255, 255, 0.9) 0%,
+    rgba(255, 255, 255, 0.25) 45%,
+    transparent 70%
+  );
+}
+
+/* Thin bright rim (Siri edge catch-light) */
+.rimGloss {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  box-shadow: inset 0 2px 14px rgba(255, 255, 255, 0.28);
+  pointer-events: none;
+}
+
+.light .rimGloss {
+  box-shadow: inset 0 2px 18px rgba(255, 255, 255, 0.65);
 }
 
 /* ── Captions ──────────────────────────────────────────────── */
@@ -281,10 +397,10 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .root     { animation: none; opacity: 1; }
-  .halo     { animation: none; }
-  .ring     { animation: none; opacity: 0.25; transform: scale(1.05); }
-  .waveDisk { animation: none; }
-  .core     { animation: none; }
-  .personaIcon { animation: none; }
+  .root          { animation: none; opacity: 1; }
+  .halo          { animation: none; }
+  .ring          { animation: none; opacity: 0.22; transform: scale(1.02); }
+  .orbBody       { animation: none; }
+  .siriBlob      { animation: none; }
+  .personaIcon   { animation: none; }
 }

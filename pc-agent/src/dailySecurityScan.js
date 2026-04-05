@@ -158,13 +158,17 @@ export async function releaseScanLock(lockPath) {
  * @param {string} cwd
  */
 export async function runNpmAuditJson(cwd) {
-  const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+  // Use 'npm' without platform-specific .cmd extension.
+  // execFile with shell:true ensures PATH resolution works correctly on all platforms.
+  // Command is static with no user input, so shell:true is safe.
+  const npm = 'npm';
   const env = { ...process.env, NO_COLOR: '1' };
   const opts = {
     cwd,
     windowsHide: true,
     maxBuffer: 20 * 1024 * 1024,
     env,
+    shell: true,
   };
   try {
     const { stdout, stderr } = await execFileAsync(npm, ['audit', '--json'], opts);

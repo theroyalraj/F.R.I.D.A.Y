@@ -1,4 +1,5 @@
 import { fetchGmailSnapshot } from './gmailRunner.js';
+import { getCachedGmailSnapshot } from './gmailSnapshotCache.js';
 
 /** Sources where Raj uses the Listen dashboard or mic — include inbox snapshot for mail questions. */
 const SOURCES_WITH_GMAIL_CONTEXT = new Set([
@@ -52,10 +53,16 @@ export async function buildListenGmailContextBlock(log) {
   const unreadN = Math.min(12, Math.max(3, Number(process.env.FRIDAY_LISTEN_GMAIL_UNREAD_N) || 6));
   const recentN = Math.min(12, Math.max(3, Number(process.env.FRIDAY_LISTEN_GMAIL_RECENT_N) || 6));
 
-  const snap = await fetchGmailSnapshot({
-    unreadCount: unreadN,
-    recentCount: recentN,
-  });
+  const q = { unreadCount: unreadN, recentCount: recentN, unreadOffset: 0, recentOffset: 0 };
+  let snap = await getCachedGmailSnapshot(q);
+  if (!snap) {
+    snap = await fetchGmailSnapshot(q);
+  }
+  if (snap && typeof snap === 'object' && '_cache' in snap) {
+    const copy = { ...snap };
+    delete copy._cache;
+    snap = copy;
+  }
 
   const unread = Array.isArray(snap.unread) ? snap.unread : [];
   const recent = Array.isArray(snap.recent) ? snap.recent : [];

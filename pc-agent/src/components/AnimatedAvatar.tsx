@@ -1,11 +1,32 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef } from 'react';
+import { OC_AVATAR_PX } from '../data/avatarTokens';
 import { AvatarCache, getAvatarConfig, SPEAKING_ANIMATIONS } from '../data/voiceAvatars';
 import styles from '../styles/listen.module.css';
+
+function useSpeakingPhotoPulse(isSpeaking: boolean, imgRef: React.RefObject<HTMLImageElement | null>) {
+  useEffect(() => {
+    if (!isSpeaking || !imgRef.current) return;
+    let phase = 0;
+    let t: ReturnType<typeof setTimeout>;
+    const tick = () => {
+      const open = SPEAKING_ANIMATIONS.lips[phase % SPEAKING_ANIMATIONS.lips.length]?.openness ?? 0;
+      const s = 1 + open * 0.04;
+      if (imgRef.current) imgRef.current.style.transform = `scale(${s})`;
+      phase++;
+      t = setTimeout(tick, 90);
+    };
+    tick();
+    return () => {
+      clearTimeout(t);
+      if (imgRef.current) imgRef.current.style.transform = '';
+    };
+  }, [isSpeaking, imgRef]);
+}
 
 export interface AnimatedAvatarProps {
   voiceId: string;
   isSpeaking?: boolean;
-  size?: 'small' | 'medium' | 'large';
+  size?: 'small' | 'medium' | 'large' | 'hero' | 'zoom';
   showLabel?: boolean;
 }
 
@@ -19,26 +40,31 @@ const AnimatedAvatar: React.FC<AnimatedAvatarProps> = ({
   size = 'medium',
   showLabel = true,
 }) => {
-  const avatarRef = useRef<HTMLDivElement>(null);
   const lipsRef = useRef<HTMLDivElement>(null);
   const headRef = useRef<HTMLDivElement>(null);
   const eyesRef = useRef<HTMLDivElement>(null);
-  const animationRef = useRef<number | null>(null);
-  const [animationPhase, setAnimationPhase] = useState(0);
+  const photoRef = useRef<HTMLImageElement>(null);
+  const animationRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const config = AvatarCache.getOrDefault(voiceId);
+  const photoUrl = config.photoUrl?.trim();
+  useSpeakingPhotoPulse(Boolean(photoUrl && isSpeaking), photoRef);
 
   const sizeMap = {
-    small: 48,
-    medium: 72,
-    large: 120,
+    small: OC_AVATAR_PX.animatedSmall,
+    medium: OC_AVATAR_PX.animatedMedium,
+    large: OC_AVATAR_PX.animatedLarge,
+    hero: OC_AVATAR_PX.animatedHero,
+    zoom: OC_AVATAR_PX.animatedZoom,
   };
 
   const size_px = sizeMap[size];
+  const layoutSize: 'small' | 'medium' | 'large' =
+    size === 'hero' || size === 'zoom' ? 'large' : size;
 
-  // Lip sync animation
+  // Lip sync animation (emoji avatars only)
   useEffect(() => {
-    if (!isSpeaking || !lipsRef.current) return;
+    if (photoUrl || !isSpeaking || !lipsRef.current) return;
 
     let phase = 0;
     const animate = () => {
@@ -54,11 +80,11 @@ const AnimatedAvatar: React.FC<AnimatedAvatarProps> = ({
     return () => {
       if (animationRef.current) clearTimeout(animationRef.current);
     };
-  }, [isSpeaking]);
+  }, [isSpeaking, photoUrl]);
 
   // Head movement animation
   useEffect(() => {
-    if (!isSpeaking || !headRef.current) return;
+    if (photoUrl || !isSpeaking || !headRef.current) return;
 
     let phase = 0;
     const animate = () => {
@@ -74,11 +100,11 @@ const AnimatedAvatar: React.FC<AnimatedAvatarProps> = ({
     return () => {
       if (animationRef.current) clearTimeout(animationRef.current);
     };
-  }, [isSpeaking]);
+  }, [isSpeaking, photoUrl]);
 
   // Eye animation (blink)
   useEffect(() => {
-    if (!isSpeaking || !eyesRef.current) return;
+    if (photoUrl || !isSpeaking || !eyesRef.current) return;
 
     let phase = 0;
     const animate = () => {
@@ -94,45 +120,54 @@ const AnimatedAvatar: React.FC<AnimatedAvatarProps> = ({
     return () => {
       if (animationRef.current) clearTimeout(animationRef.current);
     };
-  }, [isSpeaking]);
+  }, [isSpeaking, photoUrl]);
 
   return (
     <div
-      className={`${styles['avatar-container']} ${styles[`avatar-${size}`]}`}
+      className={`${styles['avatar-container']} ${styles[`avatar-${layoutSize}`]}`}
       style={{
         '--primary-color': config.primaryColor,
         '--secondary-color': config.secondaryColor,
       } as React.CSSProperties}
     >
       <div
-        ref={avatarRef}
-        className={`${styles.avatar} ${styles[`avatar-${config.style}`]}`}
+        className={`${styles.avatar} ${photoUrl ? styles['avatar-photo'] : styles[`avatar-${config.style}`]}`}
         style={{
           width: size_px,
           height: size_px,
           borderColor: config.primaryColor,
         }}
       >
-        {/* Head container */}
-        <div ref={headRef} className={styles['avatar-head']} style={{ transition: 'none' }}>
-          {/* Background */}
-          <div className={styles['avatar-bg']} style={{ backgroundColor: config.secondaryColor }} />
-
-          {/* Eyes */}
-          <div ref={eyesRef} className={styles['avatar-eyes']}>
-            <div className={styles.eye} />
-            <div className={styles.eye} />
-          </div>
-
-          {/* Emoji/Face */}
-          <div className={styles['avatar-face']}>{config.emoji}</div>
-
-          {/* Mouth/Lips */}
-          <div ref={lipsRef} className={styles['avatar-lips']} style={{ backgroundColor: config.primaryColor }} />
-        </div>
-
-        {/* Speaking indicator pulse */}
-        {isSpeaking && <div className={styles['avatar-pulse']} style={{ borderColor: config.primaryColor }} />}
+        {photoUrl ? (
+          <>
+            <img
+              ref={photoRef}
+              className={styles['avatar-photo-img']}
+              src={photoUrl}
+              alt=""
+              width={size_px}
+              height={size_px}
+              loading="lazy"
+              decoding="async"
+            />
+            {isSpeaking ? (
+              <div className={styles['avatar-pulse']} style={{ borderColor: config.primaryColor }} />
+            ) : null}
+          </>
+        ) : (
+          <>
+            <div ref={headRef} className={styles['avatar-head']} style={{ transition: 'none' }}>
+              <div className={styles['avatar-bg']} style={{ backgroundColor: config.secondaryColor }} />
+              <div ref={eyesRef} className={styles['avatar-eyes']}>
+                <div className={styles.eye} />
+                <div className={styles.eye} />
+              </div>
+              <div className={styles['avatar-face']}>{config.emoji}</div>
+              <div ref={lipsRef} className={styles['avatar-lips']} style={{ backgroundColor: config.primaryColor }} />
+            </div>
+            {isSpeaking && <div className={styles['avatar-pulse']} style={{ borderColor: config.primaryColor }} />}
+          </>
+        )}
       </div>
 
       {/* Label */}

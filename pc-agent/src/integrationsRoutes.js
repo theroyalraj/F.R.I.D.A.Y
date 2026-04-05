@@ -4,10 +4,16 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { fetchGmailSnapshot } from './gmailRunner.js';
+import {
+  getCachedGmailSnapshot,
+  setCachedGmailSnapshot,
+  invalidateAllGmailSnapshotCaches,
+} from './gmailSnapshotCache.js';
 
 const _ROOT = path.dirname(path.dirname(path.dirname(fileURLToPath(import.meta.url))));
 import { getPoolSnapshot, refreshModelPool } from './openRouterModelPool.js';
 import { getKeyPoolSnapshot, validateAllKeys } from './openRouterKeyPool.js';
+import { pushMockInbound, listMockInbound, clearMockInbound } from './whatsappMockCache.js';
 
 function evolutionBase() {
   const port = (process.env.EVOLUTION_PORT || '8181').trim();
@@ -35,6 +41,67 @@ function parseAllowlist() {
 
 function normalizeDigits(s) {
   return String(s || '').replace(/\D/g, '');
+}
+
+function whatsAppMockEnabled() {
+  return String(process.env.OPENCLAW_WHATSAPP_MOCK || '').trim() === '1';
+}
+
+function pcAgentInternalBase() {
+  const port = Number(process.env.PC_AGENT_PORT || 3847);
+  return `http://127.0.0.1:${port}`;
+}
+
+/** @param {string} line */
+async function internalSpeakWhatsAppAsync(line) {
+  const secret = (process.env.PC_AGENT_SECRET || '').trim();
+  if (!secret) return { ok: false, reason: 'PC_AGENT_SECRET not set' };
+  const text = String(line || '').trim().slice(0, 500);
+  if (!text) return { ok: false, reason: 'empty text' };
+  try {
+    const r = await fetch(`${pcAgentInternalBase()}/voice/speak-async`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${secret}`,
+      },
+      body: JSON.stringify({
+        text,
+        channel: 'whatsapp',
+        personaKey: 'dexter',
+      }),
+    });
+    return { ok: r.ok, status: r.status };
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) };
+  }
+}
+
+/** @param {string} fromDigits @param {string} text */
+async function internalTodoFromWhatsAppMock(fromDigits, text) {
+  const secret = (process.env.PC_AGENT_SECRET || '').trim();
+  if (!secret) return { ok: false, reason: 'PC_AGENT_SECRET not set' };
+  const title = `WhatsApp (important): +${fromDigits}`.slice(0, 200);
+  const detail = String(text || '').trim().slice(0, 2000);
+  try {
+    const r = await fetch(`${pcAgentInternalBase()}/todos`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${secret}`,
+      },
+      body: JSON.stringify({
+        title,
+        detail,
+        source: 'whatsapp-mock',
+        priority: 'high',
+      }),
+    });
+    const data = await r.json().catch(() => ({}));
+    return { ok: r.ok, status: r.status, todo: data?.todo };
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) };
+  }
 }
 
 /**
@@ -150,17 +217,54 @@ export function createIntegrationsRouter(authMiddleware) {
     const recentCount = Math.min(50, Math.max(1, Number(req.query.recentCount) || 12));
     const unreadOffset = Math.min(500, Math.max(0, Number(req.query.unreadOffset) || 0));
     const recentOffset = Math.min(500, Math.max(0, Number(req.query.recentOffset) || 0));
+    const q = { unreadCount, recentCount, unreadOffset, recentOffset };
+    const forceFresh =
+      req.query.fresh === '1' ||
+      req.query.force === '1' ||
+      String(req.query.refresh || '').toLowerCase() === 'true';
 
     try {
-      const snap = await fetchGmailSnapshot({
-        unreadCount,
-        recentCount,
-        unreadOffset,
-        recentOffset,
-      });
-      res.json(snap);
+      if (!forceFresh) {
+        const cached = await getCachedGmailSnapshot(q);
+        if (cached && typeof cached === 'object') {
+          const out = { ...cached };
+          delete out._cache;
+          try {
+            res.json({ ...out, source: 'redis' });
+          } catch (ser) {
+            req.log?.warn({ err: String(ser?.message || ser) }, 'integrations gmail cached json failed');
+            res.status(503).json({ ok: false, error: 'Could not serialize cached mail snapshot' });
+          }
+          return;
+        }
+      }
+
+      const snap = await fetchGmailSnapshot(q);
+      await setCachedGmailSnapshot(q, snap);
+      try {
+        res.json({ ...snap, source: 'imap' });
+      } catch (ser) {
+        req.log?.warn({ err: String(ser?.message || ser) }, 'integrations gmail response json failed');
+        res.status(503).json({ ok: false, error: 'Could not serialize mail snapshot' });
+      }
     } catch (e) {
       req.log?.warn({ err: String(e.message) }, 'integrations gmail failed');
+      if (!res.headersSent) {
+        res.status(503).json({ ok: false, error: String(e.message || e) });
+      }
+    }
+  });
+
+  /**
+   * Called by gmail-watch (or Gmail Pub/Sub forwarder) when new mail arrives — clears Redis so Listen UI refetches IMAP on next request.
+   * Auth: same as other integration routes (Bearer JWT or PC_AGENT_SECRET).
+   */
+  r.post('/gmail/cache/invalidate', async (req, res) => {
+    try {
+      const n = await invalidateAllGmailSnapshotCaches();
+      res.json({ ok: true, deletedKeys: n });
+    } catch (e) {
+      req.log?.warn({ err: String(e.message) }, 'gmail cache invalidate failed');
       res.status(503).json({ ok: false, error: String(e.message || e) });
     }
   });
@@ -216,7 +320,36 @@ export function createIntegrationsRouter(authMiddleware) {
   r.get('/whatsapp/messages', async (req, res) => {
     const inst = evolutionInstanceName();
     const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
+
+    /** @type {{ id: string; from: string; text: string; ts: string }[]} */
+    let mockUi = [];
+    if (whatsAppMockEnabled()) {
+      const mocks = await listMockInbound();
+      mockUi = mocks.map(({ id, from, text, ts }) => ({ id, from, text, ts }));
+    }
+
+    const mergeWithMock = (collected) => {
+      const messages = [];
+      for (const m of mockUi) {
+        if (messages.length >= limit) break;
+        messages.push(m);
+      }
+      const room = limit - messages.length;
+      if (room > 0 && collected.length) {
+        messages.push(...collected.slice(-room));
+      }
+      return messages;
+    };
+
     if (!evolutionKey()) {
+      if (whatsAppMockEnabled() && mockUi.length) {
+        return res.json({
+          ok: true,
+          messages: mockUi.slice(0, limit),
+          source: 'mock',
+          hint: 'EVOLUTION_API_KEY not set — showing mock rows only',
+        });
+      }
       return res.status(503).json({ ok: false, error: 'EVOLUTION_API_KEY not set' });
     }
     const payload = JSON.stringify({
@@ -238,14 +371,84 @@ export function createIntegrationsRouter(authMiddleware) {
         if (!r1.ok) continue;
         const collected = flattenEvolutionMessages(r1.data, 80);
         if (collected.length) {
-          return res.json({ ok: true, messages: collected.slice(-limit) });
+          return res.json({
+            ok: true,
+            messages: mergeWithMock(collected),
+            source: mockUi.length ? 'mock+evolution' : 'evolution',
+          });
         }
       }
-      res.json({ ok: true, messages: [] });
+      res.json({
+        ok: true,
+        messages: mockUi.length ? mockUi.slice(0, limit) : [],
+        source: mockUi.length ? 'mock' : 'evolution',
+      });
     } catch (e) {
       req.log?.warn({ err: String(e.message) }, 'integrations whatsapp messages failed');
+      if (whatsAppMockEnabled() && mockUi.length) {
+        return res.json({
+          ok: true,
+          messages: mockUi.slice(0, limit),
+          source: 'mock',
+          warn: String(e.message || e),
+        });
+      }
       res.status(503).json({ ok: false, error: String(e.message || e) });
     }
+  });
+
+  /**
+   * Dev / QA: mimic an inbound WhatsApp — Redis row in Recent inbound, optional TTS + integrations rail, optional high-priority todo.
+   * Requires OPENCLAW_WHATSAPP_MOCK=1. Auth: same as other /integrations routes.
+   */
+  r.post('/whatsapp/mock/notify', async (req, res) => {
+    if (!whatsAppMockEnabled()) {
+      return res.status(403).json({
+        ok: false,
+        error: 'Set OPENCLAW_WHATSAPP_MOCK=1 in .env and restart pc-agent',
+      });
+    }
+    const body = req.body || {};
+    const from = normalizeDigits(body.from) || '15551234567';
+    const text = String(
+      body.text || 'Demo inbound WhatsApp — check the integrations rail and optional todo.',
+    ).trim();
+    const important = body.important === true;
+    const skipSpeak = body.skipSpeak === true;
+    const skipTodo = body.skipTodo === true;
+
+    const row = await pushMockInbound({ from, text });
+    if (!row) {
+      return res.status(503).json({
+        ok: false,
+        error: 'Could not store mock row (is Redis up? OPENCLAW_REDIS_URL)',
+      });
+    }
+
+    let speak = { skipped: true };
+    if (!skipSpeak) {
+      const line = `New WhatsApp message from ${from}. ${text.slice(0, 120)}`;
+      speak = await internalSpeakWhatsAppAsync(line);
+    }
+
+    let todo = { skipped: true };
+    if (important && !skipTodo) {
+      todo = await internalTodoFromWhatsAppMock(from, text);
+    }
+
+    res.json({ ok: true, mock: row, speak, todo });
+  });
+
+  /** Clear mock inbound rows (same mock gate as POST). */
+  r.delete('/whatsapp/mock/inbound', async (req, res) => {
+    if (!whatsAppMockEnabled()) {
+      return res.status(403).json({
+        ok: false,
+        error: 'Set OPENCLAW_WHATSAPP_MOCK=1 in .env',
+      });
+    }
+    const n = await clearMockInbound();
+    res.json({ ok: true, deletedKeys: n });
   });
 
   r.post('/whatsapp/send', async (req, res) => {
@@ -345,6 +548,32 @@ export function createIntegrationsRouter(authMiddleware) {
         const msg = (result.stderr || '').trim() || `exit ${result.status}`;
         return res.status(500).json({ ok: false, error: msg });
       }
+      const out = (result.stdout || '').trim();
+      let data = null;
+      try { data = out ? JSON.parse(out) : null; } catch { data = { raw: out }; }
+      return res.json({ ok: true, uid, ...(data || {}) });
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: String(e.message || e) });
+    }
+  });
+
+  /** Mark email as unread (done) by UID — marks message as unread for tracking. */
+  r.post('/mail/mark-unread', async (req, res) => {
+    const { uid } = req.body || {};
+    if (!uid) return res.status(400).json({ error: 'uid required' });
+    try {
+      const result = spawnSync(
+        'python',
+        ['scripts/gmail.py', 'mark-unread', String(uid)],
+        { cwd: _ROOT, encoding: 'utf8', timeout: 15_000 },
+      );
+      if (result.error) throw result.error;
+      if (result.status !== 0) {
+        const msg = (result.stderr || '').trim() || `exit ${result.status}`;
+        return res.status(500).json({ ok: false, error: msg });
+      }
+      // Invalidate cache after marking as unread
+      await invalidateAllGmailSnapshotCaches();
       const out = (result.stdout || '').trim();
       let data = null;
       try { data = out ? JSON.parse(out) : null; } catch { data = { raw: out }; }

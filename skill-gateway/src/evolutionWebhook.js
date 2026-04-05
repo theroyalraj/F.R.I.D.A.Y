@@ -19,6 +19,56 @@ import { sendWinToast, sendPersistentCallToast } from './winToast.js';
 import { stopAllFridayAudioSync } from './stopAllFridayAudio.js';
 import { fridaySpeakEnabled, speakFridayPy } from './fridaySpeak.js';
 import { winTtsEnabled, speakWinTts } from './winTts.js';
+
+const PC_AGENT_URL = (process.env.PC_AGENT_URL || process.env.PC_AGENT_INTERNAL_URL || 'http://127.0.0.1:3847').replace(
+  /\/$/,
+  '',
+);
+const PC_AGENT_SECRET = (process.env.PC_AGENT_SECRET || '').trim();
+
+/**
+ * WhatsApp DM notify: prefer pc-agent /voice/speak-async so Friday Listen SSE shows the WhatsApp rail (Dexter).
+ * Falls back to local friday-speak.py when secret missing or request fails.
+ */
+async function speakWhatsAppMessageLine(text, log) {
+  const line = String(text || '').trim().slice(0, 500);
+  if (!line) return;
+
+  if (PC_AGENT_SECRET) {
+    try {
+      const r = await fetch(`${PC_AGENT_URL}/voice/speak-async`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${PC_AGENT_SECRET}`,
+        },
+        body: JSON.stringify({
+          text: line,
+          channel: 'whatsapp',
+          personaKey: 'dexter',
+        }),
+      });
+      if (r.ok) {
+        log?.info({ preview: line.slice(0, 80) }, 'whatsapp message: speak-async ok');
+        return;
+      }
+      log?.warn({ status: r.status }, 'whatsapp message: speak-async non-OK, falling back');
+    } catch (err) {
+      log?.warn({ err: String(err?.message || err) }, 'whatsapp message: speak-async failed, falling back');
+    }
+  }
+
+  if (fridaySpeakEnabled()) {
+    speakFridayPy(line, log, {
+      bypassCursorDefer: true,
+      priority: true,
+      speakChannel: 'whatsapp',
+      speakPersonaKey: 'dexter',
+    });
+  } else if (winTtsEnabled()) {
+    speakWinTts(line, log, { bypassCursorDefer: true });
+  }
+}
 import { processWhatsAppJiraMessagesUpsert } from './whatsappJiraPipeline.js';
 
 const log = rootLogger.child({ module: 'evolutionWebhook' });
@@ -179,12 +229,7 @@ function handleMessagesUpsert(data) {
       log,
     });
 
-    if (fridaySpeakEnabled()) {
-      speakFridayPy(`New WhatsApp message from ${from}. ${preview}`, log, {
-        bypassCursorDefer: true,
-        priority: true,
-      });
-    }
+    void speakWhatsAppMessageLine(`New WhatsApp message from ${from}. ${preview}`, log);
   }
 }
 

@@ -14,6 +14,11 @@ Env (see also OPENCLAW_ECHO_* and FRIDAY_SILENCE_* in .env):
   FRIDAY_SILENCE_JITTER_RANGE, FRIDAY_SILENCE_CONTEXT_DEPTH, FRIDAY_SILENCE_CONTEXT_SCAN_SEC
   FRIDAY_SILENCE_MAX_NUDGES_HOUR, FRIDAY_SILENCE_USE_AI, FRIDAY_SILENCE_AI_MODEL
   FRIDAY_SILENCE_RESERVE_SIZE, ANTHROPIC_API_KEY, CURSOR_TRANSCRIPTS_DIR
+  FRIDAY_ECHO_TTS_PREEMPT — default true: ECHO uses hard TTS pre-empt so nudges are not dropped
+    behind the cooperative lock (set false for legacy gentle queueing).
+  FRIDAY_SILENCE_CREATIVE_WEIGHT — default 100; scale 0–200 boosts interesting_fact / meme_energy /
+    trivia_tangent weights (200 = strongest creative bias).
+  FRIDAY_SILENCE_USE_ENV_TIMING — when true, idleSec/rearmSec ignore Redis (Listen UI) and use .env only.
 """
 from __future__ import annotations
 
@@ -47,7 +52,7 @@ if ENV_PATH.exists():
         if k and k not in os.environ:
             os.environ[k] = v
 
-from friday_win_focus import should_defer_ambient_for_cursor  # noqa: E402
+from friday_win_focus import should_defer_voice_for_cursor  # noqa: E402
 from openclaw_company import friday_speak_env_for_persona  # noqa: E402
 
 logging.basicConfig(
@@ -137,28 +142,35 @@ def _pick_weighted_style(memos: list) -> tuple:
     Pick a delivery style weighted by emotional context instead of uniform random.
     Style order: callback, gentle_observation, tangent, offer_subtle, warmth, playful,
     continuation, interesting_fact, meme_energy, trivia_tangent
+
+    Creative modes (fact / meme_energy / trivia_tangent) are biased up so quiet stretches
+    get fresh, surprising lines — Haiku still improvises from time-of-day when there is no transcript.
     """
     vibe = _infer_vibe_from_memos(memos)
     has_context = any((m.get("user_line") or "").strip() for m in memos[:5])
+    creative_boost = _env_int("FRIDAY_SILENCE_CREATIVE_WEIGHT", 100)
+    if creative_boost < 0:
+        creative_boost = 0
+    if creative_boost > 200:
+        creative_boost = 200
+    # Scale indices 7,8,9 (interesting_fact, meme_energy, trivia_tangent)
+    c = creative_boost / 100.0
 
     if not has_context:
-        # No context — observation and warmth only; no creative fact/meme/trivia
-        weights = [0, 3, 0, 1, 4, 2, 0, 0, 0, 0]
+        # No transcript — still allow creative riffs tied to quiet / time of day (prompt allows it)
+        weights = [0, 3, 1, 0, 3, 4, 0, int(3 * c), int(4 * c), int(3 * c)]
     elif vibe == "stuck":
-        # Struggling — empathy, offer concrete help, warmth; no playful or creative riffs
+        # Struggling — empathy first; tiny chance of a dry observation riff
         weights = [1, 1, 1, 4, 4, 0, 2, 0, 0, 0]
     elif vibe == "shipping":
-        # Building something — curiosity, continuation, playful, plus interesting tangents
-        weights = [4, 0, 2, 1, 1, 2, 4, 3, 2, 3]
+        weights = [4, 0, 2, 1, 1, 2, 4, int(4 * c), int(3 * c), int(4 * c)]
     elif vibe == "grinding":
-        # Long session — warmth-heavy; light creative to break the slog
-        weights = [1, 2, 1, 1, 5, 1, 1, 1, 1, 2]
+        weights = [1, 2, 1, 1, 4, 2, 1, int(3 * c), int(3 * c), int(4 * c)]
     elif vibe == "winding_down":
-        # Late night — gentle, warm, no pressure; no trivia or meme energy
-        weights = [0, 2, 0, 0, 5, 1, 2, 0, 0, 0]
+        weights = [0, 2, 0, 0, 5, 2, 2, 0, 0, int(1 * c)]
     else:
-        # focused / unknown — balanced with continuation bias + moderate creative
-        weights = [2, 1, 2, 1, 1, 2, 3, 2, 2, 3]
+        # focused / unknown — strong creative mix
+        weights = [2, 1, 2, 1, 1, 2, 2, int(4 * c), int(4 * c), int(5 * c)]
 
     return random.choices(_DELIVERY_STYLES, weights=weights, k=1)[0]
 
@@ -266,6 +278,10 @@ def _get_echo_config(r) -> dict[str, Any]:
     if base["voice"] in bl:
         log.warning("ECHO voice %s is blocklisted — falling back to Ava multilingual", base["voice"])
         base["voice"] = "en-US-AvaMultilingualNeural"
+    # When true, idle/rearm come from .env only (Listen UI Redis values ignored for those two).
+    if _env_bool("FRIDAY_SILENCE_USE_ENV_TIMING", False):
+        base["idleSec"] = max(30, _env_int("FRIDAY_SILENCE_IDLE_SEC", 120))
+        base["rearmSec"] = max(60, _env_int("FRIDAY_SILENCE_REARM_SEC", 300))
     return base
 
 
@@ -698,13 +714,14 @@ def _generate_line_ai(
         )
 
     max_tokens = 400 if _creative else 220
+    temperature = 0.93 if _creative else 0.88
 
     try:
         client = mod.Anthropic(api_key=key)
         msg = client.messages.create(
             model=model,
             max_tokens=max_tokens,
-            temperature=0.88,
+            temperature=temperature,
             system=system,
             messages=[{"role": "user", "content": user_msg}],
         )
@@ -778,7 +795,10 @@ def _refill_reserve_async(memories_snapshot: list[dict[str, Any]], cfg: dict[str
 
 def _resolve_speak_env(cfg: dict[str, Any]) -> dict[str, str]:
     env = os.environ.copy()
-    env.update(friday_speak_env_for_persona("echo", priority=True, preempt=False))
+    # Preempt clears the Redis TTS lock like urgent speaks — cooperative mode often timed out
+    # or never won the lock while other daemons spoke, so ECHO nudges were inaudible.
+    echo_preempt = _env_bool("FRIDAY_ECHO_TTS_PREEMPT", True)
+    env.update(friday_speak_env_for_persona("echo", priority=True, preempt=echo_preempt))
     voice = (cfg.get("voice") or "").strip()
     if voice and voice not in _house_voice_blocklist():
         env["FRIDAY_TTS_VOICE"] = voice
@@ -878,7 +898,8 @@ def main() -> None:
         if silence_requires_narration and not narration_on:
             continue
 
-        if defer_cursor and should_defer_ambient_for_cursor():
+        # Same focus rule as friday-listen (FRIDAY_DEFER_WHEN_CURSOR), not Maestro ambient.
+        if defer_cursor and should_defer_voice_for_cursor():
             continue
 
         if _tts_active_file() or _play_running() or _redis_tts_lock_held():
@@ -953,17 +974,39 @@ def main() -> None:
             continue
 
         speak_env = _resolve_speak_env(cfg)
+        popen_kw: dict[str, Any] = dict(
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        if sys.platform == "win32":
+            popen_kw["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         try:
             proc = subprocess.Popen(
                 [sys.executable, str(SPEAK_SCRIPT), line],
                 cwd=str(ROOT),
                 env=speak_env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                **popen_kw,
             )
         except OSError as e:
             log.warning("Could not spawn friday-speak: %s", e)
             continue
+
+        def _log_speak_outcome(p: subprocess.Popen) -> None:
+            try:
+                _, err_b = p.communicate()
+                err = (err_b or b"").decode("utf-8", errors="replace").strip()
+                rc = p.returncode
+                if rc not in (0, None):
+                    log.warning("ECHO friday-speak exit=%s stderr=%s", rc, err[:900] if err else "(empty)")
+                elif err and any(
+                    x in err.lower()
+                    for x in ("error", "exception", "traceback", "skipping", "timed out", "failed")
+                ):
+                    log.warning("ECHO friday-speak stderr=%s", err[:900])
+            except Exception as ex:
+                log.debug("ECHO friday-speak drain: %s", ex)
+
+        threading.Thread(target=_log_speak_outcome, args=(proc,), daemon=True).start()
 
         last_nudge_local = time.time()
         rearm_effective = _jittered_rearm_sec(rearm_sec)

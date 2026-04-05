@@ -411,6 +411,11 @@ footer {
 .footer-item  { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: .62rem; color: var(--dim); letter-spacing: .06em; }
 .footer-label { color: var(--muted); text-transform: uppercase; }
 .footer-val   { color: var(--dim); }
+.footer-item--watcher { flex: 1; min-width: 0; justify-content: flex-start; }
+.footer-item--watcher .footer-val { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 42vw; }
+.footer-item--watcher.footer-muted .footer-val { color: var(--amber); }
+.footer-item--watcher.footer-disabled .footer-val { color: #f87171; }
+body.light .footer-item--watcher.footer-disabled .footer-val { color: #b91c1c; }
 
 /* ── Toast notifications ───────────────────────────────────────────── */
 .voice-toast {

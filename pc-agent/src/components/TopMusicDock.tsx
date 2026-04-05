@@ -9,6 +9,7 @@ export type TopMusicDockProps = {
   speakingPersonaKey: SpeakingPersonaKey;
   authHeaders: () => HeadersInit;
   showToast: (message: string, type?: 'info' | 'error' | 'success') => void;
+  onStopSpeaking?: () => void;
 };
 
 function stripPlayingPrefix(line: string): string {
@@ -24,6 +25,7 @@ const TopMusicDock: React.FC<TopMusicDockProps> = ({
   speakingPersonaKey,
   authHeaders,
   showToast,
+  onStopSpeaking,
 }) => {
   const [expanded, setExpanded] = useState(false);
   const [query, setQuery] = useState('');
@@ -272,6 +274,17 @@ const TopMusicDock: React.FC<TopMusicDockProps> = ({
           >
             {'\u23F9'}
           </button>
+          {speakingPersonaKey && onStopSpeaking && (
+            <button
+              type="button"
+              className={`${styles['music-dock-btn']} ${styles['music-dock-btn-stop']}`}
+              onClick={onStopSpeaking}
+              disabled={busy !== null}
+              title="Stop speaking (ends TTS)"
+            >
+              {'\u26D4'}
+            </button>
+          )}
         </div>
       </div>
 
@@ -280,72 +293,78 @@ const TopMusicDock: React.FC<TopMusicDockProps> = ({
           <p className={styles['music-dock-hint']}>
             Maestro uses yt-dlp search on this machine — try an artist, track, or &ldquo;lofi jazz&rdquo;.
           </p>
-          <div className={styles['music-dock-volume-row']}>
-            <label className={styles['music-dock-volume-label']} htmlFor="music-dock-volume">
-              Background level
-            </label>
-            <span className={styles['music-dock-volume-val']} aria-live="polite">
-              {musicVol}%
-            </span>
-            <input
-              id="music-dock-volume"
-              type="range"
-              className={styles['music-dock-volume-slider']}
-              min={0}
-              max={100}
-              value={musicVol}
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={musicVol}
-              onChange={(e) => {
-                const v = Number(e.target.value);
-                if (!Number.isFinite(v)) return;
-                setMusicVol(Math.round(v));
-                if (volDebounceRef.current) window.clearTimeout(volDebounceRef.current);
-                volDebounceRef.current = window.setTimeout(() => {
-                  volDebounceRef.current = null;
-                  void persistMusicVolume(Math.round(v));
-                }, 400);
-              }}
-            />
-          </div>
-          <div className={styles['music-dock-autoplay-row']}>
-            <div className={styles['music-dock-autoplay-copy']}>
-              <span className={styles['music-dock-autoplay-label']} id="music-dock-autoplay-lbl">
-                Auto background music
-              </span>
-              <span className={styles['music-dock-autoplay-hint']}>
-                Scheduler, ambient clips, startup or task-done songs. Manual play still works.
-              </span>
-            </div>
-            <input
-              type="checkbox"
-              role="switch"
-              className={styles['music-dock-autoplay-switch']}
-              checked={musicAutoplay}
-              onChange={(e) => void persistMusicAutoplay(e.target.checked)}
-              aria-checked={musicAutoplay}
-              aria-labelledby="music-dock-autoplay-lbl"
-            />
-          </div>
-          <div className={styles['music-dock-search-row']}>
-            <input
-              type="search"
-              className={styles['music-dock-input']}
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), void doPlay())}
-              placeholder="Artist, song, playlist vibe…"
-              autoFocus
-            />
-            <button
-              type="button"
-              className={styles['music-dock-play-go']}
-              onClick={() => void doPlay()}
-              disabled={busy !== null || !query.trim()}
+          <div className={styles['music-dock-controls-row']}>
+            <div
+              className={styles['music-dock-volume-col']}
+              title="Background music playback level on this machine"
             >
-              Play
-            </button>
+              <span className={styles['music-dock-volume-val-vertical']} aria-live="polite">
+                {musicVol}%
+              </span>
+              <label className={styles['music-dock-volume-vertical-label']} htmlFor="music-dock-volume">
+                Level
+              </label>
+              <input
+                id="music-dock-volume"
+                type="range"
+                className={styles['music-dock-volume-slider-vertical']}
+                min={0}
+                max={100}
+                value={musicVol}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={musicVol}
+                {...({ orient: 'vertical' } as React.InputHTMLAttributes<HTMLInputElement>)}
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  if (!Number.isFinite(v)) return;
+                  setMusicVol(Math.round(v));
+                  if (volDebounceRef.current) window.clearTimeout(volDebounceRef.current);
+                  volDebounceRef.current = window.setTimeout(() => {
+                    volDebounceRef.current = null;
+                    void persistMusicVolume(Math.round(v));
+                  }, 400);
+                }}
+              />
+            </div>
+            <div
+              className={styles['music-dock-autoplay-col']}
+              title="Scheduler, ambient clips, startup or task-done songs. Manual play still works."
+            >
+              <span className={styles['music-dock-autoplay-label']} id="music-dock-autoplay-lbl">
+                Auto bg
+              </span>
+              <input
+                type="checkbox"
+                role="switch"
+                className={styles['music-dock-autoplay-switch']}
+                checked={musicAutoplay}
+                onChange={(e) => void persistMusicAutoplay(e.target.checked)}
+                aria-checked={musicAutoplay}
+                aria-labelledby="music-dock-autoplay-lbl"
+              />
+            </div>
+            <div className={styles['music-dock-search-col']}>
+              <div className={styles['music-dock-search-row']}>
+                <input
+                  type="search"
+                  className={styles['music-dock-input']}
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), void doPlay())}
+                  placeholder="Artist, song, playlist vibe…"
+                  autoFocus
+                />
+                <button
+                  type="button"
+                  className={styles['music-dock-play-go']}
+                  onClick={() => void doPlay()}
+                  disabled={busy !== null || !query.trim()}
+                >
+                  Play
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

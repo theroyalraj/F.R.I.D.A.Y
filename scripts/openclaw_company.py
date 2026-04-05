@@ -5,7 +5,7 @@ openclaw_company.py — OpenClaw Labs org chart: names, titles, Edge voices, TTS
 Each long-running daemon imports get_persona(role) and applies voice/rate to subprocess env
 or friday_speaker kwargs. Env overrides: OPENCLAW_<ROLE>_VOICE, OPENCLAW_<ROLE>_RATE
 
-Roles: jarvis, argus, nova, sage, dexter, maestro, harper, sentinel, atlas, echo
+Roles: jarvis, argus, nova, sage, dexter, maestro, harper, riya, sentinel, atlas, echo
 """
 from __future__ import annotations
 
@@ -79,6 +79,20 @@ PERSONAS: dict[str, dict[str, str]] = {
         "personality": "Organised, supportive; reminders without nagging.",
         "daemon_role": "Due reminders (`friday-reminder-watch`)",
     },
+    "riya": {
+        "name": "Riya",
+        "title": "Cultural Liaison",
+        "voice": "en-IN-NeerjaExpressiveNeural",
+        "rate": "+10%",
+        "personality": (
+            "Warm Indian English with expressive delivery — natural for Hinglish, playful check-ins, "
+            "and banter that should sound like someone in the room, not a newsreader."
+        ),
+        "daemon_role": (
+            "Optional `FRIDAY_TTS_SESSION=riya` speaks; pair voice with Hinglish or playful lines "
+            "(see `friday_speak_env_for_persona(\"riya\")`)"
+        ),
+    },
     "sentinel": {
         "name": "Sentinel",
         "title": "IT Operations",
@@ -106,7 +120,7 @@ PERSONAS: dict[str, dict[str, str]] = {
 }
 
 # Ordered list for rule generation (Jarvis is the lead, rest are leadership & specialists)
-PERSONA_ORDER = ["jarvis", "argus", "nova", "sage", "dexter", "maestro", "harper", "sentinel", "atlas", "echo"]
+PERSONA_ORDER = ["jarvis", "argus", "nova", "sage", "dexter", "maestro", "harper", "riya", "sentinel", "atlas", "echo"]
 
 
 def generate_company_rule_mdc() -> str:
