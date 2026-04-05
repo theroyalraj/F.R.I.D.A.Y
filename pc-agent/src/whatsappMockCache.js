@@ -1,10 +1,13 @@
 /**
  * Ephemeral WhatsApp rows for Listen UI when OPENCLAW_WHATSAPP_MOCK=1.
  * Merged into GET /integrations/whatsapp/messages (shown under Recent inbound).
+ *
+ * Storage: Redis LIST (atomic LPUSH+LTRIM). Legacy STRING JSON array is read once for migration.
  */
 import { createClient } from 'redis';
 
 const KEY = 'openclaw:whatsapp:mock_inbound';
+const LEGACY_KEY = 'openclaw:whatsapp:mock_inbound_legacy';
 const DEFAULT_TTL_SEC = 86_400;
 const MAX_ROWS = 30;
 
@@ -42,6 +45,33 @@ function ttlSec() {
 }
 
 /**
+ * Move old JSON-at-key payload to list + rename key so we do not collide.
+ * @param {import('redis').RedisClientType} r
+ */
+async function migrateLegacyStringIfPresent(r) {
+  const t = await r.type(KEY);
+  if (t !== 'string') return;
+  const raw = await r.get(KEY);
+  let arr = [];
+  try {
+    const parsed = raw ? JSON.parse(raw) : [];
+    arr = Array.isArray(parsed) ? parsed : [];
+  } catch {
+    arr = [];
+  }
+  await r.del(LEGACY_KEY);
+  await r.rename(KEY, LEGACY_KEY);
+  /** arr is newest-first; rPush in that order so index 0 stays newest after lRange. */
+  for (const row of arr) {
+    if (row && typeof row.id === 'string' && row.from && row.text) {
+      await r.rPush(KEY, JSON.stringify(row));
+    }
+  }
+  await r.lTrim(KEY, -MAX_ROWS, -1);
+  await r.expire(KEY, ttlSec());
+}
+
+/**
  * @param {{ from: string, text: string }} row
  * @returns {Promise<{ id: string; from: string; text: string; ts: string } | null>}
  */
@@ -55,17 +85,13 @@ export async function pushMockInbound(row) {
   const id = `mock:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
   const entry = { id, from, text, ts };
 
-  let arr = [];
-  try {
-    const raw = await r.get(KEY);
-    arr = raw ? JSON.parse(raw) : [];
-    if (!Array.isArray(arr)) arr = [];
-  } catch {
-    arr = [];
-  }
-  arr.unshift(entry);
-  if (arr.length > MAX_ROWS) arr = arr.slice(0, MAX_ROWS);
-  await r.set(KEY, JSON.stringify(arr), { EX: ttlSec() });
+  await migrateLegacyStringIfPresent(r);
+
+  const ex = ttlSec();
+  const blob = JSON.stringify(entry);
+  await r.lPush(KEY, blob);
+  await r.lTrim(KEY, 0, MAX_ROWS - 1);
+  await r.expire(KEY, ex);
   return entry;
 }
 
@@ -74,11 +100,18 @@ export async function listMockInbound() {
   const r = await getRedis();
   if (!r) return [];
   try {
-    const raw = await r.get(KEY);
-    if (!raw) return [];
-    const arr = JSON.parse(raw);
-    if (!Array.isArray(arr)) return [];
-    return arr.filter((x) => x && typeof x.id === 'string' && x.from && x.text);
+    await migrateLegacyStringIfPresent(r);
+    const rows = await r.lRange(KEY, 0, MAX_ROWS - 1);
+    const out = [];
+    for (const s of rows) {
+      try {
+        const x = JSON.parse(s);
+        if (x && typeof x.id === 'string' && x.from && x.text) out.push(x);
+      } catch {
+        /* skip */
+      }
+    }
+    return out;
   } catch {
     return [];
   }
@@ -88,5 +121,7 @@ export async function listMockInbound() {
 export async function clearMockInbound() {
   const r = await getRedis();
   if (!r) return 0;
-  return r.del(KEY);
+  const a = await r.del(KEY);
+  await r.del(LEGACY_KEY);
+  return a;
 }

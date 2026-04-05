@@ -67,14 +67,14 @@ Given an email (from, subject, date, body), you will produce a structured JSON r
 3. A list of **todos** — specific tasks the user should do because of this email.
 4. A list of **reminders** — time-sensitive items the user should be reminded about, with estimated ISO dates if possible.
 5. A **meeting** object if the email contains a meeting invitation or scheduling request.
-6. A **speak_summary** — a spoken-friendly 1-2 sentence summary (no markdown, no symbols, natural speech).
+6. A **speak_summary** — one short spoken line only: the gist of the message in at most about twenty-five words. No greeting, no sign-off, no Nova intro. Plain English for TTS (no markdown, symbols, or brackets).
 
 Rules:
 - Only include todos/reminders/meeting if genuinely present in the email.
 - Keep todo titles short and actionable ("Reply to Alice about the proposal").
 - For reminders, parse any mentioned dates/times relative to the email's date field.
 - For meetings, extract all available details (title, date, time, duration, location, attendees).
-- speak_summary must be fully speakable: no markdown, no symbols, no brackets, no code.
+- speak_summary must be fully speakable, under twenty-five words, no markdown or symbols.
 - Respond ONLY with valid JSON matching the schema — no extra text, no markdown fences.
 
 JSON schema:

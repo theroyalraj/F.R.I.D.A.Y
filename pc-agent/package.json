@@ -10,7 +10,7 @@
     "start": "node src/server.js",
     "dev": "node --watch --watch-path=src --watch-path=../lib src/server.js",
     "predev:all": "powershell -ExecutionPolicy Bypass -File ../scripts/free-pc-agent-dev-ports.ps1",
-    "dev:all": "concurrently \"npm run dev\" \"npm run ui:dev\" \"npm run start:silence-watch --prefix ..\" --names \"Backend,Frontend,ECHO\" --prefix-colors \"blue,cyan,green\" --kill-others-on-exit",
+    "dev:all": "concurrently \"npm run dev\" \"npm run ui:dev\" \"npm run start:silence-watch --prefix ..\" \"node ../scripts/dev-win-notify-sidecar.mjs\" --names \"Backend,Frontend,ECHO,WinNotify\" --prefix-colors \"blue,cyan,green,magenta\" --kill-others-on-exit",
     "test": "node --test test/*.test.js",
     "ui:dev": "vite --port 5173",
     "ui:build": "vite build"

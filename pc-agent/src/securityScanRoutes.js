@@ -53,13 +53,16 @@ async function maybeAddSecurityTodo(scope, audit) {
  * Shared post-scan SSE + optional todo + Windows notify (startup or HTTP).
  * @param {(type: string, data?: Record<string, unknown>) => void} broadcastEvent
  * @param {import('./todosDb.js').TodoScope} todoScope
- * @param {{ log?: { warn?: (o: unknown, m: string) => void } }} [opts]
+ * @param {{ log?: { warn?: (o: unknown, m: string) => void }; listenToast?: boolean }} [opts]
+ *        listenToast — when false, Listen UI skips global toasts (background scans only).
  */
 export async function broadcastScanOutcome(broadcastEvent, out, todoScope, opts = {}) {
+  const listenToast = opts.listenToast !== false;
   if (!out) return;
   if (out.skipped) {
     broadcastEvent('security_scan_complete', {
       skipped: true,
+      listenToast,
       reason: out.reason,
       msUntilNextFullScan: out.msUntilNextFullScan,
       lastFullScanAt: out.state?.lastFullScanAt,
@@ -72,22 +75,24 @@ export async function broadcastScanOutcome(broadcastEvent, out, todoScope, opts 
   const hi = totalHighPlusCritical(summary);
   broadcastEvent('security_scan_complete', {
     skipped: false,
+    listenToast,
     lastFullScanAt: out.state?.lastFullScanAt,
     summary,
     exitCode: audit.exitCode,
     highOrCritical: hi,
   });
 
-  // Async speak announcement (fire and forget)
-  if (envBoolSecurity('OPENCLAW_SECURITY_SCAN_SPEAK', true)) {
+  // Optional TTS — off by default so npm audit never interrupts the Listen flow.
+  if (envBoolSecurity('OPENCLAW_SECURITY_SCAN_SPEAK', false)) {
     setImmediate(() => {
       const message = hi > 0
         ? `Security scan complete. Found ${summary.critical || 0} critical and ${summary.high || 0} high severity vulnerabilities.`
         : 'Security scan complete. No critical or high severity vulnerabilities found.';
 
-      broadcastEvent('speak_async', {
+      broadcastEvent('speak', {
         text: message,
         priority: hi > 0 ? 2 : 1,
+        personaKey: 'argus',
       });
     });
   }
