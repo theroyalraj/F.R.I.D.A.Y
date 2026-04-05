@@ -141,7 +141,7 @@ export async function runTask(body, reqLog, options = {}) {
     }
   }
 
-  if (!claudeModel && isAutoModelEnabled()) {
+  if ((!claudeModel || claudeModel === 'auto') && isAutoModelEnabled()) {
     const inferred = inferClaudeModelForTask(t);
     if (inferred) {
       claudeModel = inferred;

@@ -113,9 +113,9 @@ const FridayListenApp: React.FC = () => {
   const [celebrationOffer, setCelebrationOffer] = useState<CelebrationPayload | null>(null);
   const [claudeModel, setClaudeModel] = useState(() => {
     try {
-      return typeof localStorage !== 'undefined' ? localStorage.getItem(LS_CLAUDE_MODEL) || '' : '';
+      return typeof localStorage !== 'undefined' ? localStorage.getItem(LS_CLAUDE_MODEL) || 'auto' : 'auto';
     } catch {
-      return '';
+      return 'auto';
     }
   });
   const [openclawStrip, setOpenclawStrip] = useState<{
@@ -516,7 +516,10 @@ const FridayListenApp: React.FC = () => {
     } catch {
       /* ignore */
     }
-    showToast(v === 'openrouter-free' ? 'Using OpenRouter free tier for replies' : 'Claude model updated', 'info');
+    const label = v === 'auto' ? 'Auto routing — OpenRouter free / Sonnet / Opus by task type'
+      : v === 'openrouter-free' ? 'Using OpenRouter free tier for all replies'
+      : 'Claude model updated';
+    showToast(label, 'info');
   };
 
   const handleFileClick = () => fileRef.current?.click();
@@ -697,11 +700,11 @@ const FridayListenApp: React.FC = () => {
               onChange={handleClaudeModelChange}
               aria-label="Claude or OpenRouter model"
             >
-              <option value="">Server default — Sonnet via Anthropic</option>
+              <option value="auto">Auto — smart routing (free / Sonnet / Opus)</option>
               <option value="haiku">Haiku — fastest</option>
-              <option value="sonnet">Sonnet — balanced</option>
-              <option value="opus">Opus — strongest</option>
-              <option value="openrouter-free">OpenRouter free — openrouter slash free router (dot env)</option>
+              <option value="sonnet">Sonnet — coding and technical</option>
+              <option value="opus">Opus — research and deep reasoning</option>
+              <option value="openrouter-free">OpenRouter free — simple chat only</option>
               <option value="inherit">CLI default — no dash dash model</option>
             </select>
           </div>

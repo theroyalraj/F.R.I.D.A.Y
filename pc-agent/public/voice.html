@@ -1114,7 +1114,7 @@
     const [hint, setHint]         = useState('Start a session to enable the microphone. Works best in Chrome or Edge.');
     const [active, setActive]     = useState(false);
     const [dark, setDark_]        = useState(() => { try { const t = localStorage.getItem(LS_THEME); return t ? t === 'dark' : true; } catch { return true; } });
-    const [model, setModel_]      = useState(() => { try { return localStorage.getItem(LS_MODEL) || ''; } catch { return ''; } });
+    const [model, setModel_]      = useState(() => { try { return localStorage.getItem(LS_MODEL) || 'auto'; } catch { return 'auto'; } });
     const [chatVoice, setChatVoice] = useState(initChatVoice);
     const [svrVoices, setSvrVoices] = useState([]);
     const [svrActive, setSvrActive] = useState('');
@@ -1624,11 +1624,11 @@
           <div className="bar-row" style=${{ marginTop:'0.45rem' }}>
             <span className="bar-label">Claude model</span>
             <select className="glass-select" value=${model} onChange=${e => setModel(e.target.value)}>
-              <option value="">Server default (.env / Sonnet)</option>
+              <option value="auto">Auto — smart routing (free / Sonnet / Opus)</option>
               <option value="haiku">Haiku — fastest</option>
-              <option value="sonnet">Sonnet — balanced</option>
-              <option value="opus">Opus — strongest</option>
-              <option value="openrouter-free">OpenRouter free (OPENROUTER_FREE_MODEL)</option>
+              <option value="sonnet">Sonnet — coding and technical</option>
+              <option value="opus">Opus — research and deep reasoning</option>
+              <option value="openrouter-free">OpenRouter free — simple chat only</option>
               <option value="inherit">CLI default (no --model)</option>
             </select>
           </div>
