@@ -13,7 +13,7 @@ Env (defaults on unless explicitly false/off/0/no):
   FRIDAY_CURSOR_SPEAK_SUBAGENT_REPLY — narrate subagent assistant text
   FRIDAY_CURSOR_SPEAK_THINKING — capture and speak extended-thinking content before Cursor
     redacts it (default: true). Thinking blocks appear briefly in the JSONL before being
-    replaced with [REDACTED]. This watcher catches them on the first poll pass and speaks
+    replaced with [REDACTED]. This watcher catches them on the first tail read and speaks
     them, preserving the reasoning as audio.
 
 When FRIDAY_CURSOR_NARRATION is on, the Cursor agent already speaks live (ack / status / done),
@@ -68,6 +68,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import queue
 import random
 import re
 import subprocess
@@ -806,21 +807,23 @@ def _is_voice_agent_chat_prose(s: str) -> bool:
 
 
 class ThinkingFlushCtx:
-    """Schedules thinking debounce flushes under the shared state_map lock."""
+    """Arm thinking debounce timers that enqueue flush work (serialized worker, no lock in Timer)."""
 
-    __slots__ = ("lock", "state_map", "speak_main", "speak_sub")
+    __slots__ = ("work_q", "speak_main", "speak_sub")
 
     def __init__(
         self,
-        lock: threading.Lock,
-        state_map: dict[str, dict],
+        work_q: "queue.Queue",
         speak_main: bool,
         speak_sub: bool,
     ) -> None:
-        self.lock = lock
-        self.state_map = state_map
+        self.work_q = work_q
         self.speak_main = speak_main
         self.speak_sub = speak_sub
+
+
+_RESCAN_WORK = "__rescan__"
+_FLUSH_THINK_WORK = "__flush_think__"
 
 
 def _thinking_debounce_sec() -> float:
@@ -1028,17 +1031,7 @@ def _schedule_thinking_flush(path_str: str, st: dict, ctx: ThinkingFlushCtx) -> 
     delay = max(0.001, dead - time.monotonic())
 
     def fire() -> None:
-        with ctx.lock:
-            st_live = ctx.state_map.get(path_str)
-            if st_live is None:
-                return
-            st_live.pop("_thinking_timer", None)
-            _flush_thinking_debounce(
-                st_live,
-                time.monotonic(),
-                speak_main=ctx.speak_main,
-                speak_sub=ctx.speak_sub,
-            )
+        ctx.work_q.put((_FLUSH_THINK_WORK, path_str))
 
     timer = threading.Timer(delay, fire)
     timer.daemon = True
@@ -1184,25 +1177,11 @@ def _process_jsonl_path(
 
 
 class _TranscriptEventHandler(FileSystemEventHandler):
-    """Debounced filesystem notifications → transcript tail reads."""
+    """Debounced filesystem notifications → enqueue path work for the single consumer worker."""
 
-    def __init__(
-        self,
-        *,
-        state_map: dict[str, dict],
-        lock: threading.Lock,
-        speak_main: bool,
-        speak_sub: bool,
-        speak_thinking: bool,
-        warned_no_chat: list[bool],
-    ) -> None:
+    def __init__(self, work_q: "queue.Queue") -> None:
         super().__init__()
-        self._state_map = state_map
-        self._lock = lock
-        self._speak_main = speak_main
-        self._speak_sub = speak_sub
-        self._speak_thinking = speak_thinking
-        self._warned_no_chat = warned_no_chat
+        self._work_q = work_q
         self._debounce_lock = threading.Lock()
         self._path_timers: dict[str, threading.Timer] = {}
 
@@ -1214,8 +1193,7 @@ class _TranscriptEventHandler(FileSystemEventHandler):
 
     def on_created(self, event) -> None:  # noqa: ANN001
         if event.is_directory:
-            with self._lock:
-                _rescan_transcript_paths(self._state_map)
+            self._work_q.put(_RESCAN_WORK)
             return
         self._queue_path(event.src_path)
 
@@ -1241,50 +1219,82 @@ class _TranscriptEventHandler(FileSystemEventHandler):
             def run() -> None:
                 with self._debounce_lock:
                     self._path_timers.pop(key, None)
-                self._process_resolved_path(key)
+                self._work_q.put(key)
 
             t = threading.Timer(debounce, run)
             t.daemon = True
             self._path_timers[key] = t
             t.start()
 
-    def _process_resolved_path(self, key: str) -> None:
-        with self._lock:
-            if key not in self._state_map:
-                _rescan_transcript_paths(self._state_map)
-                if key not in self._state_map:
-                    return
-            session = _load_session()
-            main_uuid = (session.get("chat_id") or "").strip()
-            if not main_uuid and not self._warned_no_chat[0]:
-                self._warned_no_chat[0] = True
-                print(
-                    "cursor-reply-watch: .session-voice.json has no chat_id yet — open main Composer chat once "
-                    "so pick-session-voice can run, or paste chat_id from agent-transcripts.",
-                    flush=True,
-                )
-            thinking_ctx = (
-                ThinkingFlushCtx(self._lock, self._state_map, self._speak_main, self._speak_sub)
-                if self._speak_thinking
-                else None
-            )
-            now = time.monotonic()
-            _process_jsonl_path(
-                key,
-                self._state_map,
-                now=now,
-                main_uuid=main_uuid,
-                speak_main=self._speak_main,
-                speak_sub=self._speak_sub,
-                speak_thinking=self._speak_thinking,
-                thinking_ctx=thinking_ctx,
-            )
 
-
-def _periodic_rescan_worker(state_map: dict[str, dict], lock: threading.Lock, stop: threading.Event) -> None:
+def _periodic_rescan_enqueue(work_q: "queue.Queue", stop: threading.Event) -> None:
     while not stop.wait(timeout=RESCAN_SEC):
-        with lock:
-            _rescan_transcript_paths(state_map)
+        work_q.put(_RESCAN_WORK)
+
+
+def _transcript_worker_loop(
+    work_q: "queue.Queue",
+    state_map: dict[str, dict],
+    *,
+    speak_main: bool,
+    speak_sub: bool,
+    speak_thinking: bool,
+    warned_no_chat: list[bool],
+) -> None:
+    """Single consumer: all JSONL reads / TTS / rescan / thinking flushes run here (no lock needed)."""
+    while True:
+        item = work_q.get()
+        try:
+            if item is None:
+                return
+            if item == _RESCAN_WORK:
+                _rescan_transcript_paths(state_map)
+                continue
+            if isinstance(item, tuple) and len(item) == 2 and item[0] == _FLUSH_THINK_WORK:
+                path_str = item[1]
+                st = state_map.get(path_str)
+                if st is not None:
+                    st.pop("_thinking_timer", None)
+                    _flush_thinking_debounce(
+                        st,
+                        time.monotonic(),
+                        speak_main=speak_main,
+                        speak_sub=speak_sub,
+                    )
+                continue
+            if isinstance(item, str):
+                key = item
+                if key not in state_map:
+                    _rescan_transcript_paths(state_map)
+                    if key not in state_map:
+                        continue
+                session = _load_session()
+                main_uuid = (session.get("chat_id") or "").strip()
+                if not main_uuid and not warned_no_chat[0]:
+                    warned_no_chat[0] = True
+                    print(
+                        "cursor-reply-watch: .session-voice.json has no chat_id yet — open main Composer chat once "
+                        "so pick-session-voice can run, or paste chat_id from agent-transcripts.",
+                        flush=True,
+                    )
+                thinking_ctx = (
+                    ThinkingFlushCtx(work_q, speak_main, speak_sub)
+                    if speak_thinking
+                    else None
+                )
+                now = time.monotonic()
+                _process_jsonl_path(
+                    key,
+                    state_map,
+                    now=now,
+                    main_uuid=main_uuid,
+                    speak_main=speak_main,
+                    speak_sub=speak_sub,
+                    speak_thinking=speak_thinking,
+                    thinking_ctx=thinking_ctx,
+                )
+        finally:
+            work_q.task_done()
 
 
 def _merge_new_paths(state_map: dict[str, dict], *, seek_end: bool) -> None:
@@ -1344,7 +1354,6 @@ def main() -> None:
     _maybe_seed_chat_id_if_single_transcript()
 
     state_map: dict[str, dict] = {}
-    map_lock = threading.Lock()
     warned_no_chat: list[bool] = [False]
 
     _merge_new_paths(state_map, seek_end=True)
@@ -1361,22 +1370,31 @@ def main() -> None:
             flush=True,
         )
 
-    handler = _TranscriptEventHandler(
-        state_map=state_map,
-        lock=map_lock,
-        speak_main=speak_main,
-        speak_sub=speak_sub,
-        speak_thinking=speak_thinking,
-        warned_no_chat=warned_no_chat,
+    work_q: queue.Queue = queue.Queue()
+    stop_side = threading.Event()
+
+    worker_thread = threading.Thread(
+        target=_transcript_worker_loop,
+        args=(work_q, state_map),
+        kwargs={
+            "speak_main": speak_main,
+            "speak_sub": speak_sub,
+            "speak_thinking": speak_thinking,
+            "warned_no_chat": warned_no_chat,
+        },
+        name="cursor-reply-worker",
+        daemon=True,
     )
+    worker_thread.start()
+
+    handler = _TranscriptEventHandler(work_q)
     observer = Observer()
     observer.schedule(handler, str(_TRANSCRIPTS_ROOT), recursive=True)
     observer.start()
 
-    stop_rescan = threading.Event()
     rescan_thread = threading.Thread(
-        target=_periodic_rescan_worker,
-        args=(state_map, map_lock, stop_rescan),
+        target=_periodic_rescan_enqueue,
+        args=(work_q, stop_side),
         name="cursor-reply-rescan",
         daemon=True,
     )
@@ -1388,10 +1406,14 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        stop_rescan.set()
+        stop_side.set()
         handler.close()
         observer.stop()
         observer.join(timeout=5.0)
+        for st in state_map.values():
+            _cancel_thinking_timer(st)
+        work_q.put(None)
+        worker_thread.join(timeout=10.0)
 
 
 if __name__ == "__main__":
