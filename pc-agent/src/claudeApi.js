@@ -46,12 +46,15 @@ const VOICE_SYSTEM_BASE = [
 ].join('\n');
 
 /**
- * @param {{ speakStyleExtra?: string, companyContext?: string }} opts
+ * @param {{ speakStyleExtra?: string, companyContext?: string, personaInstruction?: string }} opts
  */
 export function buildVoiceSystem(opts = {}) {
   const parts = [];
   if (opts.companyContext && String(opts.companyContext).trim()) {
     parts.push(String(opts.companyContext).trim());
+  }
+  if (opts.personaInstruction && String(opts.personaInstruction).trim()) {
+    parts.push(String(opts.personaInstruction).trim());
   }
   parts.push(VOICE_SYSTEM_BASE);
   if (opts.speakStyleExtra && String(opts.speakStyleExtra).trim()) {
@@ -67,15 +70,25 @@ function anthropicPromptCacheEnabled() {
 
 /**
  * Anthropic Messages API: string system or block array with ephemeral cache on the stable voice base.
- * @param {{ speakStyleExtra?: string, companyContext?: string }} opts
+ * @param {{ speakStyleExtra?: string, companyContext?: string, personaInstruction?: string }} opts
  */
 function buildAnthropicSystemPayload(opts) {
-  const company = opts.companyContext && String(opts.companyContext).trim()
+  const company = opts.meta && String(opts.companyContext).trim()
     ? String(opts.companyContext).trim()
-    : '';
+    : opts.companyContext && String(opts.companyContext).trim()
+      ? String(opts.companyContext).trim()
+      : '';
   const style =
     opts.speakStyleExtra && String(opts.speakStyleExtra).trim()
       ? String(opts.speakStyleExtra).trim()
+      : '';
+  const persona =
+    opts.personaInstruction && String(opts.personaInstruction).trim()
+      ? String(opts.personaInstruction).trim()
+      : '';
+  const companyStr =
+    opts.companyContext && String(opts.companyContext).trim()
+      ? String(opts.companyContext).trim()
       : '';
 
   if (!anthropicPromptCacheEnabled()) {
@@ -89,7 +102,8 @@ function buildAnthropicSystemPayload(opts) {
       cache_control: { type: 'ephemeral' },
     },
   ];
-  if (company) blocks.push({ type: 'text', text: company });
+  if (companyStr) blocks.push({ type: 'text', text: companyStr });
+  if (persona) blocks.push({ type: 'text', text: persona });
   if (style) blocks.push({ type: 'text', text: style });
   return {
     system: blocks,

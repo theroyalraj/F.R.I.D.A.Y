@@ -3523,62 +3523,44 @@ def _ambient_checkin_loop(
                 continue
             tts_act = _is_tts_active()
             if tts_act:
-                log.debug("[checkin] TTS active — waiting up to %.1fs", tts_wait_cap)
-            quiet_deadline = time.time() + tts_wait_cap
-            while time.time() < quiet_deadline and not stop.is_set():
-                if not _is_tts_active():
-                    break
+                log.debug("[checkin] TTS active — waiting for quiet before speaking")
+            # Wait for TTS to clear — no skip; keep polling until quiet or stop requested.
+            while not stop.is_set() and _is_tts_active():
                 if stop.wait(timeout=1.5):
                     return
-            else:
-                if stop.is_set():
-                    return
-                log.debug("[checkin] TTS still active after wait cap — retrying next cycle")
-                continue
             if stop.is_set():
                 return
             line, checkin_cat = _pick_checkin_line(r)
             log.info("[checkin] attempting to speak (%s): %s", checkin_cat, line[:80])
+            # Retry loop — keep trying until spoken; never silently drop the check-in.
             spoken = False
-            with speak_lock:
-                if stop.is_set():
-                    return
-                defer = should_defer_ambient_for_cursor()
-                music = _is_music_playing()
-                tts = _is_tts_active()
-                if defer or music or tts:
-                    log.info("[checkin] blocked under lock — defer=%s music=%s tts=%s", defer, music, tts)
-                elif _acquire_tts_lock(r):
-                    try:
-                        _execute_checkin_speak(conn, last_ambient_holder, line, checkin_cat, r)
-                        spoken = True
-                    finally:
-                        _release_tts_lock(r)
-                else:
-                    log.info("[checkin] could not acquire Redis TTS lock (first attempt)")
-            if not spoken:
-                log.info("[checkin] first attempt failed — waiting for lock release (%.1fs cap)", tts_wait_cap)
+            attempt = 0
+            while not spoken and not stop.is_set():
+                attempt += 1
+                # Wait for any competing TTS to finish before each attempt.
                 _wait_for_tts_lock_release(r, timeout=tts_wait_cap)
                 if stop.is_set():
                     return
+                # Also wait for music to finish (music blocks check-in; give it a moment).
+                while not stop.is_set() and _is_music_playing():
+                    if stop.wait(timeout=5.0):
+                        return
                 with speak_lock:
                     if stop.is_set():
                         return
-                    defer2 = should_defer_ambient_for_cursor()
-                    music2 = _is_music_playing()
-                    tts2 = _is_tts_active()
-                    if defer2 or music2 or tts2:
-                        log.info("[checkin] blocked on retry — defer=%s music=%s tts=%s", defer2, music2, tts2)
-                    elif _acquire_tts_lock(r):
+                    if _acquire_tts_lock(r):
                         try:
                             _execute_checkin_speak(conn, last_ambient_holder, line, checkin_cat, r)
                             spoken = True
                         finally:
                             _release_tts_lock(r)
                     else:
-                        log.info("[checkin] could not acquire Redis TTS lock (retry)")
+                        log.info("[checkin] could not acquire Redis TTS lock (attempt %d) — retrying", attempt)
+                if not spoken:
+                    if stop.wait(timeout=3.0):
+                        return
             if spoken:
-                log.info("[checkin] spoke successfully (category=%s)", checkin_cat)
+                log.info("[checkin] spoke successfully after %d attempt(s) (category=%s)", attempt, checkin_cat)
         except Exception as e:
             log.debug("checkin loop: %s", e)
         if stop.wait(timeout=CHECKIN_INTERVAL_SEC):

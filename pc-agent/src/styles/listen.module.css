@@ -376,6 +376,39 @@
 }
 .oc-link:hover { color: #bfdbfe; border-bottom-color: #bfdbfe; }
 
+/* Agent count button in status bar */
+.oc-agents-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(99, 102, 241, 0.1);
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  border-radius: 6px;
+  padding: 3px 10px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #a5b4fc;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.oc-agents-btn:hover {
+  background: rgba(99, 102, 241, 0.2);
+  border-color: rgba(99, 102, 241, 0.5);
+  color: #c7d2fe;
+}
+
+.oc-agents-icon {
+  font-size: 0.8rem;
+  line-height: 1;
+}
+
+.oc-agents-sep {
+  color: rgba(165, 180, 252, 0.4);
+  margin: 0 2px;
+}
+
 .app.light .openclaw-status-bar {
   background: rgba(255, 255, 255, 0.72);
   color: rgba(30, 41, 59, 0.88);

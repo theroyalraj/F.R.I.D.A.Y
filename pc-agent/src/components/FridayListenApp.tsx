@@ -813,12 +813,23 @@ const FridayListenApp: React.FC = () => {
             </span>
           )}
           {openclawStrip.err && <span className={styles['oc-err']}>{openclawStrip.err}</span>}
-          <a className={styles['oc-link']} href="/openclaw/status" target="_blank" rel="noreferrer">
-            JSON status
-          </a>
-          <a className={styles['oc-link']} href="/settings/personas" target="_blank" rel="noreferrer">
-            personas JSON
-          </a>
+          {(() => {
+            const working = sessions.filter((s) => s.status === 'active').length;
+            const free = sessions.filter((s) => s.status === 'idle').length;
+            return (
+              <button
+                type="button"
+                className={styles['oc-agents-btn']}
+                onClick={() => setAgentPanelOpen(true)}
+                title="Click to view detailed agent panel"
+              >
+                <span className={styles['oc-agents-icon']}>⚡</span>
+                <span>{working} working</span>
+                <span className={styles['oc-agents-sep']}>·</span>
+                <span>{free} free</span>
+              </button>
+            );
+          })()}
         </div>
       )}
 
