@@ -26,6 +26,9 @@ Env vars (optional — reads .env automatically):
   FRIDAY_LISTEN_WAKE     wake word filter     (default: disabled = always-on)
   FRIDAY_DEFER_WHEN_CURSOR  Windows: no mic capture while Cursor is focused (default: true)
   FRIDAY_DEFER_FOCUS_EXES   comma-separated exe name substrings (default: cursor)
+
+When FRIDAY_MUSIC_ASK_BEFORE_PLAY is on, friday-music-scheduler.py may ask before auto-play.
+Say yes, no, skip, etc. — this daemon writes the answer file the scheduler polls.
 """
 
 import io
@@ -227,6 +230,85 @@ def _is_music_stop_phrase(lower: str) -> bool:
         "stop song",
         "stop playing",
     )
+
+
+_MUSIC_OFFER_FILE = Path(tempfile.gettempdir()) / "friday-music-offer.json"
+_MUSIC_OFFER_RESPONSE_FILE = Path(tempfile.gettempdir()) / "friday-music-offer-response.txt"
+
+
+def _try_answer_music_scheduler_offer(text: str, lower: str) -> bool:
+    """If the music scheduler is waiting for yes/no, record it and short-ack."""
+    if not _MUSIC_OFFER_FILE.is_file():
+        return False
+    try:
+        data = json.loads(_MUSIC_OFFER_FILE.read_text(encoding="utf-8"))
+        if time.time() > float(data.get("deadline", 0)):
+            _MUSIC_OFFER_FILE.unlink(missing_ok=True)
+            return False
+    except Exception:
+        return False
+
+    t = lower.strip().rstrip(".!?")
+
+    def _yes(s: str) -> bool:
+        if s in (
+            "yes",
+            "yeah",
+            "yep",
+            "yup",
+            "sure",
+            "ok",
+            "okay",
+            "please",
+            "absolutely",
+        ):
+            return True
+        if s.startswith(("yes ", "yeah ", "ok ", "sure ", "yep ")):
+            return True
+        if any(p in s for p in ("go ahead", "play it", "let's go", "lets go", "fire away", "do it")):
+            return True
+        return False
+
+    def _no(s: str) -> bool:
+        if s in ("no", "nope", "nah", "skip", "pass", "later"):
+            return True
+        if s.startswith(("no ", "nah ", "skip ", "not now")):
+            return True
+        if "don't" in s or "dont" in s or "not now" in s:
+            return True
+        return False
+
+    try:
+        if _yes(t):
+            _MUSIC_OFFER_RESPONSE_FILE.write_text("yes", encoding="utf-8")
+            post_event("heard", text)
+            reply = random.choice(
+                [
+                    "On it.",
+                    "Playing now.",
+                    "You got it.",
+                    "Done — spinning it up.",
+                ]
+            )
+            post_event("speak", reply)
+            speak(reply)
+            return True
+        if _no(t):
+            _MUSIC_OFFER_RESPONSE_FILE.write_text("no", encoding="utf-8")
+            post_event("heard", text)
+            reply = random.choice(
+                [
+                    "All right, skipping.",
+                    "Fair enough — another time.",
+                    "No worries, I'll leave it.",
+                ]
+            )
+            post_event("speak", reply)
+            speak(reply)
+            return True
+    except OSError:
+        pass
+    return False
 
 
 # ── Speech output (non-blocking) ───────────────────────────────────────────────
@@ -755,6 +837,9 @@ def main():
         log.info("► %s", text)
 
         lower = text.lower().strip()
+
+        if _try_answer_music_scheduler_offer(text, lower):
+            continue
 
         # Stop background music by voice only after grace; does not shut down the daemon.
         if _is_music_stop_phrase(lower) and friday_play_music_hold_active():

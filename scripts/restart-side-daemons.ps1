@@ -45,8 +45,10 @@ Write-Host "=== OpenClaw side daemons restart ===" -ForegroundColor Yellow
 Write-Host "Stopping auxiliary Python processes..." -ForegroundColor Cyan
 
 Stop-PythonDaemon 'gmail-watch'           '*gmail-watch*'
+Stop-PythonDaemon 'friday-action-tracker' '*friday-action-tracker*'
 Stop-PythonDaemon 'friday-reminder-watch' '*friday-reminder-watch*'
 Stop-PythonDaemon 'cursor-reply-watch'    '*cursor-reply-watch*'
+Stop-PythonDaemon 'cursor-thinking-ocr'   '*cursor-thinking-ocr*'
 Stop-PythonDaemon 'friday-ambient'        '*friday-ambient*'
 Stop-PythonDaemon 'music-scheduler'       '*friday-music-scheduler*'
 
@@ -72,11 +74,27 @@ else {
   Write-Host "Skipping gmail-watch (FRIDAY_EMAIL_WATCH not on)" -ForegroundColor DarkGray
 }
 
+if (Get-DotEnvBool 'FRIDAY_TRACKER_ENABLED' $true) {
+  Write-Host "Starting friday-action-tracker..." -ForegroundColor Green
+  Start-Process $py -ArgumentList @('scripts/friday-action-tracker.py') -WorkingDirectory $root -WindowStyle Hidden
+}
+else {
+  Write-Host "Skipping friday-action-tracker (FRIDAY_TRACKER_ENABLED off)" -ForegroundColor DarkGray
+}
+
 Write-Host "Starting friday-reminder-watch..." -ForegroundColor Green
 Start-Process $py -ArgumentList @('scripts/friday-reminder-watch.py') -WorkingDirectory $root -WindowStyle Hidden
 
 Write-Host "Starting cursor-reply-watch..." -ForegroundColor Green
 Start-Process $py -ArgumentList @('scripts/cursor-reply-watch.py') -WorkingDirectory $root -WindowStyle Hidden
+
+if (Get-DotEnvBool 'FRIDAY_CURSOR_THINKING_OCR' $false) {
+  Write-Host "Starting cursor-thinking-ocr..." -ForegroundColor Green
+  Start-Process $py -ArgumentList @('scripts/cursor-thinking-ocr.py') -WorkingDirectory $root -WindowStyle Hidden
+}
+else {
+  Write-Host "Skipping cursor-thinking-ocr (FRIDAY_CURSOR_THINKING_OCR not on)" -ForegroundColor DarkGray
+}
 
 if (Get-DotEnvBool 'FRIDAY_AMBIENT' $false) {
   Write-Host "Starting friday-ambient..." -ForegroundColor Green

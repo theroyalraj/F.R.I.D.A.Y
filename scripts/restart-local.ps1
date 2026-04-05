@@ -116,6 +116,13 @@ if ($NoKill) {
     }
 
   Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -like '*cursor-thinking-ocr*' } |
+    ForEach-Object {
+      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+      Write-Host "  killed old cursor-thinking-ocr (PID $($_.ProcessId))"
+    }
+
+  Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
     Where-Object { $_.CommandLine -like '*friday-music-scheduler*' } |
     ForEach-Object {
       Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
@@ -146,10 +153,10 @@ if ($SkipDocker) {
 else {
   Push-Location $root
   Write-Host "Docker: Redis container not touched by restart-local." -ForegroundColor DarkGray
-  Write-Host "Docker: compose up -d n8n redis-insight ..."
-  docker compose up -d n8n redis-insight
+  Write-Host "Docker: compose up -d openclaw-postgres n8n redis-insight ..."
+  docker compose up -d openclaw-postgres n8n redis-insight
   if ($LASTEXITCODE -ne 0) {
-    Write-Warning "docker compose up -d n8n redis-insight failed (exit $LASTEXITCODE)."
+    Write-Warning "docker compose up -d openclaw-postgres n8n redis-insight failed (exit $LASTEXITCODE)."
   }
   Pop-Location
 }

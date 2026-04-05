@@ -8,6 +8,9 @@ friday-play.py every FRIDAY_MUSIC_INTERVAL_MIN minutes (default: 30).
 Skips if TTS is currently active (friday-tts-active lock exists) or if friday-play
 is already running. Respects FRIDAY_MUSIC_SCHEDULER=false to disable.
 
+Optional “ask first” (default off): speak a short prompt and wait for voice yes/no from
+friday-listen.py (same machine). Set FRIDAY_MUSIC_ASK_BEFORE_PLAY=true.
+
 Usage:
   python scripts/friday-music-scheduler.py
 
@@ -16,10 +19,14 @@ Env vars (all optional — reads .env):
   FRIDAY_MUSIC_INTERVAL_MIN    minutes between songs (default: 30)
   FRIDAY_MUSIC_PLAYLIST        comma-separated search phrases (default: FRIDAY_STARTUP_SONG)
   FRIDAY_MUSIC_FIRST_WAIT_SEC  seconds before first song (optional; default min(120, interval))
+  FRIDAY_MUSIC_ASK_BEFORE_PLAY true = speak a prompt and wait for mic yes/no before playing
+                                 (default: false — behaviour unchanged)
+  FRIDAY_MUSIC_ASK_WAIT_SEC    seconds to wait for an answer (default: 90)
   FRIDAY_PLAY_SECONDS          per-song play duration (default: 28)
   FRIDAY_PLAY_VOLUME           ffplay volume 0-100 (default: 70)
 """
 
+import json
 import logging
 import os
 import random
@@ -43,8 +50,11 @@ if ENV_PATH.exists():
             os.environ[k] = v
 
 PLAY_SCRIPT = ROOT / "skill-gateway" / "scripts" / "friday-play.py"
+SPEAK_SCRIPT = ROOT / "skill-gateway" / "scripts" / "friday-speak.py"
 TTS_ACTIVE_FILE = Path(tempfile.gettempdir()) / "friday-tts-active"
 PLAY_PID_FILE = Path(tempfile.gettempdir()) / "friday-play.pid"
+MUSIC_OFFER_FILE = Path(tempfile.gettempdir()) / "friday-music-offer.json"
+MUSIC_OFFER_RESPONSE_FILE = Path(tempfile.gettempdir()) / "friday-music-offer-response.txt"
 
 
 def _python_for_friday_play() -> str:
@@ -67,6 +77,114 @@ INTERVAL_MIN = float(os.environ.get("FRIDAY_MUSIC_INTERVAL_MIN", "30"))
 DEFAULT_SONG = os.environ.get("FRIDAY_STARTUP_SONG", "Back in Black AC DC")
 PLAYLIST_RAW = os.environ.get("FRIDAY_MUSIC_PLAYLIST", "").strip()
 PLAYLIST = [s.strip() for s in PLAYLIST_RAW.split(",") if s.strip()] if PLAYLIST_RAW else [DEFAULT_SONG]
+
+
+def _ask_before_play_enabled() -> bool:
+    v = os.environ.get("FRIDAY_MUSIC_ASK_BEFORE_PLAY", "").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
+def _ask_wait_sec() -> float:
+    raw = os.environ.get("FRIDAY_MUSIC_ASK_WAIT_SEC", "").strip().split("#")[0].strip()
+    if raw:
+        try:
+            return max(15.0, min(float(raw), 600.0))
+        except ValueError:
+            pass
+    return 90.0
+
+
+_MUSIC_ASK_PROMPTS = (
+    "Fancy a bit of noise? I had {song} lined up — say yes if you want it, or no if you're heads-down.",
+    "Vibe check — mind if I put on {song}? Yes or no, your call.",
+    "It's gone quiet. Want {song}, or shall I leave the silence alone? Just say yes or no.",
+    "I could spin {song} — interested, or would you rather skip? Yes or no works.",
+    "Quick one — {song} sounds good about now. Play it, or nah?",
+    "{name}, permission to drop {song}? Yes means go, no means I'll park it.",
+)
+
+
+def _offer_prompt(song: str) -> str:
+    name = (os.environ.get("FRIDAY_USER_NAME", "") or "").strip() or "mate"
+    tmpl = random.choice(_MUSIC_ASK_PROMPTS)
+    return tmpl.format(song=song, name=name)
+
+
+def _speak_ask(prompt: str) -> None:
+    env = {
+        **os.environ,
+        "FRIDAY_TTS_PRIORITY": "1",
+        "FRIDAY_TTS_BYPASS_CURSOR_DEFER": "true",
+    }
+    kw: dict = {"cwd": str(ROOT), "env": env, "timeout": 120}
+    if sys.platform == "win32":
+        kw["creationflags"] = subprocess.CREATE_NO_WINDOW
+    try:
+        subprocess.run([sys.executable, str(SPEAK_SCRIPT), prompt], **kw)
+    except Exception as e:
+        log.warning("Ask prompt speak failed: %s", e)
+
+
+def _wait_for_music_offer_yes(deadline: float) -> bool:
+    """Poll response file written by friday-listen (yes/no)."""
+    MUSIC_OFFER_RESPONSE_FILE.unlink(missing_ok=True)
+    while time.time() < deadline:
+        if MUSIC_OFFER_RESPONSE_FILE.is_file():
+            try:
+                raw = MUSIC_OFFER_RESPONSE_FILE.read_text(encoding="utf-8").strip().lower()
+                MUSIC_OFFER_RESPONSE_FILE.unlink(missing_ok=True)
+                if raw in (
+                    "yes",
+                    "y",
+                    "1",
+                    "true",
+                    "yeah",
+                    "yep",
+                    "yup",
+                    "sure",
+                    "ok",
+                    "okay",
+                    "please",
+                ):
+                    return True
+                if raw in ("no", "n", "0", "false", "nope", "nah", "skip", "pass"):
+                    return False
+            except OSError:
+                pass
+        time.sleep(0.35)
+    return False
+
+
+def _run_ask_then_maybe_play() -> None:
+    song = random.choice(PLAYLIST)
+    wait_sec = _ask_wait_sec()
+    deadline = time.time() + wait_sec
+    try:
+        MUSIC_OFFER_FILE.write_text(
+            json.dumps(
+                {"deadline": deadline, "song": song, "wait_sec": wait_sec},
+                indent=None,
+            ),
+            encoding="utf-8",
+        )
+    except OSError as e:
+        log.warning("Could not write music offer file: %s", e)
+        play_song(song)
+        return
+
+    prompt = _offer_prompt(song)
+    log.info("Music ask — waiting up to %.0fs for yes/no (friday-listen): %s", wait_sec, song)
+    _speak_ask(prompt)
+
+    if _wait_for_music_offer_yes(deadline):
+        log.info("Music ask — yes, playing: %s", song)
+        play_song(song)
+    else:
+        log.info("Music ask — skipped or timed out (no affirmative)")
+
+    MUSIC_OFFER_FILE.unlink(missing_ok=True)
+    MUSIC_OFFER_RESPONSE_FILE.unlink(missing_ok=True)
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -109,8 +227,9 @@ def _play_running() -> bool:
         return False
 
 
-def play_song():
-    song = random.choice(PLAYLIST)
+def play_song(song: str | None = None):
+    if not song:
+        song = random.choice(PLAYLIST)
     log.info("Playing: %s", song)
 
     env = {**os.environ}
@@ -174,7 +293,10 @@ def main():
             continue
 
         try:
-            play_song()
+            if _ask_before_play_enabled():
+                _run_ask_then_maybe_play()
+            else:
+                play_song()
         except KeyboardInterrupt:
             break
         except Exception as e:

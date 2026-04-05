@@ -30,6 +30,14 @@ Your skill endpoint must follow [Host a Custom Skill as a Web Service](https://d
 - Set **`OPENCLAW_SQLITE_PATH`** on **pc-agent** (e.g. `~/.openclaw/openclaw.db`) to use embedded **SQLite** for perception + `openclaw_settings` instead of Docker Postgres.
 - Optional: **`~/.openclaw/config.json`** is merged into **`process.env`** after `.env` (wizard / portable installs).
 
+### OpenClaw Postgres (`openclaw-postgres`, port **5433**)
+
+- **`npm run restart:local`** brings up **`openclaw-postgres`** with **n8n** and **redis-insight** (Redis itself stays under your control per script policy).
+- Set **`OPENCLAW_DATABASE_URL`** (e.g. `postgresql://openclaw:openclaw@127.0.0.1:5433/openclaw`) for **perception**, **runtime settings**, **todos / reminders**, and **action tracker** tables.
+- Init scripts under **`docker/postgres/init/`** run on **first** container create. If your volume already existed, apply new SQL manually, e.g.  
+  `Get-Content docker/postgres/init/03-action-tracker.sql | docker compose exec -T openclaw-postgres psql -U openclaw -d openclaw`
+- **Action tracker**: `pip install -r scripts/requirements-action-tracker.txt`, then **`npm run start:action-tracker`** or enable **`FRIDAY_TRACKER_ENABLED`** with **`npm run start:all`** (starts after the agent). Uses **`ANTHROPIC_API_KEY`**, Gmail + Evolution env vars, and **`WHATSAPP_NOTIFY_NUMBER`** for optional text summaries. On each poll it **speaks a check-in** asking if you want today’s plan, **listens** for yes or no (mic + Google STT; timeout or failure defaults to **yes**), then reads pending **action items** and open **todos** from Postgres (or says you are clear). Tune **`FRIDAY_TRACKER_LISTEN_SEC`** and optional **`FRIDAY_TRACKER_CHECKIN_PROMPT`** in `.env`. Same mic env as listen notify: **`LISTEN_DEVICE_INDEX`**, **`LISTEN_ENERGY_THRESHOLD`**, etc.
+
 ## 2) Configure environment
 
 ```powershell

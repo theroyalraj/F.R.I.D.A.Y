@@ -99,7 +99,10 @@
       "Bash(curl -s -X POST http://127.0.0.1:3847/voice/speak-async -H \"Content-Type: application/json\" -d '{\"\"\"\"text\"\"\"\":\"\"\"\"Testing Jarvis voice. This should use the Emma neural voice with Jarvis rate and pitch settings.\"\"\"\"}')",
       "Bash(timeout 3 curl -s -N http://127.0.0.1:3847/voice/stream)",
       "Bash(ls -lh D:codeopenclawpc-agentpubliclisten.* D:codeopenclawpc-agentpublicvoice.html)",
-      "Bash(npm run:*)"
+      "Bash(npm run:*)",
+      "Bash(grep -l \"friday-speak\\\\|FRIDAY_TTS\\\\|voice\\\\|speak\\\\|narrat\\\\|audio\" /d/code/openclaw/.cursor/rules/*.mdc)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://127.0.0.1:3847/friday/listen)",
+      "Bash(npx tsc:*)"
     ]
   }
 }

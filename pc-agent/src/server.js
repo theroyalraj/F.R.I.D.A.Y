@@ -27,6 +27,7 @@ import { createPerceptionRouter } from './perceptionRoutes.js';
 import { createSettingsRouter } from './settingsRoutes.js';
 import { createAutomationRouter } from './automationRoutes.js';
 import { createTodosRouter } from './todosRoutes.js';
+import { createActionItemsRouter } from './actionItemsRoutes.js';
 import { perceptionDbConfigured, perceptionDbHealth } from './perceptionDb.js';
 import { loadOpenclawUserConfig } from './userConfig.js';
 
@@ -545,6 +546,7 @@ app.use('/perception', createPerceptionRouter(auth));
 app.use('/settings', createSettingsRouter(auth));
 app.use('/automation', createAutomationRouter(auth));
 app.use('/todos', createTodosRouter(broadcastEvent));
+app.use('/action-items', createActionItemsRouter());
 
 app.use((err, req, res, _next) => {
   req.log?.error({ err }, 'unhandled route error');

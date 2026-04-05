@@ -76,6 +76,15 @@ function envBool(key, defaultVal) {
   return defaultVal;
 }
 
+function readFridayActionTrackerFromDotEnv() {
+  return envBool('FRIDAY_TRACKER_ENABLED', true);
+}
+
+/** Windows OCR loop over Cursor window — optional live “thinking” speech. */
+function readCursorThinkingOcrFromDotEnv() {
+  return envBool('FRIDAY_CURSOR_THINKING_OCR', false);
+}
+
 /** Cursor JSONL → TTS: on if reply and/or thinking toggle is on, unless live narration suppresses it. */
 function readCursorReplyWatchFromDotEnv() {
   function enabled(key) {
@@ -109,6 +118,7 @@ const C = {
   agent:    '\x1b[32m',   // green
   listener: '\x1b[35m',   // magenta
   cursor:   '\x1b[95m',   // bright magenta — Composer reply TTS
+  thinkocr: '\x1b[94m',   // bright blue — Cursor window OCR thinking
   ambient:  '\x1b[96m',   // bright cyan
   music:    '\x1b[93m',   // bright yellow
   warn:     '\x1b[33m',
@@ -308,6 +318,12 @@ ${C.reset}\n`);
     await start('cursor', 'python', ['scripts/cursor-reply-watch.py'], { delayMs: 500 });
   }
 
+  const thinkingOcrScript = path.join(ROOT, 'scripts', 'cursor-thinking-ocr.py');
+  if (readCursorThinkingOcrFromDotEnv() && existsSync(thinkingOcrScript)) {
+    log('thinkocr', 'Cursor thinking OCR daemon will start in 1.2 s...');
+    await start('thinkocr', 'python', ['scripts/cursor-thinking-ocr.py'], { delayMs: 1200 });
+  }
+
   const ambientOn =
     readFridayAmbientFromDotEnv() ||
     ['1', 'true', 'yes', 'on'].includes(String(process.env.FRIDAY_AMBIENT || '').toLowerCase());
@@ -325,6 +341,12 @@ ${C.reset}\n`);
   if (musicSchedOn && existsSync(musicSchedScript)) {
     log('music', 'background music scheduler will start in 6 s...');
     await start('music', 'python', ['scripts/friday-music-scheduler.py'], { delayMs: 6000 });
+  }
+
+  const trackerScript = path.join(ROOT, 'scripts', 'friday-action-tracker.py');
+  if (readFridayActionTrackerFromDotEnv() && existsSync(trackerScript)) {
+    log('tracker', 'action tracker (Gmail, WhatsApp, Postgres) will start in 7.5 s...');
+    await start('tracker', 'python', ['scripts/friday-action-tracker.py'], { delayMs: 7500 });
   }
 
   process.stdout.write(`${C.warn}[openclaw] All services running. Press Ctrl+C to stop everything.${C.reset}\n\n`);

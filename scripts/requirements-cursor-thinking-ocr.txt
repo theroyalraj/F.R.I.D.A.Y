@@ -1,0 +1,5 @@
+# Optional: Windows OCR loop for Cursor Composer / thinking panel (cursor-thinking-ocr.py)
+winocr>=0.0.15
+mss
+Pillow
+pywin32
