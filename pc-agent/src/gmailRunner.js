@@ -37,6 +37,10 @@ export function runPythonGmail(args) {
   });
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
  * @param {{
  *   unreadCount?: number,
@@ -44,8 +48,9 @@ export function runPythonGmail(args) {
  *   unreadOffset?: number,
  *   recentOffset?: number,
  * }} opts
+ * @param {{ parallel?: boolean }} mode
  */
-export async function fetchGmailSnapshot(opts = {}) {
+async function fetchGmailSnapshotCore(opts = {}, mode = { parallel: true }) {
   const unreadCount = Math.min(50, Math.max(1, Number(opts.unreadCount) || 15));
   const recentCount = Math.min(50, Math.max(1, Number(opts.recentCount) || 12));
   const unreadOffset = Math.min(500, Math.max(0, Number(opts.unreadOffset) || 0));
@@ -54,14 +59,50 @@ export async function fetchGmailSnapshot(opts = {}) {
   const recentArgs = ['list', '--count', String(recentCount)];
   if (unreadOffset > 0) unreadArgs.push('--offset', String(unreadOffset));
   if (recentOffset > 0) recentArgs.push('--offset', String(recentOffset));
-  const [unreadJson, recentJson] = await Promise.all([
-    runPythonGmail(unreadArgs),
-    runPythonGmail(recentArgs),
-  ]);
+
+  let unreadJson;
+  let recentJson;
+  if (mode.parallel) {
+    [unreadJson, recentJson] = await Promise.all([
+      runPythonGmail(unreadArgs),
+      runPythonGmail(recentArgs),
+    ]);
+  } else {
+    unreadJson = await runPythonGmail(unreadArgs);
+    recentJson = await runPythonGmail(recentArgs);
+  }
+
   return {
     ok: true,
     ts: new Date().toISOString(),
     unread: JSON.parse(unreadJson),
     recent: JSON.parse(recentJson),
   };
+}
+
+/**
+ * Parallel IMAP ; on failure wait and retry ; then sequential IMAP (some Gmail flakiness is race-related).
+ * @param {{
+ *   unreadCount?: number,
+ *   recentCount?: number,
+ *   unreadOffset?: number,
+ *   recentOffset?: number,
+ * }} opts
+ */
+export async function fetchGmailSnapshot(opts = {}) {
+  const retries = Math.min(4, Math.max(1, Number(process.env.GMAIL_SNAPSHOT_ATTEMPTS) || 3));
+  const backoffMs = Math.min(10_000, Math.max(400, Number(process.env.GMAIL_SNAPSHOT_BACKOFF_MS) || 900));
+  let lastErr;
+  for (let attempt = 0; attempt < retries; attempt += 1) {
+    try {
+      const parallel = attempt % 2 === 0;
+      return await fetchGmailSnapshotCore(opts, { parallel });
+    } catch (e) {
+      lastErr = e;
+      if (attempt + 1 < retries) {
+        await sleep(backoffMs * (attempt + 1));
+      }
+    }
+  }
+  throw lastErr;
 }
