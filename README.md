@@ -106,7 +106,15 @@ python3 -m pip install -r scripts/requirements-openclaw-client.txt
 npm ci && python3 scripts/openclaw_company.py --generate-rule && python3 -m pip install -r scripts/requirements-cursor-reply-watch.txt
 ```
 
-Optional **Gist bootstrap** (interactive menus or flags): **`scripts/openclaw-client-bootstrap.sh`** — run `curl -fsSL …/openclaw-client-bootstrap.sh | bash -s -- --interactive` or see [docs/setup.md](docs/setup.md) §10b.
+**Same “rules + deps” flow via the published Gist** (syncs git, regenerates `.cursor/rules`, installs Node and pip — optional open Cursor on the repo folder):
+
+```bash
+curl -fsSL 'https://gist.githubusercontent.com/theroyalraj/d4ddf7b05d156271f9f3205e2cb101cb/raw/openclaw-client-bootstrap.sh' | bash -s -- --setup-only --home "$(pwd)" --open-cursor
+```
+
+Omit `--open-cursor` if you only want install. If bash reports **pipefail** / **invalid option**, insert `| tr -d '\r' |` before `bash`.
+
+Optional **Gist bootstrap** (full interactive menus): **`scripts/openclaw-client-bootstrap.sh`** — run `curl -fsSL 'https://gist.githubusercontent.com/theroyalraj/d4ddf7b05d156271f9f3205e2cb101cb/raw/openclaw-client-bootstrap.sh' | bash -s -- --interactive` (if you see a **pipefail** error, pipe through `tr -d '\r'` before `bash`). See [docs/setup.md](docs/setup.md) §10b. **Locked-down Mac (no install):** use the browser to your home server only — [docs/setup.md](docs/setup.md) §10c.
 
 ### 3. Configure
 
