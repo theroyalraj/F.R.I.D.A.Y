@@ -53,6 +53,8 @@
     "install:all": "npm install",
     "test:friday-page": "node scripts/smoke-friday-page.mjs",
     "test:pc-agent": "npm test --prefix pc-agent",
+    "security-scan": "node scripts/openclaw-daily-security-scan.mjs",
+    "security-scan:force": "node scripts/openclaw-daily-security-scan.mjs --force",
     "desktop:dev": "npm run tauri dev --prefix apps/desktop",
     "desktop:build": "npm run tauri build --prefix apps/desktop",
     "summarize:openrouter": "node openclaw-ship/client/openrouter-summarize.mjs",

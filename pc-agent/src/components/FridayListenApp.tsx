@@ -13,6 +13,7 @@ import { PersonaRosterModal } from './PersonaRosterModal';
 import LaunchOverlay from './LaunchOverlay';
 import AnimatedAvatar from './AnimatedAvatar';
 import TopMusicDock from './TopMusicDock';
+import SecurityScanPanel from './SecurityScanPanel';
 import {
   COMPANY_PERSONAS,
   SPEAKING_PERSONA_ORDER,
@@ -319,6 +320,15 @@ const FridayListenApp: React.FC = () => {
       }
       // Do not use daemon_start here — every SSE reconnect would add another "FRIDAY ONLINE" divider.
       postEvent('sse_stream_open');
+    } else if (event.type === 'security_scan_complete') {
+      window.dispatchEvent(new CustomEvent('openclaw:security-scan-complete', { detail: event }));
+      const d = event as { highOrCritical?: number; skipped?: boolean };
+      if (!d.skipped && typeof d.highOrCritical === 'number' && d.highOrCritical > 0) {
+        showToast(`Security scan: ${d.highOrCritical} high or critical npm issues — check Security scan panel`, 'error');
+      } else if (!d.skipped) {
+        showToast('Security scan finished — no high or critical npm findings', 'success');
+      }
+      window.dispatchEvent(new CustomEvent('openclaw:todos-refresh'));
     } else if (event.type === 'speak_style_changed') window.dispatchEvent(new CustomEvent('openclaw:speak-style-changed'));
     else if (event.type === 'echo_personality_changed') window.dispatchEvent(new CustomEvent('openclaw:echo-personality-changed'));
     else if (event.type === 'voice_changed') {
@@ -492,7 +502,28 @@ const FridayListenApp: React.FC = () => {
             : {}),
         }),
       });
-      const data = await res.json();
+      const raw = await res.text();
+      let data: Record<string, unknown> = {};
+      const bodyTrim = raw.trim();
+      if (!bodyTrim) {
+        addBubble({
+          type: 'error',
+          text: `Empty response from voice command (HTTP ${res.status}). Try again — pc-agent may have restarted or the connection dropped mid-reply.`,
+          ts: Date.now(),
+          persona: getReplyPersona(),
+        });
+      } else {
+        try {
+          data = JSON.parse(bodyTrim) as Record<string, unknown>;
+        } catch {
+          addBubble({
+            type: 'error',
+            text: `Voice command reply was not valid JSON (HTTP ${res.status}).`,
+            ts: Date.now(),
+            persona: getReplyPersona(),
+          });
+        }
+      }
       if (data.summary) {
         const pk =
           typeof data.replyPersonaKey === 'string' ? (data.replyPersonaKey as CompanyPersonaKey) : null;
@@ -1024,6 +1055,8 @@ const FridayListenApp: React.FC = () => {
               );
             })}
           </div>
+
+          <SecurityScanPanel authHeaders={authHeaders} theme={theme} showToast={showToast} />
 
           {/* Team speaker + voice pool */}
           <div className={styles['voice-card']}>

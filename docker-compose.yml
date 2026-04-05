@@ -66,11 +66,14 @@ services:
       - "host.docker.internal:host-gateway"
 
   # Optional: docker compose --profile whatsapp up -d
+  # Host: 127.0.0.1:5434 → container 5432 (DBeaver: same user/pass/db as below)
   evolution-postgres:
     image: postgres:16-alpine
     restart: unless-stopped
     profiles:
       - whatsapp
+    ports:
+      - "127.0.0.1:5434:5432"
     environment:
       - POSTGRES_DB=evolution
       - POSTGRES_USER=evolution

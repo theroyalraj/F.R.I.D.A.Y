@@ -49,6 +49,11 @@ const TodoPanel: React.FC<TodoPanelProps> = ({ authHeaders, theme = 'dark' }) =>
       }
     };
     loadTodos();
+    const onRefresh = () => {
+      void loadTodos();
+    };
+    window.addEventListener('openclaw:todos-refresh', onRefresh);
+    return () => window.removeEventListener('openclaw:todos-refresh', onRefresh);
   }, [headers]);
 
   const addTodo = async (e: React.FormEvent) => {

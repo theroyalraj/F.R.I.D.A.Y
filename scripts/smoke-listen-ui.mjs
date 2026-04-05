@@ -100,6 +100,21 @@ async function main() {
     n += 1;
   }
 
+  // 7) Security scan status (Bearer PC_AGENT_SECRET)
+  const SECRET = (process.env.PC_AGENT_SECRET || '').trim();
+  if (!SECRET) {
+    console.warn('skip: PC_AGENT_SECRET unset — /security/scan/status');
+  } else {
+    const sec = await getOk(`${AGENT}/security/scan/status`, {
+      headers: { Authorization: `Bearer ${SECRET}` },
+    });
+    if (!sec.ok) fail(`/security/scan/status → ${sec.status}`);
+    const sj = JSON.parse(sec.text);
+    if (!sj.ok) fail('unexpected /security/scan/status body');
+    console.log('ok', `${AGENT}/security/scan/status`);
+    n += 1;
+  }
+
   console.log(`smoke-listen-ui: passed (${n} checks)`);
 }
 

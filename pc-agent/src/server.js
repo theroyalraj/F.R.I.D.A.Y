@@ -53,6 +53,9 @@ import { createOrganizationRouter } from './organizationRoutes.js';
 import { authJwtOrAgentSecret } from './authMiddleware.js';
 import { ensureAuthSchema, ensureAiGenerationLogSchema, ensureLearningSchema } from './ensureAuthSchema.js';
 import { createLearningRouter } from './learningRoutes.js';
+import { createSecurityScanRouter, broadcastScanOutcome } from './securityScanRoutes.js';
+import { runDailySecurityScan } from './dailySecurityScan.js';
+import { LEGACY_TODO_SCOPE } from './todosDb.js';
 import { registerDeferredOpenRouterEmitter } from './deferredOpenRouter.js';
 import { refreshModelPool } from './openRouterModelPool.js';
 import {
@@ -232,6 +235,7 @@ function shouldIgnoreRequestLog(req) {
       p === '/favicon.svg' ||
       p === '/favicon.ico' ||
       p.startsWith('/todos') ||
+      p.startsWith('/security/scan') ||
       p.startsWith('/auth/') ||
       p.startsWith('/organization/')
     );
@@ -1014,6 +1018,7 @@ app.use('/settings', createSettingsRouter(auth, broadcastEvent));
 app.use('/automation', createAutomationRouter(auth));
 app.use('/integrations', createIntegrationsRouter(authJwtOrAgentSecret(SECRET)));
 app.use('/todos', createTodosRouter(broadcastEvent, SECRET));
+app.use('/security/scan', authJwtOrAgentSecret(SECRET), createSecurityScanRouter(broadcastEvent));
 app.use('/action-items', createActionItemsRouter());
 
 app.use((err, req, res, _next) => {
@@ -1117,6 +1122,22 @@ async function bootstrap() {
       if (ok) rootLogger.info('voice_agent_personas: Redis patch synced from Postgres (for Python daemons)');
     });
     speakStartup();
+
+    if (
+      ['1', 'true', 'yes', 'on'].includes(
+        String(process.env.OPENCLAW_SECURITY_SCAN_ON_START || '').trim().toLowerCase(),
+      )
+    ) {
+      setTimeout(() => {
+        runDailySecurityScan({ repoRoot: REPO_ROOT, force: false, respectCache: true })
+          .then((out) =>
+            broadcastScanOutcome(broadcastEvent, out, LEGACY_TODO_SCOPE, { log: rootLogger }),
+          )
+          .catch((e) =>
+            rootLogger.warn({ err: String(e?.message || e) }, 'OPENCLAW_SECURITY_SCAN_ON_START failed'),
+          );
+      }, 8000);
+    }
   });
   server.on('error', (err) => {
     rootLogger.fatal({ err }, 'server listen error');
