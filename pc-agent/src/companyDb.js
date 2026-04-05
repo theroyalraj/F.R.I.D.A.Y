@@ -4,7 +4,11 @@
  */
 import { getPool, usesSqliteBackend } from './perceptionDb.js';
 
-const CACHE_TTL_MS = 5 * 60 * 1000;
+/** Default five minutes; raise for fewer DB hits (milliseconds). */
+const CACHE_TTL_MS = Math.max(
+  10_000,
+  Number(process.env.OPENCLAW_COMPANY_CONTEXT_CACHE_MS || '') || 5 * 60 * 1000,
+);
 /** @type {Map<string, { text: string, at: number }>} */
 const _companyContextCacheByOrgId = new Map();
 

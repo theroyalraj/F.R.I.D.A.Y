@@ -56,3 +56,22 @@ export function playMusicSearch(query) {
     );
   });
 }
+
+/** Kill friday-play / ffplay via script --stop (same as voice pipeline). */
+export function stopMusicPlayback() {
+  return new Promise((resolve) => {
+    const child = spawn(pythonChildExecutable(), [PLAY_SCRIPT, '--stop'], {
+      env: { ...process.env },
+      detached: false,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    child.on('error', (e) => resolve({ ok: false, detail: String(e.message || e) }));
+    child.on('close', (code) =>
+      resolve({
+        ok: code === 0,
+        detail: code === 0 ? 'Playback stopped.' : `Stop exited ${code}`,
+      }),
+    );
+  });
+}

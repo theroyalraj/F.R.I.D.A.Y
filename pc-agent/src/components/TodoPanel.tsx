@@ -8,6 +8,7 @@ interface Todo {
   detail?: string;
   priority?: string;
   pinned?: boolean;
+  silentRemind?: boolean;
   source?: string;
   createdAt?: string;
   updatedAt?: string;
@@ -18,10 +19,10 @@ interface TodoPanelProps {
   theme?: 'light' | 'dark';
 }
 
-const PRIORITY_COLORS: Record<string, { dot: string; label: string }> = {
-  high:   { dot: '#ef4444', label: 'H' },
-  medium: { dot: '#f59e0b', label: 'M' },
-  low:    { dot: '#22c55e', label: 'L' },
+const PRIORITY_COLORS: Record<string, { dot: string }> = {
+  high:   { dot: '#ef4444' },
+  medium: { dot: '#f59e0b' },
+  low:    { dot: '#22c55e' },
 };
 
 const TodoPanel: React.FC<TodoPanelProps> = ({ authHeaders, theme = 'dark' }) => {
@@ -99,9 +100,27 @@ const TodoPanel: React.FC<TodoPanelProps> = ({ authHeaders, theme = 'dark' }) =>
     }
   };
 
+  const toggleSilentRemind = async (todo: Todo, e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const next = !todo.silentRemind;
+    setTodos((prev) => prev.map((t) => (t.id === todo.id ? { ...t, silentRemind: next } : t)));
+    try {
+      const response = await fetch(`/todos/${todo.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', ...headers() },
+        body: JSON.stringify({ silentRemind: next }),
+      });
+      if (!response.ok) {
+        setTodos((prev) => prev.map((t) => (t.id === todo.id ? { ...t, silentRemind: todo.silentRemind } : t)));
+      }
+    } catch {
+      setTodos((prev) => prev.map((t) => (t.id === todo.id ? { ...t, silentRemind: todo.silentRemind } : t)));
+    }
+  };
+
   const activeTodos = todos.filter((t) => !t.done);
   const completedTodos = todos.filter((t) => t.done);
-  const isDark = theme === 'dark';
 
   return (
     <div className={`${styles['todo-panel']} ${styles[`todo-panel-${theme}`]}`}>
@@ -185,6 +204,33 @@ const TodoPanel: React.FC<TodoPanelProps> = ({ authHeaders, theme = 'dark' }) =>
                         style={{ background: pc.dot }}
                         title={`${todo.priority || 'medium'} priority`}
                       />
+                      <button
+                        type="button"
+                        className={`${styles['todo-silent-btn']} ${todo.silentRemind ? styles['todo-silent-on'] : ''}`}
+                        onClick={(e) => toggleSilentRemind(todo, e)}
+                        title={
+                          todo.silentRemind
+                            ? 'Quiet: omitted from spoken task reminders'
+                            : 'Included when you trigger spoken task reminders'
+                        }
+                        aria-label={
+                          todo.silentRemind ? 'Mark task as spoken on reminders' : 'Mark task quiet for reminders'
+                        }
+                      >
+                        {todo.silentRemind ? (
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                            <path d="M9 9a3 3 0 015.83 1c0 2-3 3-3 3" />
+                            <path d="M12 17h.01" />
+                            <path d="M4.5 4.5l15 15" />
+                            <path d="M18.36 18.36A9 9 0 113.64 5.64" />
+                          </svg>
+                        ) : (
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                            <path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9" />
+                            <path d="M13.73 21a2 2 0 01-3.46 0" />
+                          </svg>
+                        )}
+                      </button>
                       <button
                         className={styles['todo-delete-btn']}
                         onClick={() => deleteTodo(todo.id)}

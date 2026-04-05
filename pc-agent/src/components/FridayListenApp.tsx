@@ -12,6 +12,7 @@ import { IntegrationsRail } from './IntegrationsRail';
 import { PersonaRosterModal } from './PersonaRosterModal';
 import LaunchOverlay from './LaunchOverlay';
 import SessionSidebar from './SessionSidebar';
+import TopMusicDock from './TopMusicDock';
 import {
   COMPANY_PERSONAS,
   SPEAKING_PERSONA_ORDER,
@@ -24,6 +25,7 @@ import {
   type CompanyPersonaKey,
   type PersonaCatalog,
 } from '../data/companyPersonas';
+import type { ChatBubble } from '../contexts/VoiceAppContext';
 import styles from '../styles/listen.module.css';
 
 const INTEGRATIONS_NARROW_MQ = '(max-width: 1100px)';
@@ -81,6 +83,16 @@ const MENTION_TARGETS = [
 interface VoiceSession { context: string; voice: string; set_at: string; last_used: string; status: 'active' | 'idle'; }
 interface EdgeVoice { voice: string; lang: string; gender: string; desc: string; }
 interface CelebrationPayload { song: string; askText: string; delayMsBeforeAsk: number; }
+
+/** Prior turns for Friday fast path (Anthropic multi-turn + prompt cache on system). */
+function bubblesToConversationTail(bubbles: ChatBubble[]): Array<{ role: 'user' | 'assistant'; content: string }> {
+  const out: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+  for (const b of bubbles) {
+    if (b.type === 'user') out.push({ role: 'user', content: b.text });
+    else if (b.type === 'friday') out.push({ role: 'assistant', content: b.text });
+  }
+  return out.slice(-14);
+}
 
 /* ═══ Main App ════════════════════════════════════════════════ */
 const FridayListenApp: React.FC = () => {
@@ -345,6 +357,8 @@ const FridayListenApp: React.FC = () => {
     const mentions = [...raw.matchAll(/@(\w+)/g)].map(m => m[1].toLowerCase());
     const text = raw.replace(/@\w+\s*/g, '').trim() || raw;
 
+    const conversationTail = bubblesToConversationTail(bubbles);
+
     addBubble({ type: 'user', text: raw, ts: Date.now(), persona: USER_BUBBLE_PERSONA });
 
     // If @speak — ask for confirmation (respect focus mode)
@@ -387,6 +401,7 @@ const FridayListenApp: React.FC = () => {
           userId: 'friday-ui',
           ...(mentions.includes('cursor') ? { target: 'cursor' } : {}),
           ...(claudeModel ? { claudeModel } : {}),
+          ...(conversationTail.length ? { conversationTail } : {}),
         }),
       });
       const data = await res.json();
@@ -431,7 +446,7 @@ const FridayListenApp: React.FC = () => {
       }
       inputRef.current?.focus();
     }
-  }, [inputText, sending, addBubble, setConnectionStatus, authHeaders, getReplyPersona, clearCelebrationOffer, claudeModel, alwaysSpeakViaUi]);
+  }, [inputText, sending, bubbles, addBubble, setConnectionStatus, authHeaders, getReplyPersona, clearCelebrationOffer, claudeModel, alwaysSpeakViaUi]);
 
   const onCelebrationPlay = useCallback(async () => {
     if (celebrationAskTimerRef.current) {
@@ -654,6 +669,15 @@ const FridayListenApp: React.FC = () => {
             <span>{statusLabels[connectionStatus]}</span>
           </div>
           <span className={styles['top-meta']}>UP {uptime}</span>
+        </div>
+        <div className={styles['top-music-slot']}>
+          <TopMusicDock
+            theme={theme}
+            musicOrbCaption={musicOrbCaption}
+            speakingPersonaKey={speakingPersonaKey}
+            authHeaders={authHeaders}
+            showToast={showToast}
+          />
         </div>
         <div className={styles['top-right']}>
           {isNarrow && (

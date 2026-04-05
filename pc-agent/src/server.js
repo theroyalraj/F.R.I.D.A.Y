@@ -9,6 +9,7 @@ import dotenv from 'dotenv';
 import pinoHttp from 'pino-http';
 import { rootLogger } from './log.js';
 import { runTask } from './taskRunner.js';
+import { playMusicSearch, stopMusicPlayback } from './playMusic.js';
 import { pythonChildExecutable } from './winPython.js';
 import { prepareTextForTts } from './ttsPrep.js';
 import { piperConfigured, synthesizePiperWav } from './piperTts.js';
@@ -348,6 +349,26 @@ voiceRouter.post('/celebration', async (req, res, next) => {
   } catch (e) {
     next(e);
   }
+});
+
+/** Listen UI — start yt-dlp + ffplay full track; broadcasts music_play SSE (Maestro orb). */
+voiceRouter.post('/music/play', async (req, res) => {
+  const q = String(req.body?.query || '').trim();
+  if (!q) {
+    return res.status(400).json({ error: 'Missing body: { "query": "artist song" }' });
+  }
+  const r = await playMusicSearch(q);
+  if (r.ok) {
+    broadcastEvent('music_play', buildMusicPlaySsePayload(q, 'full'));
+  }
+  res.json({ ok: r.ok, query: q, detail: r.detail });
+});
+
+/** Stop local friday-play session (ffplay); clears music Redis flag in script. */
+voiceRouter.post('/music/stop', async (_req, res) => {
+  const r = await stopMusicPlayback();
+  broadcastEvent('listening', {});
+  res.json({ ok: r.ok, detail: r.detail });
 });
 
 /** Speak text asynchronously via friday-speak.py with Jarvis voice settings (fire-and-forget).

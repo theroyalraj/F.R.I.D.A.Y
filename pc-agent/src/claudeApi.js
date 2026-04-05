@@ -24,6 +24,7 @@ import {
   clearAnthropicCooldown,
   armAnthropicCooldownFromRateLimitResponse,
 } from './anthropicCooldown.js';
+import { flattenConversationForSingleShot } from './chatContext.js';
 
 const HAIKU_MODEL  = process.env.CLAUDE_API_HAIKU  || 'claude-haiku-4-5';
 const SONNET_MODEL = process.env.CLAUDE_API_SONNET || 'claude-sonnet-4-5';
@@ -57,6 +58,49 @@ export function buildVoiceSystem(opts = {}) {
     parts.push(String(opts.speakStyleExtra).trim());
   }
   return parts.join('\n\n');
+}
+
+function anthropicPromptCacheEnabled() {
+  const v = String(process.env.ANTHROPIC_PROMPT_CACHE ?? 'true').trim().toLowerCase();
+  return v !== '0' && v !== 'false' && v !== 'off' && v !== 'no';
+}
+
+/**
+ * Anthropic Messages API: string system or block array with ephemeral cache on the stable voice base.
+ * @param {{ speakStyleExtra?: string, companyContext?: string }} opts
+ */
+function buildAnthropicSystemPayload(opts) {
+  const company = opts.companyContext && String(opts.companyContext).trim()
+    ? String(opts.companyContext).trim()
+    : '';
+  const style =
+    opts.speakStyleExtra && String(opts.speakStyleExtra).trim()
+      ? String(opts.speakStyleExtra).trim()
+      : '';
+
+  if (!anthropicPromptCacheEnabled()) {
+    return { system: buildVoiceSystem(opts), headers: {} };
+  }
+
+  const blocks = [
+    {
+      type: 'text',
+      text: VOICE_SYSTEM_BASE,
+      cache_control: { type: 'ephemeral' },
+    },
+  ];
+  if (company) blocks.push({ type: 'text', text: company });
+  if (style) blocks.push({ type: 'text', text: style });
+  return {
+    system: blocks,
+    headers: { 'anthropic-beta': 'prompt-caching-2024-07-31' },
+  };
+}
+
+function buildDeferredPrompt(latestUserText, priorTurns) {
+  const turns = Array.isArray(priorTurns) ? priorTurns : [];
+  const last = String(latestUserText || '');
+  return turns.length ? flattenConversationForSingleShot(turns, last) : last;
 }
 
 export function apiModelName(shortName) {
@@ -99,8 +143,8 @@ export function isApiKeyAvailable() {
 
 /**
  * Call the Anthropic Messages API directly.
- * @param {string} prompt
- * @param {{ model?: string, timeoutMs?: number, log?: import('pino').Logger, speakStyleExtra?: string, companyContext?: string }} opts
+ * @param {string} prompt — latest user message (after priorTurns when multi-turn)
+ * @param {{ model?: string, timeoutMs?: number, log?: import('pino').Logger, speakStyleExtra?: string, companyContext?: string, priorTurns?: Array<{ role: string, content: string }> }} opts
  * @returns {Promise<{ ok: boolean, text: string, model: string, ms: number, needsOpenRouterKey?: boolean, deferred?: boolean, deferredContext?: { prompt: string, system: string, tier: string, timeoutMs: number, log?: import('pino').Logger } }>}
  */
 export async function callClaudeApi(prompt, opts = {}) {
@@ -115,7 +159,19 @@ export async function callClaudeApi(prompt, opts = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  const system = buildVoiceSystem({
+  const priorTurns = Array.isArray(opts.priorTurns) ? opts.priorTurns : [];
+  const latest = String(prompt);
+  const messages =
+    priorTurns.length > 0
+      ? [...priorTurns, { role: 'user', content: latest }]
+      : [{ role: 'user', content: latest }];
+
+  const systemString = buildVoiceSystem({
+    speakStyleExtra: opts.speakStyleExtra,
+    companyContext: opts.companyContext,
+  });
+  const deferredPrompt = buildDeferredPrompt(latest, priorTurns);
+  const { system: systemPayload, headers: anthropicExtraHeaders } = buildAnthropicSystemPayload({
     speakStyleExtra: opts.speakStyleExtra,
     companyContext: opts.companyContext,
   });
@@ -132,8 +188,8 @@ export async function callClaudeApi(prompt, opts = {}) {
         deferred: true,
         skippedAnthropicCooldown: true,
         deferredContext: {
-          prompt: String(prompt),
-          system,
+          prompt: deferredPrompt,
+          system: systemString,
           tier,
           timeoutMs,
           log: opts.log,
@@ -157,12 +213,13 @@ export async function callClaudeApi(prompt, opts = {}) {
         'Content-Type':         'application/json',
         'x-api-key':            apiKey,
         'anthropic-version':    '2023-06-01',
+        ...anthropicExtraHeaders,
       },
       body: JSON.stringify({
         model,
         max_tokens: 256,
-        system,
-        messages: [{ role: 'user', content: String(prompt) }],
+        system: systemPayload,
+        messages,
       }),
     });
 
@@ -183,8 +240,8 @@ export async function callClaudeApi(prompt, opts = {}) {
           ms,
           deferred: true,
           deferredContext: {
-            prompt: String(prompt),
-            system,
+            prompt: deferredPrompt,
+            system: systemString,
             tier,
             timeoutMs,
             log: opts.log,
@@ -213,7 +270,18 @@ export async function callClaudeApi(prompt, opts = {}) {
     }
     const text = data?.content?.[0]?.text?.trim() || '';
     await clearAnthropicCooldown();
-    opts.log?.info({ model, ms, chars: text.length }, 'claudeApi: ok');
+    const cacheRead = data?.usage?.cache_read_input_tokens;
+    const cacheCreate = data?.usage?.cache_creation_input_tokens;
+    opts.log?.info(
+      {
+        model,
+        ms,
+        chars: text.length,
+        ...(cacheRead != null ? { cacheReadInputTokens: cacheRead } : {}),
+        ...(cacheCreate != null ? { cacheCreateInputTokens: cacheCreate } : {}),
+      },
+      'claudeApi: ok',
+    );
     return { ok: true, text, model, ms };
   } finally {
     clearTimeout(timer);
