@@ -156,6 +156,27 @@ def cmd_read(args):
     m.logout()
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
+def cmd_archive(args):
+    """Mark a message as read and move it out of INBOX (archive) by UID."""
+    if not args:
+        print("Usage: gmail.py archive <UID>", file=sys.stderr); sys.exit(1)
+    uid = args[0].encode()
+    m = _connect()
+    m.select("INBOX")
+    # Mark as seen
+    m.uid("STORE", uid, "+FLAGS", "(\\Seen)")
+    # Move to [Gmail]/All Mail (archive) — fallback: just mark read if label not found
+    result = m.uid("COPY", uid, "[Gmail]/All Mail")
+    if result[0] == "OK":
+        m.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
+        m.expunge()
+        m.logout()
+        print(json.dumps({"ok": True, "uid": args[0], "action": "archived"}))
+    else:
+        # Fallback: just mark as read (no All Mail label)
+        m.logout()
+        print(json.dumps({"ok": True, "uid": args[0], "action": "marked_read"}))
+
 def cmd_search(args):
     if not args:
         print("Usage: gmail.py search <query>", file=sys.stderr); sys.exit(1)
@@ -180,7 +201,7 @@ def main():
         print(__doc__); sys.exit(0)
     cmd  = argv[0]
     rest = argv[1:]
-    {"list": cmd_list, "unread": cmd_unread, "read": cmd_read, "search": cmd_search}.get(
+    {"list": cmd_list, "unread": cmd_unread, "read": cmd_read, "search": cmd_search, "archive": cmd_archive}.get(
         cmd, lambda _: (print(f"Unknown command: {cmd}", file=sys.stderr), sys.exit(1))
     )(rest)
 

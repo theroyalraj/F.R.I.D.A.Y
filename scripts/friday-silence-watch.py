@@ -70,6 +70,7 @@ _REDIS_RESERVE = "openclaw:echo:line_reserve"
 _REDIS_REFERENCED = "openclaw:echo:referenced_topics"
 _REDIS_NUDGE_HOUR = "openclaw:echo:nudge_count_hour"
 _REDIS_RECENT_SPOKEN = "openclaw:echo:recent_spoken_hashes"
+_REDIS_LAST_PRESENCE = "friday:nudge:last_presence_ts"  # shared with Maestro
 
 _TRANSCRIPTS_ROOT = Path(
     os.environ.get(
@@ -87,6 +88,67 @@ _DELIVERY_STYLES: list[tuple[str, str]] = [
     ("playful", "Light, kind humour about the situation — late night, long slog, another refactor — never mean-spirited."),
     ("continuation", "Pick up a thread mid-thought, as if you have been mulling it since they last mentioned it."),
 ]
+
+
+def _infer_vibe_from_memos(memos: list) -> str:
+    """
+    Lightweight keyword heuristic — same logic as Maestro's _infer_emotional_context.
+    Returns vibe string: "stuck"|"shipping"|"focused"|"grinding"|"winding_down"|"unknown".
+    Zero LLM calls; ECHO's AI prompt handles the nuanced emotional language.
+    """
+    if not memos:
+        return "unknown"
+    h = time.localtime().tm_hour
+    all_text = " ".join((m.get("user_line") or "") for m in memos[:4]).lower()
+    if any(w in all_text for w in (
+        "fix", "bug", "error", "broke", "crash", "fail", "wrong", "debug", "not working", "broken",
+    )):
+        return "stuck"
+    if any(w in all_text for w in (
+        "add", "build", "create", "new feature", "implement", "ship", "launch", "deploy",
+    )):
+        return "shipping"
+    if any(w in all_text for w in (
+        "refactor", "clean", "rename", "move", "split", "reorgan", "restructure",
+    )):
+        return "focused"
+    ages = [m.get("age_minutes", 0) for m in memos if m.get("age_minutes")]
+    if ages and max(ages) / 60.0 > 3:
+        return "grinding"
+    if h >= 23 or h < 5:
+        return "winding_down"
+    return "unknown"
+
+
+def _pick_weighted_style(memos: list) -> tuple:
+    """
+    Pick a delivery style weighted by emotional context instead of uniform random.
+    Style order: callback, gentle_observation, tangent, offer_subtle, warmth, playful, continuation
+    """
+    vibe = _infer_vibe_from_memos(memos)
+    has_context = any((m.get("user_line") or "").strip() for m in memos[:4])
+
+    if not has_context:
+        # No context — observation and warmth only
+        weights = [0, 3, 0, 1, 4, 2, 0]
+    elif vibe == "stuck":
+        # Struggling — empathy, offer concrete help, warmth; no playful
+        weights = [1, 1, 1, 4, 4, 0, 2]
+    elif vibe == "shipping":
+        # Building something — genuine curiosity in their work + continuation + playful
+        weights = [4, 0, 2, 1, 1, 2, 4]
+    elif vibe == "grinding":
+        # Long session — warmth-heavy with continuation interest
+        weights = [1, 2, 1, 1, 5, 1, 1]
+    elif vibe == "winding_down":
+        # Late night — gentle, warm, no pressure
+        weights = [0, 2, 0, 0, 5, 1, 2]
+    else:
+        # Balanced with continuation bias
+        weights = [2, 1, 2, 1, 1, 2, 3]
+
+    return random.choices(_DELIVERY_STYLES, weights=weights, k=1)[0]
+
 
 _anthropic_ok = True
 _anthropic_fail_until = 0.0
@@ -298,31 +360,34 @@ def _scan_transcript_memos(depth: int) -> list[dict[str, Any]]:
             age_s = now - jp.parent.stat().st_mtime
             age_m = int(age_s // 60)
             cid = jp.parent.name
-            first_user = ""
-            first_asst = ""
-            n = 0
+            # Read LAST 80 lines to get the freshest exchange, not stale content from session start
             with jp.open(encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    if not first_user:
-                        u = _user_text_from_line(line)
-                        if u:
-                            first_user = _strip_user_query(u)
-                    if not first_asst:
-                        a = _assistant_text_from_line(line)
-                        if a:
-                            first_asst = a[:320] + ("…" if len(a) > 320 else "")
-                    n += 1
-                    if n > 400 and first_user and first_asst:
-                        break
-            if not first_user and not first_asst:
+                all_lines = f.readlines()
+            tail = all_lines[-80:] if len(all_lines) > 80 else all_lines
+            last_user = ""
+            last_asst = ""
+            for raw_line in reversed(tail):
+                if not last_user:
+                    u = _user_text_from_line(raw_line)
+                    if u:
+                        last_user = _strip_user_query(u)
+                if not last_asst:
+                    a = _assistant_text_from_line(raw_line)
+                    if a:
+                        last_asst = a[:320] + ("\u2026" if len(a) > 320 else "")
+                if last_user and last_asst:
+                    break
+            if not last_user and not last_asst:
                 continue
-            topic_h = hashlib.sha256((first_user or first_asst or cid).encode("utf-8", errors="replace")).hexdigest()[:16]
+            topic_h = hashlib.sha256(
+                (last_user or last_asst or cid).encode("utf-8", errors="replace")
+            ).hexdigest()[:16]
             memos.append(
                 {
                     "chat_id": cid,
                     "age_minutes": age_m,
-                    "user_line": first_user or "(image or attachment)",
-                    "assistant_snippet": first_asst,
+                    "user_line": last_user or "(image or attachment)",
+                    "assistant_snippet": last_asst,
                     "topic_key": topic_h,
                 }
             )
@@ -535,42 +600,65 @@ def _generate_line_ai(
         if _topic_already_used(r0, m.get("topic_key") or ""):
             continue
         ul = (m.get("user_line") or "").strip()
+        al = (m.get("assistant_snippet") or "").strip()
         if ul:
-            ctx_lines.append(f"{i}. [{m.get('age_minutes', '?')} min ago] {ul[:280]}")
+            ctx_lines.append(f"{i}. [{m.get('age_minutes', '?')} min ago] User: {ul[:200]}")
+            if al:
+                ctx_lines.append(f"   Assistant: {al[:200]}")
             if not picked_topic:
                 picked_topic = m.get("topic_key") or ""
-        if len(ctx_lines) >= 5:
+        if len(ctx_lines) >= 8:
             break
     if not ctx_lines and pool:
         for i, m in enumerate(pool, 1):
             ul = (m.get("user_line") or "").strip()
+            al = (m.get("assistant_snippet") or "").strip()
             if ul:
-                ctx_lines.append(f"{i}. [{m.get('age_minutes', '?')} min ago] {ul[:280]}")
-            if len(ctx_lines) >= 5:
+                ctx_lines.append(f"{i}. [{m.get('age_minutes', '?')} min ago] User: {ul[:200]}")
+                if al:
+                    ctx_lines.append(f"   Assistant: {al[:200]}")
+            if len(ctx_lines) >= 8:
                 break
-    ctx_block = "\n".join(ctx_lines) if ctx_lines else "(No recent user messages in scanned transcripts — improvise from quiet stretch and time of day only.)"
+    ctx_block = "\n".join(ctx_lines) if ctx_lines else "(No recent user messages — improvise from quiet stretch and time of day only.)"
+
+    # Infer emotional vibe to guide both prompt framing and tone rules
+    vibe = _infer_vibe_from_memos(memos)
+    vibe_guidance = {
+        "stuck":        "They are fighting a bug or error. Match this: empathetic, patient, maybe gently curious — never cheerful or wellness-y.",
+        "shipping":     "They are building or shipping something. Match this: genuinely interested, energised, curious about their progress.",
+        "focused":      "They are in a refactor or deep focus. Match this: calm, precise, let them think.",
+        "grinding":     "Long session, probably tired. Match this: warm, gentle, present without demanding attention.",
+        "winding_down": "Late night. Match this: soft, warm, no pressure — like someone checking in before they sign off.",
+        "unknown":      "Session vibe unclear. Match the delivery mode and stay genuine.",
+    }.get(vibe, "Match the delivery mode and stay genuine.")
 
     system = (
-        "You are Echo — Director of Presence at OpenClaw Labs. You sit nearby; you notice when "
+        "You are Echo \u2014 Director of Presence at OpenClaw Labs. You sit nearby; you notice when "
         "the room goes quiet. You remember conversational threads and bring them up like a perceptive colleague. "
         "You are NOT a generic assistant. Do not offer a menu of services. No 'I can help with' lists.\n\n"
         f"Personality steering: {pers}\n\n"
         f"DELIVERY MODE ({delivery_name}): {delivery_instruction}\n\n"
         "ABSOLUTE RULES:\n"
-        f"- Never start with the user's real name ({user_name}) if it looks like a name — use 'you' or no address.\n"
+        f"- Never start with the user's real name ({user_name}) if it looks like a name \u2014 use 'you' or no address.\n"
         "- Never start with 'I' as the very first word.\n"
         "- No markdown, no bullet points, no emojis.\n"
-        "- One paragraph only, 15–50 words unless reserve_mode asks shorter.\n"
+        "- One paragraph only, 15\u201350 words unless reserve_mode asks shorter.\n"
         "- Sound mid-thought, not like a timer fired.\n"
+        "- When conversation snippets exist, you MUST reference or continue something specific from them.\n"
+        "- Generic wellness (water, stretch, posture, how are you, take a break) is FORBIDDEN when you have context.\n"
+        "- Wellness lines are ONLY acceptable when context says '(No recent user messages)' AND delivery mode is 'warmth' or 'gentle_observation'.\n"
+        f"- Emotional register to match: {vibe_guidance}\n"
     )
     if reserve_mode:
-        system += "- Reserve line: keep it 18–40 words; still specific if context exists.\n"
+        system += "- Reserve line: keep it 18\u201340 words; still specific if context exists.\n"
 
     user_msg = (
         f"Recent conversation snippets (newest listed first):\n{ctx_block}\n\n"
         f"The room has been quiet about {idle_minutes:.1f} minutes. "
         f"Time of day feel: {_time_feel_local()}. "
-        "Write ONE check-in line for text-to-speech."
+        f"Session vibe: {vibe}. "
+        "Write ONE brief, emotionally-attuned presence line for text-to-speech. "
+        "NOT a check-in. NOT wellness advice. Continue a thought, notice something, or simply be present."
     )
 
     try:
@@ -771,6 +859,16 @@ def main() -> None:
         if (time.time() - last_nudge_local) < rearm_sec * 0.95:
             continue
 
+        # Cross-daemon coordination: back off if Maestro just spoke recently
+        if r and r is not False:
+            try:
+                last_any = r.get(_REDIS_LAST_PRESENCE)
+                if last_any and (time.time() - float(last_any)) < rearm_sec * 0.5:
+                    log.debug("ECHO skipping — Maestro or prior nudge too recent (%.0fs ago)", time.time() - float(last_any))
+                    continue
+            except Exception:
+                pass
+
         now = time.time()
         if now - last_scan >= scan_interval:
             memos_cache = _scan_transcript_memos(depth)
@@ -789,7 +887,8 @@ def main() -> None:
         if idle < eff_idle:
             continue
 
-        style = random.choice(_DELIVERY_STYLES)
+        style = _pick_weighted_style(memos_cache)
+        vibe_tag = _infer_vibe_from_memos(memos_cache)
         line, topic_key = _generate_line_ai(
             memos_cache,
             idle / 60.0,
@@ -837,7 +936,16 @@ def main() -> None:
         if topic_key:
             _mark_topic_used(r, topic_key)
         _record_spoken_line(r, line)
-        log.info("Idle %.0fs — ECHO nudge (pid=%s)", idle, proc.pid)
+        # Stamp shared presence key so Maestro backs off after ECHO speaks
+        if r and r is not False:
+            try:
+                r.set(_REDIS_LAST_PRESENCE, str(time.time()), ex=7200)
+            except Exception:
+                pass
+        log.info(
+            "Idle %.0fs \u2014 ECHO nudge style=%s vibe=%s (pid=%s): %s",
+            idle, style[0], vibe_tag, proc.pid, line[:80],
+        )
 
         _refill_reserve_async(list(memos_cache), dict(cfg))
 

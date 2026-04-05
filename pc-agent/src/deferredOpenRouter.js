@@ -26,13 +26,20 @@ export function yieldEventLoopTurn() {
 }
 
 /**
- * @param {{ prompt: string, system: string, tier: string, timeoutMs: number, log?: import('pino').Logger }} ctx
+ * Optional metadata for AI cache + Postgres log after deferred completion.
+ * @typedef {{ modelKey: string, mode?: string, source?: string, orgId?: string|null, userId?: string|null }} DeferredAiCacheMeta
  */
-export function scheduleOpenRouterFallback(ctx) {
+
+/**
+ * @param {{ prompt: string, system: string, tier: string, timeoutMs: number, log?: import('pino').Logger }} ctx
+ * @param {DeferredAiCacheMeta | null | undefined} cacheMeta
+ */
+export function scheduleOpenRouterFallback(ctx, cacheMeta = undefined) {
   setImmediate(() => {
     void (async () => {
       await yieldEventLoopTurn();
       const model = openRouterModelForTier(ctx.tier);
+      const t0 = Date.now();
       try {
         ctx.log?.info({ model, via: 'openrouter', async: true }, 'deferred OpenRouter start');
         const result = await callOpenRouterChat({
@@ -51,6 +58,28 @@ export function scheduleOpenRouterFallback(ctx) {
         } else if (emitSse) {
           emitSse('error', { text: 'OpenRouter returned an empty reply.' });
           setTimeout(() => emitSse('listening', {}), 120);
+        }
+
+        if (cacheMeta?.modelKey && text) {
+          try {
+            const { persistAiGeneration } = await import('./aiTaskCache.js');
+            await persistAiGeneration({
+              prompt: ctx.prompt,
+              system: ctx.system,
+              modelKey: cacheMeta.modelKey,
+              responseText: text,
+              model: result.model || model,
+              mode: cacheMeta.mode || 'api',
+              provider: 'openrouter',
+              source: cacheMeta.source || '',
+              latencyMs: Date.now() - t0,
+              orgId: cacheMeta.orgId,
+              userId: cacheMeta.userId,
+              log: ctx.log,
+            });
+          } catch (e) {
+            ctx.log?.warn({ err: String(e?.message || e).slice(0, 200) }, 'deferred OpenRouter: cache persist failed');
+          }
         }
       } catch (e) {
         const msg = String(e?.message || e).slice(0, 500);

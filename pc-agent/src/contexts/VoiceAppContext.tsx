@@ -4,11 +4,25 @@ import {
   loadPersonaOverrides,
   inferPersonaKeyFromVoice,
   USER_BUBBLE_PERSONA,
+  COMPANY_PERSONAS,
   type ChatBubblePersona,
   type CompanyPersonaKey,
   type PersonaOverride,
   type PersonaCatalog,
 } from '../data/companyPersonas';
+
+/** Mail / WhatsApp / similar — full-screen Siri orb stays off; rail shows the activity */
+function normalizePeripheralSpeakChannel(raw?: string): 'mail' | 'whatsapp' | null {
+  if (!raw || typeof raw !== 'string') return null;
+  const n = raw.trim().toLowerCase();
+  if (n === 'mail' || n === 'gmail' || n === 'email' || n === 'inbox') return 'mail';
+  if (n === 'whatsapp' || n === 'wa' || n === 'evolution') return 'whatsapp';
+  return null;
+}
+
+function isCompanyPersonaKey(k: string): k is CompanyPersonaKey {
+  return Object.prototype.hasOwnProperty.call(COMPANY_PERSONAS, k);
+}
 
 export type SpeakingPersonaKey = CompanyPersonaKey | 'custom' | null;
 
@@ -26,6 +40,10 @@ export interface ChatBubble {
 export interface VoicePostEventOptions {
   musicSeconds?: number;
   musicPersonaKey?: CompanyPersonaKey;
+  /** When mail / WhatsApp etc. — centre overlay hidden, rail pulses */
+  speakChannel?: string;
+  /** Optional roster key from SSE (e.g. nova for Gmail) */
+  speakPersonaKey?: string;
 }
 
 /** Mini orb payload (non-blocking notification, e.g. music). */
@@ -59,6 +77,8 @@ export interface VoiceAppContextType {
    * Null when no TTS is active. Used to tint the Siri orb per speaker.
    */
   speakingPersonaKey: SpeakingPersonaKey;
+  /** Non-null when TTS is attributed to mail / WhatsApp — show in integrations rail only */
+  peripheralSpeak: { channel: 'mail' | 'whatsapp'; text: string } | null;
   personaOverrides: Record<string, PersonaOverride>;
   /** Merged roster from GET /settings/personas (Postgres + defaults); null = use bundled COMPANY_PERSONAS only. */
   personaCatalog: PersonaCatalog | null;
@@ -88,6 +108,20 @@ export interface VoiceAppContextType {
   /** Small fixed orb for background notifications (music, future mail / gRPC). */
   miniOrb: MiniOrbState | null;
   dismissMiniOrb: () => void;
+  /** Do Not Disturb — silences all spoken daemons; UI still shows notifications. */
+  dnd: boolean;
+  setDnd: (enabled: boolean) => void;
+  /** Live feed of Windows toast notifications from win-notify-watch. */
+  winNotifications: WinNotification[];
+  dismissWinNotification: (id: string) => void;
+}
+
+export interface WinNotification {
+  id: string;
+  app: string;
+  title: string;
+  body: string;
+  ts: number;
 }
 
 const VoiceAppContext = createContext<VoiceAppContextType | undefined>(undefined);
@@ -154,6 +188,30 @@ export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [miniOrb, setMiniOrb] = useState<MiniOrbState | null>(null);
   const miniOrbTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const [dnd, setDndState] = useState<boolean>(false);
+  const [winNotifications, setWinNotifications] = useState<WinNotification[]>([]);
+  const WIN_NOTIFY_MAX = 50;
+
+  useEffect(() => {
+    fetch('/settings/dnd')
+      .then((r) => r.json())
+      .then((d) => { if (typeof d?.dnd === 'boolean') setDndState(d.dnd); })
+      .catch(() => {});
+  }, []);
+
+  const setDnd = useCallback((enabled: boolean) => {
+    setDndState(enabled);
+    fetch('/settings/dnd', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    }).catch(() => {});
+  }, []);
+
+  const dismissWinNotification = useCallback((id: string) => {
+    setWinNotifications((prev) => prev.filter((n) => n.id !== id));
+  }, []);
+
   const musicVisualTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const musicVisualUntilRef = useRef(0);
   const activeMusicVisualRef = useRef<{ personaKey: CompanyPersonaKey; caption: string } | null>(null);
@@ -163,6 +221,21 @@ export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     caption: string;
   } | null>(null);
   const ttsActiveRef = useRef(false);
+  const ttsWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** SSE reconnects and duplicate daemon_start/server_start must not flood chat with "FRIDAY ONLINE". */
+  const fridayOnlineDividerShownRef = useRef(false);
+
+  const [peripheralSpeak, setPeripheralSpeak] = useState<{
+    channel: 'mail' | 'whatsapp';
+    text: string;
+  } | null>(null);
+
+  const clearTtsWatchdog = useCallback(() => {
+    if (ttsWatchdogRef.current) {
+      clearTimeout(ttsWatchdogRef.current);
+      ttsWatchdogRef.current = null;
+    }
+  }, []);
 
   const dismissMiniOrb = useCallback(() => {
     if (miniOrbTimerRef.current) {
@@ -189,6 +262,32 @@ export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setMusicOrbCaption('');
   }, []);
 
+  /** Fallback when SSE replay leaves speak dangling, or listening is never emitted after TTS. */
+  const scheduleTtsWatchdog = useCallback(
+    (text: string) => {
+      clearTtsWatchdog();
+      const len = String(text || '').length;
+      const ms = Math.min(180_000, Math.max(4_500, len * 70 + 2_500));
+      ttsWatchdogRef.current = setTimeout(() => {
+        ttsWatchdogRef.current = null;
+        if (!ttsActiveRef.current) return;
+        ttsActiveRef.current = false;
+        clearMusicVisualTimer();
+        setConnectionStatus('listening');
+        setSpeakingPersonaKey(null);
+        setPeripheralSpeak(null);
+      }, ms);
+    },
+    [clearTtsWatchdog, clearMusicVisualTimer],
+  );
+
+  useEffect(
+    () => () => {
+      clearTtsWatchdog();
+    },
+    [clearTtsWatchdog],
+  );
+
   const applyMusicVisual = useCallback(
     (d: { seconds: number; personaKey: CompanyPersonaKey; caption: string }) => {
       const sec = Math.min(600, Math.max(5, d.seconds));
@@ -206,6 +305,7 @@ export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       }, sec * 1000);
       setConnectionStatus('speaking');
       setSpeakingPersonaKey(d.personaKey);
+      setPeripheralSpeak(null);
     },
     [clearMusicVisualTimer],
   );
@@ -296,17 +396,28 @@ export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const postEvent = useCallback(
     (type: string, text = '', opts?: VoicePostEventOptions) => {
       switch (type) {
+        case 'sse_stream_open':
+          setConnectionStatus('listening');
+          break;
         case 'daemon_start':
         case 'server_start':
           setConnectionStatus('listening');
-          addBubble({ type: 'divider', text: 'FRIDAY ONLINE', ts: Date.now() });
+          if (!fridayOnlineDividerShownRef.current) {
+            fridayOnlineDividerShownRef.current = true;
+            addBubble({ type: 'divider', text: 'FRIDAY ONLINE', ts: Date.now() });
+          }
           break;
         case 'daemon_disconnect':
+          clearTtsWatchdog();
+          ttsActiveRef.current = false;
+          setPeripheralSpeak(null);
           setConnectionStatus('offline');
           break;
         case 'listening':
         case 'daemon_reconnect': {
+          clearTtsWatchdog();
           ttsActiveRef.current = false;
+          setPeripheralSpeak(null);
           if (deferredMusicVisualRef.current) {
             const d = deferredMusicVisualRef.current;
             deferredMusicVisualRef.current = null;
@@ -314,7 +425,11 @@ export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             setLastHeardText('');
             return true;
           }
-          if (Date.now() < musicVisualUntilRef.current) {
+          const musicTimerLive =
+            musicVisualTimerRef.current != null &&
+            Date.now() < musicVisualUntilRef.current &&
+            activeMusicVisualRef.current != null;
+          if (musicTimerLive) {
             setConnectionStatus('speaking');
             const snap = activeMusicVisualRef.current;
             if (snap) {
@@ -338,11 +453,34 @@ export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           addBubble({ type: 'user', text, ts: Date.now(), persona: USER_BUBBLE_PERSONA });
           break;
         case 'thinking':
-        case 'speak':
+        case 'speak': {
           ttsActiveRef.current = true;
           setConnectionStatus('speaking');
-          setSpeakingPersonaKey(activePersonaKey);
+          const periphery = normalizePeripheralSpeakChannel(opts?.speakChannel);
+          const pKeyRaw = opts?.speakPersonaKey?.trim().toLowerCase();
+          if (periphery) {
+            setPeripheralSpeak({
+              channel: periphery,
+              text: String(text || '').slice(0, 200),
+            });
+            if (pKeyRaw && isCompanyPersonaKey(pKeyRaw)) {
+              setSpeakingPersonaKey(pKeyRaw);
+            } else if (periphery === 'mail') {
+              setSpeakingPersonaKey('nova');
+            } else {
+              setSpeakingPersonaKey('dexter');
+            }
+          } else {
+            setPeripheralSpeak(null);
+            if (pKeyRaw && isCompanyPersonaKey(pKeyRaw)) {
+              setSpeakingPersonaKey(pKeyRaw);
+            } else {
+              setSpeakingPersonaKey(activePersonaKey);
+            }
+          }
+          scheduleTtsWatchdog(text);
           break;
+        }
         case 'music_play': {
           const seconds = opts?.musicSeconds ?? 30;
           const personaKey = opts?.musicPersonaKey ?? 'maestro';
@@ -377,6 +515,9 @@ export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           });
           break;
         case 'error':
+          clearTtsWatchdog();
+          ttsActiveRef.current = false;
+          setPeripheralSpeak(null);
           setSpeakingPersonaKey(null);
           addBubble({
             type: 'error',
@@ -391,17 +532,45 @@ export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             setActivePersonaKey(inferPersonaKeyFromVoice(text.trim(), personaCatalogRef.current));
           }
           break;
+        case 'win_notify': {
+          // opts carries app/title/body injected from the SSE event in FridayListenApp
+          const winApp   = (opts as unknown as Record<string, string> | undefined)?.app   ?? '';
+          const winTitle = (opts as unknown as Record<string, string> | undefined)?.title ?? text;
+          const winBody  = (opts as unknown as Record<string, string> | undefined)?.body  ?? '';
+          const winId = `wn-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+          setWinNotifications((prev) => {
+            const next = [{ id: winId, app: winApp, title: winTitle, body: winBody, ts: Date.now() }, ...prev];
+            return next.slice(0, WIN_NOTIFY_MAX);
+          });
+          break;
+        }
+        case 'dnd_changed':
+          // opts carries { dnd: boolean } injected from the SSE event
+          if (typeof (opts as unknown as Record<string, unknown> | undefined)?.dnd === 'boolean') {
+            setDndState((opts as unknown as { dnd: boolean }).dnd);
+          }
+          break;
         default:
           break;
       }
     },
-    [addBubble, activePersonaKey, personaOverrides, currentVoice, applyMusicVisual, clearMusicVisualTimer],
+    [
+      addBubble,
+      activePersonaKey,
+      personaOverrides,
+      currentVoice,
+      applyMusicVisual,
+      clearMusicVisualTimer,
+      clearTtsWatchdog,
+      scheduleTtsWatchdog,
+    ],
   );
 
   const value: VoiceAppContextType = {
     connectionStatus,
     musicOrbCaption,
     speakingPersonaKey,
+    peripheralSpeak,
     listenMuted,
     exchanges,
     uptime,
@@ -436,6 +605,10 @@ export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     postEvent,
     miniOrb,
     dismissMiniOrb,
+    dnd,
+    setDnd,
+    winNotifications,
+    dismissWinNotification,
   };
 
   return <VoiceAppContext.Provider value={value}>{children}</VoiceAppContext.Provider>;

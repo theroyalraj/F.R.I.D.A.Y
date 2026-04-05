@@ -47,10 +47,13 @@ export function getBriefingCronSnapshot() {
 
   const scheduled = scheduledTask != null;
 
+  const skipMicPrompt = envBool('FRIDAY_BRIEFING_SKIP_MIC_PROMPT', false);
+
   return {
     gatewayCronEnvOn: gatewayOn,
     trackerEnabled: trackerOn,
     databaseConfigured: dbOk,
+    skipMicPrompt,
     cronExpr: expr,
     cronExpressionValid: exprValid,
     timezone: tz || null,
@@ -99,8 +102,16 @@ export function startBriefingCron(log) {
       fireState.fireCount += 1;
       const py = process.env.PYTHON || 'python';
       const script = path.join(REPO_ROOT, 'scripts', 'friday-action-tracker.py');
-      log.info({ expr }, 'briefingCron: firing action-tracker --once --skip-ingestion --gateway-cron');
-      const child = spawn(py, [script, '--once', '--skip-ingestion', '--gateway-cron'], {
+      const skipMicPrompt = envBool('FRIDAY_BRIEFING_SKIP_MIC_PROMPT', false);
+      const args = [script, '--once', '--skip-ingestion'];
+      if (skipMicPrompt) args.push('--gateway-cron');
+      log.info(
+        { expr, skipMicPrompt },
+        skipMicPrompt
+          ? 'briefingCron: action-tracker (auto-yes, no mic)'
+          : 'briefingCron: action-tracker (full check-in with mic)',
+      );
+      const child = spawn(py, args, {
         cwd: REPO_ROOT,
         env: { ...process.env },
         windowsHide: true,

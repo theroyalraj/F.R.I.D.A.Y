@@ -102,6 +102,11 @@ function readSilenceWatchFromDotEnv() {
   return envBool('FRIDAY_SILENCE_WATCH', true);
 }
 
+/** Windows toast notification watcher — reads WPN DB, speaks via TTS even when muted. */
+function readWinNotifyFromDotEnv() {
+  return envBool('FRIDAY_WIN_NOTIFY_WATCH', true);
+}
+
 /** Cursor JSONL → TTS: on if reply and/or thinking toggle is on, unless live narration suppresses it. */
 function readCursorReplyWatchFromDotEnv() {
   function enabled(key) {
@@ -180,6 +185,7 @@ const C = {
   gateway:  '\x1b[36m',   // cyan
   agent:    '\x1b[32m',   // green
   listener: '\x1b[35m',   // magenta
+  winnotify:'\x1b[96m',   // bright cyan — Windows toast notification watcher
   cursor:   '\x1b[95m',   // bright magenta — Composer reply TTS
   sage:     '\x1b[94m',   // bright blue — SAGE (thinking OCR)
   grpc:     '\x1b[35m',   // magenta — Cursor gRPC stream watch
@@ -460,6 +466,14 @@ ${C.reset}\n`);
     if (readSilenceWatchFromDotEnv() && existsSync(silenceScript)) {
       log('echo', 'ECHO silence watcher will start in five seconds...');
       await start('echo', 'python', ['scripts/friday-silence-watch.py'], { delayMs: 5000 });
+    }
+
+    if (process.platform === 'win32') {
+      const winNotifyScript = path.join(ROOT, 'scripts', 'win-notify-watch.py');
+      if (readWinNotifyFromDotEnv() && existsSync(winNotifyScript)) {
+        log('winnotify', 'Windows toast notification watcher will start in 3.5 s...');
+        await start('winnotify', 'python', ['scripts/win-notify-watch.py'], { delayMs: 3500 });
+      }
     }
 
     const ambientOn =

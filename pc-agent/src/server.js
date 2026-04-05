@@ -371,11 +371,44 @@ voiceRouter.post('/music/stop', async (_req, res) => {
   res.json({ ok: r.ok, detail: r.detail });
 });
 
+/** Default Edge voices per OpenClaw persona roster (see companyPersonas.ts). */
+const SPEAK_ASYNC_PERSONA_VOICE = {
+  jarvis: 'en-US-AvaMultilingualNeural',
+  argus: 'en-US-GuyNeural',
+  nova: 'en-GB-SoniaNeural',
+  sage: 'en-US-AndrewMultilingualNeural',
+  dexter: 'en-US-EricNeural',
+  maestro: 'en-US-BrianMultilingualNeural',
+  harper: 'en-US-JennyNeural',
+  sentinel: 'en-IE-ConnorNeural',
+  echo: 'en-US-MichelleNeural',
+};
+
+function resolveSpeakAsyncEdgeVoice(body) {
+  const raw = typeof body?.voice === 'string' ? body.voice.trim() : '';
+  if (raw && !isVoiceBlocked(raw)) {
+    const allowed = filteredEdgeTtsCatalogue();
+    if (allowed.some((x) => x.voice === raw)) return raw;
+  }
+  const pk = typeof body?.personaKey === 'string' ? body.personaKey.trim().toLowerCase() : '';
+  if (pk && SPEAK_ASYNC_PERSONA_VOICE[pk]) {
+    const pv = SPEAK_ASYNC_PERSONA_VOICE[pk];
+    if (!isVoiceBlocked(pv)) return pv;
+  }
+  return process.env.FRIDAY_TTS_VOICE || 'en-US-AvaMultilingualNeural';
+}
+
 /** Speak text asynchronously via friday-speak.py with Jarvis voice settings (fire-and-forget).
  * Used for incoming messages (WhatsApp, email, etc.) to auto-speak responses.
  */
 voiceRouter.post('/speak-async', async (req, res) => {
   const text = String(req.body?.text || '').trim();
+  const speakChannel =
+    typeof req.body?.channel === 'string' ? req.body.channel.trim().slice(0, 32) : undefined;
+  const speakPersonaKey =
+    typeof req.body?.personaKey === 'string'
+      ? req.body.personaKey.trim().slice(0, 24).toLowerCase()
+      : undefined;
   if (!text) {
     return res.status(400).json({ error: 'Missing text in body: { "text": "Hello" }' });
   }
@@ -384,7 +417,7 @@ voiceRouter.post('/speak-async', async (req, res) => {
   }
 
   const style = await getSpeakStyle();
-  const currentVoice = process.env.FRIDAY_TTS_VOICE || 'en-US-AvaMultilingualNeural';
+  const currentVoice = resolveSpeakAsyncEdgeVoice(req.body);
   const voiceOverrides = getVoiceDeliveryOverrides(currentVoice);
   const delivery = mergeDeliveryWithSpeakStyle({ ...greetingTtsRatePitch(), ...voiceOverrides }, style);
   const child = spawn(pythonChildExecutable(), [SPEAK_SCRIPT, text], {
@@ -413,7 +446,11 @@ voiceRouter.post('/speak-async', async (req, res) => {
 
   // Only broadcast speak event if autoPlay is NOT enabled (show UI when not in background mode)
   if (!autoPlayEnabled) {
-    broadcastEvent('speak', { text: preview });
+    broadcastEvent('speak', {
+      text: preview,
+      ...(speakChannel ? { channel: speakChannel } : {}),
+      ...(speakPersonaKey ? { personaKey: speakPersonaKey } : {}),
+    });
   }
 
   let listenSent = false;

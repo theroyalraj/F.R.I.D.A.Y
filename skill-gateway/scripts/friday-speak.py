@@ -26,6 +26,8 @@ Env vars (all optional):
                      stops competing friday-player + ambient TTS, clears the TTS
                      lock, then speaks immediately; if ambient was mid-line, replays
                      it afterward with a short apology (friday-listen sets this).
+  FRIDAY_TTS_LOCK_TTL_SEC  Redis + friday-tts-active lock TTL seconds (default 600;
+                     clamped 60–3600). Must match waiter stale thresholds in scripts/tts_lock_env.py.
   FRIDAY_TTS_INTERRUPT_MUSIC  set to ui (or true/yes/on) to allow fading/stopping
                      friday-play background music. Default: other TTS does not cut music
                      (Redis friday:music:active + local PID/session guard).
@@ -126,6 +128,11 @@ if _ENV_FILE.exists():
         v = rest.split("#", 1)[0].strip().strip('"').strip("'")
         if k and k not in os.environ:
             os.environ[k] = v
+
+_scripts_dir = _REPO_ROOT / "scripts"
+if str(_scripts_dir) not in sys.path:
+    sys.path.insert(0, str(_scripts_dir))
+from tts_lock_env import tts_lock_ttl_sec as _tts_lock_ttl_sec  # noqa: E402
 
 # ── Thinking openers (contextual pools in thinking_openers.py) ─────────────────
 try:
@@ -1157,8 +1164,8 @@ def _apply_speak_style_rate_pitch_from_redis() -> None:
 
 # ── Redis distributed TTS lock ───────────────────────────────────────────────
 _REDIS_TTS_LOCK_KEY = "friday:tts:lock"
-_REDIS_TTS_LOCK_TTL = 120  # 2 min auto-expire — covers long TTS + network retries
-_TTS_ACTIVE_LOCK_TTL = 120.0  # file lock matches Redis TTL
+_REDIS_TTS_LOCK_TTL = _tts_lock_ttl_sec()  # env FRIDAY_TTS_LOCK_TTL_SEC — matches waiter stale threshold
+_TTS_ACTIVE_LOCK_TTL = float(_REDIS_TTS_LOCK_TTL)
 _own_redis_token: str | None = None
 
 def _acquire_redis_tts_lock(priority: bool = False, timeout: float = 60.0) -> bool:
@@ -1364,10 +1371,20 @@ atexit.register(_release_thinking_singleton)
 
 
 def _read_preempted_ambient_line() -> str | None:
-    """If ambient was speaking, grab its line for an apology replay; clear the file."""
+    """If ambient was speaking, grab its line for an apology replay; clear the file.
+
+    Staleness guard: if the file is older than FRIDAY_AMBIENT_PREEMPT_STALE_SEC (default 30)
+    the process that wrote it is no longer speaking — discard silently rather than
+    replaying an 'old said thing' from a previous ambient cycle.
+    """
     if not AMBIENT_SPEAKING_FILE.exists():
         return None
     try:
+        _stale_sec = float(os.environ.get("FRIDAY_AMBIENT_PREEMPT_STALE_SEC", "30") or "30")
+        mtime = AMBIENT_SPEAKING_FILE.stat().st_mtime
+        if time.time() - mtime > max(5.0, _stale_sec):
+            AMBIENT_SPEAKING_FILE.unlink(missing_ok=True)
+            return None
         raw = AMBIENT_SPEAKING_FILE.read_text(encoding="utf-8").strip()
         if raw:
             AMBIENT_SPEAKING_FILE.unlink(missing_ok=True)
@@ -1385,6 +1402,11 @@ def _preempt_for_priority_tts() -> str | None:
     replay = _read_preempted_ambient_line()
     _fade_and_stop_music()
     _kill_friday_player_processes()
+    # Brief pause so the OS audio buffer fully drains before the new speak starts.
+    # Without this, the last ~100 ms of the killed audio can bleed into the new TTS.
+    _drain_ms = float(os.environ.get("FRIDAY_TTS_PREEMPT_DRAIN_MS", "120") or "120")
+    if _drain_ms > 0:
+        time.sleep(_drain_ms / 1000.0)
     try:
         TTS_ACTIVE_FILE.unlink(missing_ok=True)
     except OSError:
@@ -1710,7 +1732,13 @@ async def speak():
             if _is_thinking:
                 _release_thinking_singleton()
 
-    if is_playback and _priority and preempted_replay:
+    # Replay the interrupted ambient line only when explicitly opted in.
+    # Default is OFF because the "Sorry — I repeated myself" message is the primary
+    # cause of hearing two distinct voices back-to-back after a priority preemption.
+    _replay_enabled = os.environ.get("FRIDAY_AMBIENT_REPLAY_PREEMPTED", "false").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+    if is_playback and _priority and preempted_replay and _replay_enabled:
         _play_priority_followup(preempted_replay)
 
 

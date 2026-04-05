@@ -533,7 +533,24 @@ def _speak_main(text: str, *, jsonl_perf_t0: float | None = None) -> None:
         kw["use_session_sticky"] = False
     if r:
         kw["rate"] = r
-    speaker.speak(text, **kw)
+    # Pre-delay: let any simultaneous agent ack (PRIORITY=1 Shell call fired in the same
+    # Cursor turn) bump the TTS generation counter first.  The ack wins the generation race
+    # and this speak is naturally superseded — eliminating the back-to-back "two voices"
+    # overlap.  The delay runs in a background thread so the JSONL worker stays responsive.
+    # Configurable via FRIDAY_CURSOR_REPLY_PRE_SPEAK_DELAY_MS (default 200 ms, set to 0 to
+    # disable).
+    _pre_delay_raw = os.environ.get("FRIDAY_CURSOR_REPLY_PRE_SPEAK_DELAY_MS", "200").strip()
+    try:
+        _pre_delay = float(_pre_delay_raw) / 1000.0
+    except ValueError:
+        _pre_delay = 0.20
+
+    def _fire() -> None:
+        if _pre_delay > 0:
+            time.sleep(_pre_delay)
+        speaker.speak(text, **kw)
+
+    threading.Thread(target=_fire, daemon=True, name="cursor-reply-pre-delay").start()
 
 
 def _speak_subagent(text: str, *, jsonl_perf_t0: float | None = None) -> None:

@@ -26,6 +26,8 @@ CLI:
 Env (briefing / cron):
   FRIDAY_TRACKER_RUN_BRIEFING_IN_LOOP   default true — set false when skill-gateway runs FRIDAY_BRIEFING_GATEWAY_CRON
   FRIDAY_BRIEFING_GATEWAY_CRON          set in .env for gateway (see skill-gateway briefingCron.js)
+  FRIDAY_BRIEFING_SKIP_MIC_PROMPT       gateway cron only: true = --gateway-cron auto-yes; false = full mic check-in
+  FRIDAY_TTS_LOCK_TTL_SEC               Redis/file TTS lock TTL for long speech (default 600) — must match speak script
   FRIDAY_BRIEFING_CRON_EXPR             default */15 * * * * (every fifteen minutes)
   FRIDAY_BRIEFING_GIT_COMMITS           how many git log lines (default 10)
   FRIDAY_BRIEFING_DONE_TODOS            max completed todos to mention (default 12)
@@ -72,6 +74,8 @@ _SPEAK_SCRIPT = _REPO_ROOT / "skill-gateway" / "scripts" / "friday-speak.py"
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from tts_lock_env import tts_lock_ttl_sec  # noqa: E402
 
 try:
     import psycopg2
@@ -152,7 +156,7 @@ def _wait_for_tts_clear(timeout: float = 30.0) -> None:
     while TTS_ACTIVE_FILE.exists():
         try:
             age = time.time() - TTS_ACTIVE_FILE.stat().st_mtime
-            if age > 120:
+            if age > tts_lock_ttl_sec():
                 TTS_ACTIVE_FILE.unlink(missing_ok=True)
                 break
         except OSError:

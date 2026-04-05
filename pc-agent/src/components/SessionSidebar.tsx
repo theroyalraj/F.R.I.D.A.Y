@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import SessionCard from './SessionCard';
-import CurrentVoiceShowcase from './CurrentVoiceShowcase';
+// import CurrentVoiceShowcase from './CurrentVoiceShowcase';
 import TodoPanel from './TodoPanel';
 import styles from '../styles/listen.module.css';
 
@@ -108,8 +108,8 @@ const SessionSidebar: React.FC<SessionSidebarProps> = ({
           </div>
         )}
 
-        {/* Featured current voice showcase */}
-        <div className={styles['session-sidebar-divider']} />
+        {/* Featured current voice showcase - disabled for now */}
+        {/* <div className={styles['session-sidebar-divider']} />
         <CurrentVoiceShowcase
           icon={currentVoiceIcon}
           name={currentVoiceLabel}
@@ -119,7 +119,7 @@ const SessionSidebar: React.FC<SessionSidebarProps> = ({
           color={currentVoiceColor}
           rate={100}
           isActive={true}
-        />
+        /> */}
       </div>
     </div>
   );

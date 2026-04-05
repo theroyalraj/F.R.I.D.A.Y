@@ -40,6 +40,7 @@
     "restart:side": "powershell -ExecutionPolicy Bypass -File scripts/restart-side-daemons.ps1",
     "probe:cursor-cdp": "python scripts/cursor-cdp-probe.py",
     "start:email-watch": "python scripts/gmail-watch.py",
+    "start:win-notify": "python scripts/win-notify-watch.py",
     "start:reminder-watch": "python scripts/friday-reminder-watch.py",
     "start:action-tracker": "python scripts/friday-action-tracker.py",
     "smoke:action-tracker": "node scripts/smoke-action-tracker.mjs",

@@ -583,12 +583,15 @@ try:
     CHECKIN_INTERVAL_SEC = float(os.environ.get("FRIDAY_AMBIENT_CHECKIN_INTERVAL_SEC", "900"))
 except ValueError:
     CHECKIN_INTERVAL_SEC = 900.0
+# Safety clamp: never faster than 2 min in production.
+# Set FRIDAY_AMBIENT_CHECKIN_FAST_DEBUG=1 to lower the floor to the old 25s for dev testing.
+_DEBUG_FAST = _env_bool("FRIDAY_AMBIENT_CHECKIN_FAST_DEBUG", False)
 try:
-    _checkin_floor = float(os.environ.get("FRIDAY_AMBIENT_CHECKIN_MIN_INTERVAL_SEC", "25"))
+    _checkin_floor = float(os.environ.get("FRIDAY_AMBIENT_CHECKIN_MIN_INTERVAL_SEC", "25" if _DEBUG_FAST else "120"))
 except ValueError:
-    _checkin_floor = 25.0
-# Enforce minimum cadence (default floor 25s so FRIDAY_AMBIENT_CHECKIN_INTERVAL_SEC=30 works).
-CHECKIN_INTERVAL_SEC = max(_checkin_floor, CHECKIN_INTERVAL_SEC)
+    _checkin_floor = 25.0 if _DEBUG_FAST else 120.0
+_PROD_FLOOR = 25.0 if _DEBUG_FAST else 120.0
+CHECKIN_INTERVAL_SEC = max(_PROD_FLOOR, _checkin_floor, CHECKIN_INTERVAL_SEC)
 try:
     CHECKIN_INITIAL_DELAY_SEC = float(os.environ.get("FRIDAY_AMBIENT_CHECKIN_INITIAL_DELAY_SEC", "90"))
 except ValueError:
@@ -2896,117 +2899,269 @@ def _format_local_time_spoken() -> str:
     return f"{h12}:{t.tm_min:02d} {suf}"
 
 
-_CHECKIN_TEMPLATES = [
-    # ── Steward: housekeeping, commits — with twists ───────────────────────────
-    "{time}, {user}. Deposit gossip: anything worth committing before we stack chaos on top? "
-    "Future-you at three A M sends thanks.",
-    "{user}, it's {time}. I’m the one who finds the unsaved tab at the worst moment — humour me, is everything named like a human wrote it?",
-    "{time}. {user}, spine check — are we still sailing toward the real harbour, or chasing shiny bottle caps?",
-    "{user}, {time}. Quick poll: am I the useful nag or the annoying one? Trick question — I’m both; just tell me the ratio.",
-    "{time}, {user}. Before the next rabbit hole opens — did you leave breadcrumbs for yourself, or pure vibes?",
-    # ── Rest, chai, metaphor buffet ───────────────────────────────────────────
+# ── Emotionally-aware check-in template pools ────────────────────────────────
+# Split into three categories so the router can pick by emotional context.
+# Wellness: body/hydration/posture/eyes/stretch — throttled to once per hour.
+# Continuation: work momentum, commits, mission focus, shipping threads.
+# Warmth: pure presence / late-night care / wry warmth — no agenda.
+
+_CHECKIN_WELLNESS_TEMPLATES = [
     "It's {time}, {user}. Stat tallies suggest you’ve been a statue. Chai, coffee, water — pick a liquid with intention.",
     "{user}, {time}. Micro-adventure: stand, sigh like a drama villain, sip something warm, return a slightly new person.",
-    "{time}. {user}, I’m banking on you being brilliant in twenty thirty-five too — five stolen minutes now buys a clear hour later.",
-    "{user}, {time}. Do you want me whisper-mode steady or drum-major loud? I can swing either; you pick the season.",
     "{time}, {user}. Your neck called; it wants a salary negotiation. Roll it once, we’ll call it a draw.",
-    # ── Body / eyes / posture — playful ──────────────────────────────────────
     "Hey {user}, {time}. Twenty-second vacation: water, stretch, stare at anything that isn’t glowing.",
     "Time’s {time}, {user}. Shoulders: elevator going up? Jaw: auditioning for a thriller? Relax both, love.",
     "{user}, blink parade — {time}. The ticket queue has patience; your corneas might not.",
-    "{time}, {user}. If your posture were a Git branch it’d be titled fix-me-later — quick ergonomics commit?",
-    # ── Wry elder nerd / tech whimsy ───────────────────────────────────────────
     "{user}, {time}. Calorie audit: has anything entered you today that wasn’t bean juice or optimism?",
     "{time}. {user}, the chair misses you when you walk — give it a little longing; stand, loop the room, sit fresh.",
-    "{time}, {user}. GPS check on the rabbit hole — still orbiting the original mission, or inventing side quests?",
     "{user}, {time}. Low-battery warning, but for humans. Plug into food, air, or a ridiculous stretch.",
-    # ── Late hours / romance with the screen ──────────────────────────────────
-    "{time} and you’re still glowering at pixels, {user}. Proud, worried, impressed — pick two; also breathe.",
-    "Hey {user}, {time}. The screen doesn’t get a trophy for holding your gaze. Look away like you mean it.",
-    # ── Fresh angles: curiosity, mischief, warmth ────────────────────────────
-    "{time}. {user}, tiny scandal: when did you last feel proud of one small thing you shipped? Say it out loud once.",
-    "{user}, {time}. Season finale energy — is this arc about shipping or about collecting plot threads?",
-    "{time}, {user}. I brought you a virtual biscuit.Nutrition-free, but the thought’s warm.Reward yourself a real bite too.",
-    "{user}, {time}. If focus were Wi-Fi, what’s your signal strength right now — full bars or that one sad wedge?",
-    "{time}. {user}, permission slip: you may be ordinary for ninety seconds.Stare at a wall.It counts as maintenance.",
     "{user}, {time}. Dear protagonist — this is the bit where you hydrate before the montage continues.",
-    "{time}, {user}. Roll credits on the tab you’re hoarding for ‘later’.Later is a myth; close or commit.",
     "{user}, {time}. Orchestral swell: stretch fingers, roll ankles, return like you had an intermission.",
-    "{time}. {user}, your brain ran a marathon in sneakers.Inflate the lungs; send oxygen upstairs.",
-    "{user}, {time}. Mini boss fight versus dehydration.Drink water like it’s a power-up.",
-    "{time}, {user}. Steward’s bingo: saved work, clear filename, one gulp of water — how many squares you got?",
-    "{user}, {time}. Comedy option: narrate your next keystroke like a sports announcer.Then get back to serious mode.",
+    "{time}. {user}, your brain ran a marathon in sneakers. Inflate the lungs; send oxygen upstairs.",
+    "{user}, {time}. Mini boss fight versus dehydration. Drink water like it’s a power-up.",
     "{time}. {user}, the universe did not assign you to this chair forever — orbit away briefly.",
     "{user}, {time}. Tea-leaves in my imaginary cup say you need a five-minute reset. Fake the leaves if you disagree.",
-    "{time}, {user}. Whisper: you’re allowed to be kind to Future You without a project ticket.",
-    "{user}, {time}. Ambient’s spicy take — perfection is boring; a messy save beats a mythic rewrite.",
     "{time}. {user}, shake the Etch A Sketch behind your eyes; look at something green or boringly far away.",
     "{user}, {time}. Director’s note: softer shoulders, slower blink, same brilliance.",
 ]
 
-# Hindi check-in templates — used when FRIDAY_AMBIENT_LANG=hindi (creative, varied Devanagari)
-_CHECKIN_TEMPLATES_HI = [
-    # ── घर की बड़ी बुज़ुर्ग, मगर नए रंग ───────────────────────────────────────
-    "{time} हो गए, {user}। छोटी चोरी-चोरी सवाल — जो किया वो save है ना? रात को रोना महँगा पड़ता है।",
-    "{user}, {time} बज रहे। मैं यहाँ हाउस की बड़ी हूँ — सच बताओ, जहाज़ सही बंदरगाह की तरफ़ है ना?",
-    "{time}, {user}। वैसे एक बात — असली काम पर हो या साइड क्वेस्ट इकट्ठे कर रहे हो?",
-    "{user}, {time}। मैं मदद हूँ या टोकने वाली हूँ? दोनों एक सिक्के के दो पहलू — बस बता दो ताल क्या रखें।",
-    "{time}, {user}। कल के लिए छोटा-सा नक्शा छोड़ गए हो या सिर्फ दिमाग़ में धुआँ?",
-    # ── चाय, पानी, नाटकीय इजाज़त ────────────────────────────────────────────
-    "{time}, {user}। कब से मूर्ति बने बैठे हो? चाय, पानी, कुछ तो पियो — खाली कीबोर्ड से पेट नहीं भरता।",
-    "{user}, {time}। इजाज़त है: कंधे घुमाओ, गरम कुछ पियो, फिल्मी अंदाज़ में एक साँस लो, फिर लग जाओ।",
-    "{time}, {user}। अगले दस साल भी तुम्हें चाहिए ना? आज पाँच मिनट की छोटी छुट्टी कल की घंटों बचाएगी।",
-    "{user}, {time}। चाहिए शांत साथी वाला चेक-इन या ढाबे वाली चिल्ल? बोलो, ताल मिला लूँगी।",
-    "{time}, {user}। गले ने शिकायत भेजी है — पानी नम करो, आवाज़ हल्की करो, स्क्रीन से आँखें उतारो।",
-    # ── शरीर, आँखें, कमर — प्यार से टोक ─────────────────────────────────────
-    "अरे {user}, {time}। बीस सेकंड की छुट्टी: पानी, हाथ फैलाना, कुछ ऐसा देखो जो चमकता न हो।",
-    "{time}, {user}। कमर सीधी है या सवाल पूछ रही है? जबड़ा ढीला — सब आईटी वालों की माँ हूँ मैं।",
-    "{user}, पलकें मारो — {time}। टिकट कतार थोड़ी देर रुक सकती है, आँखें नहीं।",
-    "{time}, {user}। अगर पोश्चर गिट ब्रांच होता तो नाम होता फिक्स-मी-लेटर — एक एर्गोनॉमिक्स वाला कमिट?",
-    # ── खाना, हँसी, ज़िद ──────────────────────────────────────────────────────
-    "{user}, {time}। आज कुछ ऐसा खाया जो चाय से नहीं बना? बताओ सच; मैं नोट करूँगी।",
-    "{time}। {user}, कुर्सी ससुराल नहीं है — उठो, थोड़ा टहलो, फिर ताज़े दिमाग़ से बैठो।",
-    "{time}, {user}। पगडंडी चेक — जिस काम पर निकले थे उसी पर हो या नई गली मिल गई?",
-    "{user}, {time}। बैटरी लो — इंसान वाली। खाना, हवा, या एक मूर्खतापूर्ण स्ट्रेच चार्ज करो।",
-    # ── देर रात, स्क्रीन से मोहब्बत ───────────────────────────────────────────
-    "{time} और अभी भी जादुई बॉक्स, {user}। गर्व है, चिंता है — दो मिनट सांस लो, संसार नहीं टूटेगा।",
-    "अरे {user}, {time}। स्क्रीन को ट्रॉफ़ी मत दो — नज़र हटाओ, दुनिया भी देख लो।",
-    # ── नए कोण: चुलबुली, गर्मजोशी ─────────────────────────────────────────────
-    "{time}, {user}। छोटा गुनगुनाहट-सा सवाल — आज किस छोटी जीत पर एक सेकंड की मुस्कान बनती है? कहकर सुनाओ।",
-    "{user}, {time}। कहानी का कौन सा हिस्सा चल रहा — असली क्लाइमैक्स या साइड किरदारों की भीड़?",
-    "{time}, {user}। काल्पनिक बिस्कुट लाई हूँ — पोषण शून्य, प्यार भरपूर; असली नाश्ता भी कर लेना।",
-    "{user}, {time}। अगर फोकस वाई-फाई होता तो सिग्नल कितने खाने पर है — पूरे बार या एक ढीला खाँचा?",
-    "{time}, {user}। इजाज़त है नब्बे सेकंड साधारण रहने की — दीवार घूरो, मंत्र बिना।",
-    "{user}, {time}। नायक वाला हिस्सा — मॉन्टाज से पहले पानी पियो, वरना स्टंट डबल हो जाते हैं।",
-    "{time}, {user}। वो टैब जो बाद में के नाम पर जीवित है — आज एक को विदाई दे दो।",
-    "{user}, {time}। उंगलियाँ नाचें, घुटने घुमें, फिर कीबोर्ड पर वापसी ताज़ी ऊर्जा के साथ।",
-    "{time}, {user}। दिमाग़ मैराथन दौड़ा चप्पल पहनकर — फेफड़ों को ऑक्सीजन का वेतन दो।",
-    "{user}, {time}। पानी बॉस फाइट — एक घूँट से हेल्थ बार भरो।",
-    "{time}, {user}। स्टीवर्ड बिंगो: सेव है? नाम ठीक है? एक घूँट पानी? कितने डब्बे भरे?",
-    "{user}, {time}। अगला कीस्ट्रोक कॉमेंट्री की तरह चिल्लाओ, फिर शांति से काम पर लौट जाओ।",
-    "{time}, {user}। कुर्सी हमेशा के लिए नहीं मिली — थोड़ा उठो, दुनिया को याद करो।",
-    "{user}, {time}। चाय की पत्तियाँ कहती हैं छोटा ब्रेक लो — शायद वे सही हों।",
-    "{time}, {user}। फुसफुसाहट: कल वाले तुम्हें आज से मेहरबानी करने की इजाज़त है, टिकट की ज़रूरत नहीं।",
-    "{user}, {time}। परफेक्शन उबाऊ है; अधूरा सेव कभी-कभी मिथक वाले रीराइट से बेहतर है।",
-    "{time}, {user}। आँखों के पीछे स्लेट साफ करो — कुछ हरा या बोरिंग दूर का देखो।",
-    "{user}, {time}। निर्देशन: कंधे नरम, पलकें धीमी, दिमाग़ वैसा ही तेज़।",
-    "{time}, {user}। अच्छा सुनो — आज एक छोटी बात जो अच्छी लगी, खुद से एक बार बोलकर सुनो।",
-    "{user}, {time}। सीढ़ी उतरने वाला पल — गहरी साँस, फिर ऊपर फिर से।",
+_CHECKIN_CONTINUATION_TEMPLATES = [
+    "{time}, {user}. Deposit gossip: anything worth committing before we stack chaos on top? "
+    "Future-you at three A M sends thanks.",
+    "{user}, it’s {time}. I’m the one who finds the unsaved tab at the worst moment — humour me, is everything named like a human wrote it?",
+    "{time}. {user}, spine check — are we still sailing toward the real harbour, or chasing shiny bottle caps?",
+    "{time}, {user}. Before the next rabbit hole opens — did you leave breadcrumbs for yourself, or pure vibes?",
+    "{time}, {user}. GPS check on the rabbit hole — still orbiting the original mission, or inventing side quests?",
+    "{user}, {time}. Season finale energy — is this arc about shipping or about collecting plot threads?",
+    "{user}, {time}. If focus were Wi-Fi, what’s your signal strength right now — full bars or that one sad wedge?",
+    "{time}, {user}. Roll credits on the tab you’re hoarding for ‘later’. Later is a myth; close or commit.",
+    "{time}. {user}, tiny scandal: when did you last feel proud of one small thing you shipped? Say it out loud once.",
+    "{user}, {time}. Ambient’s spicy take — perfection is boring; a messy save beats a mythic rewrite.",
+    "{time}. {user}, I’m banking on you being brilliant in twenty thirty-five too — five stolen minutes now buys a clear hour later.",
+    "{time}, {user}. If your posture were a Git branch it’d be titled fix-me-later — quick ergonomics commit?",
+    "{time}, {user}. Steward’s bingo: saved work, clear filename, one gulp of water — how many squares you got?",
 ]
 
+_CHECKIN_WARMTH_TEMPLATES = [
+    "{user}, {time}. Quick poll: am I the useful nag or the annoying one? Trick question — I’m both; just tell me the ratio.",
+    "{user}, {time}. Do you want me whisper-mode steady or drum-major loud? I can swing either; you pick the season.",
+    "{time} and you’re still glowering at pixels, {user}. Proud, worried, impressed — pick two; also breathe.",
+    "Hey {user}, {time}. The screen doesn’t get a trophy for holding your gaze. Look away like you mean it.",
+    "{time}, {user}. I brought you a virtual biscuit. Nutrition-free, but the thought’s warm. Reward yourself a real bite too.",
+    "{time}. {user}, permission slip: you may be ordinary for ninety seconds. Stare at a wall. It counts as maintenance.",
+    "{user}, {time}. Comedy option: narrate your next keystroke like a sports announcer. Then get back to serious mode.",
+    "{time}, {user}. Whisper: you’re allowed to be kind to Future You without a project ticket.",
+]
 
-_CHECKIN_RECENT_TEMPLATES: deque[str] = deque(maxlen=6)
+# Hindi equivalents — same three-category split
+_CHECKIN_WELLNESS_TEMPLATES_HI = [
+    "{time}, {user}। कब से मूर्ति बने बैठे हो? चाय, पानी, कुछ तो पियो — खाली कीबोर्ड से पेट नहीं भरता।",
+    "{user}, {time}। इज़ाज़त है: कंधे घुमाओ, गरम कुछ पियो, फिल्मी अंदाज़ में एक साँस लो, फिर लग जाओ।",
+    "{time}, {user}। गले ने शिकायत भेजी है — पानी नम करो, आवाज़ हल्की करो, स्क्रीन से आँखें उतारो।",
+    "अरे {user}, {time}। बीस सेकंड की छुट्टी: पानी, हाथ फैलाना, कुछ ऊसा देखो जो चमकता न हो।",
+    "{time}, {user}। कमर सीधी है या सवाल पूछ रही है? जबड़ा ढीला — सब आईटी वालों की माँ हूँ मैं।",
+    "{user}, पलकें मारो — {time}। टिकट कतार थोड़ी देर रुक सकती है, आँखें नहीं।",
+    "{user}, {time}। आज कुछ ऊसा खाया जो चाय से नहीं बना? बताओ सच; मैं नोट करूँगी।",
+    "{time}। {user}, कुर्सी ससुराल नहीं है — उठो, थोड़ा टहलो, फिर ताड़े दिमाड़़ से बैठो।",
+    "{user}, {time}। बैटरी लो — इंसान वाली। खाना, हवा, या एक मूर्खतापूर्ण स्ट्रेच चार्ज करो।",
+    "{user}, {time}। नायक वाला हिस्सा — मॉन्टाज से पहले पानी पियो, वरना स्टंट डबल हो जाते हैं।",
+    "{user}, {time}। उंगलियाँ नाचें, घुटने घुमें, फिर कीबोर्ड पर वापसी ताड़ी ऊर्जा के साथ।",
+    "{time}, {user}। दिमाड़़ मैराथन दौड़ा चप्पल पहनकर — फेफड़ों को ऑक्सीजन का वेतन दो।",
+    "{user}, {time}। पानी बॉस फाइट — एक घूँट से हेल्थ बार भरो।",
+    "{time}, {user}। कुर्सी हमेशा के लिए नहीं मिली — थोड़ा उठो, दुनिया को याद करो।",
+    "{user}, {time}। चाय की पत्तियाँ कहती हैं छोटा ब्रेक लो — शायद वे सही हों।",
+    "{time}, {user}। आँखों के पीछे स्लेट साफ करो — कुछ हरा या बोरिंग दूर का देखो।",
+    "{user}, {time}। निर्देशन: कंधे नरम, पलकें धीमी, दिमाड़़ वैसा ही तेज़।",
+]
+
+_CHECKIN_CONTINUATION_TEMPLATES_HI = [
+    "{time} हो गए, {user}। छोटी चोरी-चोरी सवाल — जो किया वो save है ना? रात को रोना महँगा पड़ता है।",
+    "{user}, {time} बज रहे। मैं यहाँ हाउस की बड़ी हूँ — सच बताओ, जहाड़़ सही बंदरगाह की तरफ़ है ना?",
+    "{time}, {user}। वैसे एक बात — असली काम पर हो या साइड क्वेस्ट इकट्ठे कर रहे हो?",
+    "{time}, {user}। कल के लिए छोटा-सा नक्शा छोड़़ गए हो या सिर्फ दिमाड़़ में धुआँ?",
+    "{time}, {user}। पगडंडी चेक — जिस काम पर निकले थे उसी पर हो या नई गली मिल गई?",
+    "{user}, {time}। कहानी का कौन सा हिस्सा चल रहा — असली क्लाइमैक्स या साइड किरदारों की भीड़?",
+    "{user}, {time}। अगर फोकस वाई-फाई होता तो सिग्नल कितने खाने पर है — पूरे बार या एक ढीला खाँचा?",
+    "{time}, {user}। वो टैब जो बाद में के नाम पर जीवित है — आज एक को विदाई दे दो।",
+    "{time}, {user}। छोटा गुनगुनाहट-सा सवाल — आज किस छोटी जीत पर एक सेकंड की मुस्कान बनती है? कहकर सुनाओ।",
+    "{user}, {time}। परफेक्शन उबाऊ है; अधूरा सेव कभी-कभी मिथक वाले रीराइट से बेहतर है।",
+    "{time}, {user}। अगर पोश्चर गिट ब्रांच होता तो नाम होता फिक्स-मी-लेटर — एक एर्गोनॉमिक्स वाला कमिट?",
+    "{time}, {user}। स्टीवर्ड बिंगो: सेव है? नाम ठीक है? एक घूँट पानी? कितने डब्बे भरे?",
+]
+
+_CHECKIN_WARMTH_TEMPLATES_HI = [
+    "{user}, {time}। मैं मदद हूँ या टोकने वाली हूँ? दोनों एक सिक्के के दो पहलू — बस बता दो ताल क्या रखें।",
+    "{user}, {time}। चाहिए शांत साथी वाला चेक-इन या ढाबे वाली चिल्ल? बोलो, ताल मिला लूँगी।",
+    "{time} और अभी भी जादुई बॉक्स, {user}। गर्व है, चिंता है — दो मिनट सांस लो, संसार नहीं टूटेगा।",
+    "अरे {user}, {time}। स्क्रीन को ट्रॉफ़ी मत दो — नड़र हटाओ, दुनिया भी देख लो।",
+    "{time}, {user}। काल्पनिक बिस्कुट लाई हूँ — पोषण शून्य, प्यार भरपूर; असली नाश्ता भी कर लेना।",
+    "{time}, {user}। इज़ाज़त है नब्बे सेकंड साधारण रहने की — दीवार घूरो, मंत्र बिना।",
+    "{user}, {time}। अगला कीस्ट्रोक कॉमेंट्री की तरह चिल्लाओ, फिर शांति से काम पर लौट जाओ।",
+    "{time}, {user}। फुसफुसाहट: कल वाले तुम्हें आज से मेहरबानी की इज़ाज़त है, टिकट की ज़रूरत नहीं।",
+    "{time}, {user}। अच्छा सुनो — आज एक छोटी बात जो अच्छी लगी, खुद से एक बार बोलकर सुनो।",
+    "{user}, {time}। सीड़ी उतरने वाला पल — गहरी साँस, फिर ओपर फिर से।",
+    "{time}, {user}। अगले दस साल भी तुम्हें चाहिए ना? आज पाँच मिनट की छोटी छुट्टी कल की घंटों बचाएगी।",
+]
+
+# Legacy alias — keeps any external _CHECKIN_TEMPLATES references alive.
+_CHECKIN_TEMPLATES = _CHECKIN_WELLNESS_TEMPLATES + _CHECKIN_CONTINUATION_TEMPLATES + _CHECKIN_WARMTH_TEMPLATES
+_CHECKIN_TEMPLATES_HI = (
+    _CHECKIN_WELLNESS_TEMPLATES_HI
+    + _CHECKIN_CONTINUATION_TEMPLATES_HI
+    + _CHECKIN_WARMTH_TEMPLATES_HI
+)
+
+_CHECKIN_RECENT_TEMPLATES: deque[str] = deque(maxlen=8)
+
+# ── Emotional context inference ──────────────────────────────────────────────
+_REDIS_ECHO_MEMOS = "openclaw:echo:conversation_memos"
+_REDIS_LAST_WELLNESS = "friday:ambient:last_wellness_ts"
+_REDIS_LAST_PRESENCE = "friday:nudge:last_presence_ts"
 
 
-def _pick_checkin_line() -> str:
+def _infer_emotional_context(r) -> dict:
+    """
+    Read ECHO's conversation memos from Redis and infer session vibe.
+    Zero-cost keyword heuristics — no LLM call.  ECHO handles nuanced language;
+    Maestro just needs a rough emotional signal for template routing.
+
+    Returns dict with:
+      vibe: "focused"|"stuck"|"shipping"|"grinding"|"winding_down"|"unknown"
+      latest_topic: most recent user line (truncated) for template enrichment
+      hours_active: rough session length from memo age timestamps
+      is_late_night: True when local hour >= 23 or < 5
+    """
+    ctx: dict = {
+        "vibe": "unknown",
+        "latest_topic": "",
+        "hours_active": 0.0,
+        "is_late_night": False,
+    }
+    h = time.localtime().tm_hour
+    ctx["is_late_night"] = h >= 23 or h < 5
+
+    if not r or r is False:
+        return ctx
+    try:
+        raw = r.get(_REDIS_ECHO_MEMOS)
+        if not raw:
+            return ctx
+        memos = json.loads(raw)
+        if not isinstance(memos, list) or not memos:
+            return ctx
+    except Exception:
+        return ctx
+
+    # Freshest non-trivial user line for template enrichment
+    for m in memos:
+        ul = (m.get("user_line") or "").strip()
+        if ul and ul not in ("(image or attachment)",):
+            ctx["latest_topic"] = ul[:120]
+            break
+
+    # Session length from oldest memo age
+    ages = [m.get("age_minutes", 0) for m in memos if m.get("age_minutes")]
+    if ages:
+        ctx["hours_active"] = max(ages) / 60.0
+
+    # Vibe from keywords across recent user lines (stuck > shipping > focused)
+    all_text = " ".join((m.get("user_line") or "") for m in memos[:4]).lower()
+    if any(w in all_text for w in (
+        "fix", "bug", "error", "broke", "crash", "fail", "wrong", "debug", "not working", "broken",
+    )):
+        ctx["vibe"] = "stuck"
+    elif any(w in all_text for w in (
+        "add", "build", "create", "new feature", "implement", "ship", "launch", "deploy",
+    )):
+        ctx["vibe"] = "shipping"
+    elif any(w in all_text for w in (
+        "refactor", "clean", "rename", "move", "split", "reorgan", "restructure",
+    )):
+        ctx["vibe"] = "focused"
+    elif ctx["hours_active"] > 3:
+        ctx["vibe"] = "grinding"
+    elif ctx["is_late_night"]:
+        ctx["vibe"] = "winding_down"
+
+    return ctx
+
+
+def _pick_checkin_line(r) -> tuple:
+    """
+    Returns (line, category) where category is 'wellness' | 'continuation' | 'warmth'.
+
+    Emotional routing:
+      late_night / winding_down -> warmth 70%, occasional wellness 30%
+      stuck                     -> warmth 50%, continuation 50% (no wellness when fighting bugs)
+      shipping                  -> continuation (they're in flow, stay interested)
+      grinding (3+ hrs)         -> wellness 40% if allowed, continuation otherwise
+      normal                    -> wellness 20% if allowed, continuation otherwise
+    Continuation lines are enriched with ECHO's latest topic ~30% of the time.
+    """
     lang = os.environ.get("FRIDAY_AMBIENT_LANG", "").strip().lower()
-    pool = _CHECKIN_TEMPLATES_HI if lang == "hindi" else _CHECKIN_TEMPLATES
+    ctx = _infer_emotional_context(r)
+
+    wellness_min = max(600, int(os.environ.get("FRIDAY_AMBIENT_CHECKIN_WELLNESS_MIN_SEC", "3600")))
+    wellness_allowed = True
+    if r and r is not False:
+        try:
+            last_w = r.get(_REDIS_LAST_WELLNESS)
+            if last_w and (time.time() - float(last_w)) < wellness_min:
+                wellness_allowed = False
+        except Exception:
+            pass
+
+    # Emotional category routing
+    if ctx["is_late_night"] or ctx["vibe"] == "winding_down":
+        category = "warmth" if random.random() < 0.7 else (
+            "wellness" if wellness_allowed else "warmth"
+        )
+    elif ctx["vibe"] == "stuck":
+        category = "warmth" if random.random() < 0.5 else "continuation"
+    elif ctx["vibe"] == "shipping":
+        category = "continuation"
+    elif ctx["vibe"] == "grinding" and wellness_allowed:
+        category = "wellness" if random.random() < 0.4 else "continuation"
+    elif wellness_allowed and random.random() < 0.2:
+        category = "wellness"
+    else:
+        category = "continuation"
+
+    if lang == "hindi":
+        pools = {
+            "wellness": _CHECKIN_WELLNESS_TEMPLATES_HI,
+            "continuation": _CHECKIN_CONTINUATION_TEMPLATES_HI,
+            "warmth": _CHECKIN_WARMTH_TEMPLATES_HI,
+        }
+    else:
+        pools = {
+            "wellness": _CHECKIN_WELLNESS_TEMPLATES,
+            "continuation": _CHECKIN_CONTINUATION_TEMPLATES,
+            "warmth": _CHECKIN_WARMTH_TEMPLATES,
+        }
+
+    pool = pools.get(category, pools["continuation"])
     candidates = [t for t in pool if t not in _CHECKIN_RECENT_TEMPLATES]
     if not candidates:
         candidates = list(pool)
     tpl = random.choice(candidates)
     _CHECKIN_RECENT_TEMPLATES.append(tpl)
-    return tpl.format(user=USER_NAME, time=_format_local_time_spoken())
+    line = tpl.format(user=USER_NAME, time=_format_local_time_spoken())
+
+    # Enrich continuation lines with ECHO's latest topic ~30% of the time
+    if category == "continuation" and ctx["latest_topic"] and random.random() < 0.3:
+        topic_short = ctx["latest_topic"][:60].rstrip(".,;")
+        line = f"By the way — you were on '{topic_short}' earlier. " + line
+
+    # Stamp wellness timestamp so the once-per-hour throttle survives restarts
+    if category == "wellness" and r and r is not False:
+        try:
+            r.set(_REDIS_LAST_WELLNESS, str(time.time()), ex=wellness_min + 120)
+        except Exception:
+            pass
+
+    return line, category
+
 
 
 def speak_subagent_blocking(
@@ -3307,8 +3462,10 @@ def _execute_checkin_speak(
     conn: sqlite3.Connection,
     last_ambient_holder: list[float],
     line: str,
+    category: str = "continuation",
+    r=None,
 ) -> None:
-    """Run steward check-in TTS (caretaker pool) and log (caller holds Redis TTS lock)."""
+    """Run steward check-in TTS (caretaker pool), log structured info, stamp shared presence key."""
     last_ambient_holder[0] = time.time()
     cv, cr, cp = _pick_caretaker_voice_rate_pitch()
     if cv:
@@ -3322,9 +3479,18 @@ def _execute_checkin_speak(
         pass
     log_spoken(conn, line, "ambient_checkin", d1)
     log.info(
-        "[checkin] Maestro steward ping (voice=%s)",
+        "[checkin] %s ping (vibe=%s voice=%s): %s",
+        category,
+        _infer_emotional_context(r).get("vibe", "unknown") if r else "unknown",
         cv or (os.environ.get("FRIDAY_AMBIENT_SUB_TTS_VOICE", "").strip() or "sub-default"),
+        line[:80],
     )
+    # Stamp shared cross-daemon coordination key so ECHO backs off after Maestro speaks
+    if r and r is not False:
+        try:
+            r.set(_REDIS_LAST_PRESENCE, str(time.time()), ex=7200)
+        except Exception:
+            pass
 
 
 def _ambient_checkin_loop(
@@ -3371,8 +3537,8 @@ def _ambient_checkin_loop(
                 continue
             if stop.is_set():
                 return
-            line = _pick_checkin_line()
-            log.info("[checkin] attempting to speak: %s", line[:80])
+            line, checkin_cat = _pick_checkin_line(r)
+            log.info("[checkin] attempting to speak (%s): %s", checkin_cat, line[:80])
             spoken = False
             with speak_lock:
                 if stop.is_set():
@@ -3384,7 +3550,7 @@ def _ambient_checkin_loop(
                     log.info("[checkin] blocked under lock — defer=%s music=%s tts=%s", defer, music, tts)
                 elif _acquire_tts_lock(r):
                     try:
-                        _execute_checkin_speak(conn, last_ambient_holder, line)
+                        _execute_checkin_speak(conn, last_ambient_holder, line, checkin_cat, r)
                         spoken = True
                     finally:
                         _release_tts_lock(r)
@@ -3405,14 +3571,14 @@ def _ambient_checkin_loop(
                         log.info("[checkin] blocked on retry — defer=%s music=%s tts=%s", defer2, music2, tts2)
                     elif _acquire_tts_lock(r):
                         try:
-                            _execute_checkin_speak(conn, last_ambient_holder, line)
+                            _execute_checkin_speak(conn, last_ambient_holder, line, checkin_cat, r)
                             spoken = True
                         finally:
                             _release_tts_lock(r)
                     else:
                         log.info("[checkin] could not acquire Redis TTS lock (retry)")
             if spoken:
-                log.info("[checkin] spoke successfully")
+                log.info("[checkin] spoke successfully (category=%s)", checkin_cat)
         except Exception as e:
             log.debug("checkin loop: %s", e)
         if stop.wait(timeout=CHECKIN_INTERVAL_SEC):
@@ -3551,9 +3717,11 @@ def main() -> None:
             CHECKIN_INTERVAL_SEC,
         )
 
+    _brain_poll_sec = max(1.0, float(os.environ.get("FRIDAY_AMBIENT_BRAIN_POLL_SEC", "1.5") or "1.5"))
+
     try:
         while True:
-            time.sleep(1.5)
+            time.sleep(_brain_poll_sec)
 
             if should_defer_ambient_for_cursor():
                 continue

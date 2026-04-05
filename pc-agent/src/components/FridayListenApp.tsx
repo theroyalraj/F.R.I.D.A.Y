@@ -6,14 +6,14 @@ import { useUptime } from '../hooks/useUptime';
 import ToastContainer from './Toast';
 import SpeakStylePanel from './SpeakStylePanel';
 import EchoPersonalityPanel from './EchoPersonalityPanel';
-import SpeakConfirmModal from './SpeakConfirmModal';
 import VoiceSiriOverlay from './VoiceSiriOverlay';
 import MiniNotifyOrb from './MiniNotifyOrb';
 import { IntegrationsRail } from './IntegrationsRail';
 import { PersonaRosterModal } from './PersonaRosterModal';
 import LaunchOverlay from './LaunchOverlay';
 import SessionSidebar from './SessionSidebar';
-import TopMusicDock from './TopMusicDock';
+import AnimatedAvatar from './AnimatedAvatar';
+// import TopMusicDock from './TopMusicDock';
 import {
   COMPANY_PERSONAS,
   SPEAKING_PERSONA_ORDER,
@@ -107,9 +107,12 @@ const FridayListenApp: React.FC = () => {
     activePersonaKey, setActivePersonaKey, personaOverrides, refreshPersonaOverrides, getReplyPersona,
     personaCatalog, setPersonaCatalog,
     speakingPersonaKey,
+    peripheralSpeak,
     musicOrbCaption,
     miniOrb,
     dismissMiniOrb,
+    dnd, setDnd,
+    winNotifications, dismissWinNotification,
   } = useVoiceApp();
   const { authHeaders } = useAuth();
 
@@ -125,6 +128,8 @@ const FridayListenApp: React.FC = () => {
   const fileRef = useRef<HTMLInputElement>(null);
   const glowRef = useRef<HTMLDivElement>(null);
   const celebrationAskTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** SSE drops briefly on agent restart — avoid flashing Offline when HTTP is fine */
+  const sseOfflineTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [uptime] = useUptime(setUptime);
   const [integrationsDrawerOpen, setIntegrationsDrawerOpen] = useState(
     () => typeof window !== 'undefined' && !window.matchMedia(INTEGRATIONS_NARROW_MQ).matches,
@@ -133,6 +138,7 @@ const FridayListenApp: React.FC = () => {
     () => typeof window !== 'undefined' && window.matchMedia(INTEGRATIONS_NARROW_MQ).matches,
   );
   const [personaModalOpen, setPersonaModalOpen] = useState(false);
+  const [winNotifyPanelOpen, setWinNotifyPanelOpen] = useState(false);
   const [celebrationOffer, setCelebrationOffer] = useState<CelebrationPayload | null>(null);
   const [claudeModel, setClaudeModel] = useState(() => {
     try {
@@ -150,23 +156,6 @@ const FridayListenApp: React.FC = () => {
   } | null>(null);
   const [launchOverlayVisible, setLaunchOverlayVisible] = useState(false);
   const [sessionsLoading, setSessionsLoading] = useState(false);
-  const [speakStyle, setSpeakStyle] = useState<{
-    funny: boolean;
-    snarky: boolean;
-    bored: boolean;
-    dry: boolean;
-    warm: boolean;
-    customPrompt: string;
-  }>({
-    funny: false,
-    snarky: false,
-    bored: false,
-    dry: false,
-    warm: false,
-    customPrompt: '',
-  });
-  const [speakConfirmOpen, setSpeakConfirmOpen] = useState(false);
-  const [pendingSpeakText, setPendingSpeakText] = useState('');
   const [alwaysSpeakViaUi, setAlwaysSpeakViaUi] = useState(() => {
     try { return localStorage.getItem(LS_ALWAYS_SPEAK) === 'true'; } catch { return false; }
   });
@@ -231,13 +220,6 @@ const FridayListenApp: React.FC = () => {
     setActivePersonaKey(inferPersonaKeyFromVoice(currentVoice, personaCatalog));
   }, [personaCatalog, currentVoice, setActivePersonaKey]);
 
-  // Fetch speak style config
-  useEffect(() => {
-    fetch('/voice/speak-style', { headers: authHeaders() }).then(r => r.json())
-      .then(d => { if (d.ok && d.style) setSpeakStyle(d.style); })
-      .catch(() => {});
-  }, [authHeaders]);
-
   // OpenClaw stack status (proxies skill-gateway) — visible by default on Listen
   useEffect(() => {
     const tick = () => {
@@ -276,17 +258,67 @@ const FridayListenApp: React.FC = () => {
     return () => clearInterval(iv);
   }, [authHeaders]);
 
+  // Agent reachability — header status must not depend on SSE alone (SSE errors on restarts / proxies).
+  useEffect(() => {
+    let cancelled = false;
+    const ping = async () => {
+      try {
+        const r = await fetch('/voice/ping');
+        const j = await r.json();
+        if (cancelled || !r.ok || !j?.ok) return;
+        setConnectionStatus((s) => (s === 'offline' ? 'listening' : s));
+      } catch {
+        /* ignore */
+      }
+    };
+    void ping();
+    const iv = setInterval(ping, 6000);
+    return () => {
+      cancelled = true;
+      clearInterval(iv);
+    };
+  }, [setConnectionStatus]);
+
+  useEffect(
+    () => () => {
+      if (sseOfflineTimerRef.current) {
+        clearTimeout(sseOfflineTimerRef.current);
+        sseOfflineTimerRef.current = null;
+      }
+    },
+    [],
+  );
+
   // SSE
   useSSEStream((event) => {
-    if (event.type === 'sse_disconnected') postEvent('daemon_disconnect');
-    else if (event.type === 'sse_connected') postEvent('daemon_start', 'Voice daemon online.');
-    else if (event.type === 'speak_style_changed') window.dispatchEvent(new CustomEvent('openclaw:speak-style-changed'));
+    if (event.type === 'sse_disconnected') {
+      if (sseOfflineTimerRef.current) clearTimeout(sseOfflineTimerRef.current);
+      sseOfflineTimerRef.current = setTimeout(() => {
+        sseOfflineTimerRef.current = null;
+        postEvent('daemon_disconnect');
+      }, 2200);
+    } else if (event.type === 'sse_connected') {
+      if (sseOfflineTimerRef.current) {
+        clearTimeout(sseOfflineTimerRef.current);
+        sseOfflineTimerRef.current = null;
+      }
+      // Do not use daemon_start here — every SSE reconnect would add another "FRIDAY ONLINE" divider.
+      postEvent('sse_stream_open');
+    } else if (event.type === 'speak_style_changed') window.dispatchEvent(new CustomEvent('openclaw:speak-style-changed'));
     else if (event.type === 'echo_personality_changed') window.dispatchEvent(new CustomEvent('openclaw:echo-personality-changed'));
     else if (event.type === 'voice_changed') {
       const ev = event as { voice?: string; text?: string };
       const v = typeof ev.voice === 'string' && ev.voice ? ev.voice : (ev.text || '');
       // Voice changed: update active persona BEFORE any speak event arrives
       postEvent('voice_changed', v);
+    } else if (event.type === 'win_notify') {
+      const wne = event as { app?: string; title?: string; body?: string };
+      postEvent('win_notify', wne.title || '', {
+        ...(wne as unknown as Record<string, unknown>),
+      } as import('../contexts/VoiceAppContext').VoicePostEventOptions);
+    } else if (event.type === 'dnd_changed') {
+      const de = event as { dnd?: boolean };
+      postEvent('dnd_changed', '', { ...(de as unknown as Record<string, unknown>) } as import('../contexts/VoiceAppContext').VoicePostEventOptions);
     } else if (event.type === 'music_play') {
       const me = event as { type: string; text?: string; seconds?: number };
       const seconds = typeof me.seconds === 'number' && Number.isFinite(me.seconds) ? me.seconds : 30;
@@ -300,12 +332,34 @@ const FridayListenApp: React.FC = () => {
         persona: mergePersona('maestro', personaOverrides, currentVoice, personaCatalog),
       });
     } else {
+      const evTs = typeof event.ts === 'number' ? event.ts : 0;
+      const sseStaleSpeak =
+        (event.type === 'speak' || event.type === 'thinking') &&
+        evTs > 0 &&
+        Date.now() - evTs > 240_000;
+
       // If a speak event carries an explicit voice field, snap persona first
       if ((event.type === 'speak' || event.type === 'thinking') && event.voice) {
         postEvent('voice_changed', String(event.voice));
       }
-      postEvent(event.type, event.text || '');
-      if (event.type === 'speak' && (event.text || '').trim()) {
+
+      const chan = typeof (event as { channel?: string }).channel === 'string'
+        ? (event as { channel?: string }).channel
+        : undefined;
+      const pKey = typeof (event as { personaKey?: string }).personaKey === 'string'
+        ? (event as { personaKey?: string }).personaKey
+        : undefined;
+
+      if (!sseStaleSpeak) {
+        postEvent(event.type, event.text || '', {
+          speakChannel: chan,
+          speakPersonaKey: pKey,
+        });
+      } else if (event.type === 'listening' || event.type === 'reply' || event.type === 'error') {
+        postEvent(event.type, event.text || '');
+      }
+
+      if (!sseStaleSpeak && event.type === 'speak' && (event.text || '').trim()) {
         addBubble({
           type: 'friday',
           text: (event.text || '').trim(),
@@ -313,17 +367,28 @@ const FridayListenApp: React.FC = () => {
           persona: mergePersona(activePersonaKey, personaOverrides, currentVoice, personaCatalog),
         });
       }
-      if (event.type === 'speak' || event.type === 'thinking') setSpeakingText(event.text || 'Speaking...');
+      if (!sseStaleSpeak && (event.type === 'speak' || event.type === 'thinking')) {
+        setSpeakingText(event.text || 'Speaking...');
+      }
       if (event.type === 'listening' || event.type === 'reply') setSpeakingText('');
       // "Always Speak via UI" — play SSE reply through the browser even when Python daemons are silent
       if (event.type === 'reply' && alwaysSpeakViaUi && event.text?.trim()) {
         fetch('/voice/speak-async', {
           method: 'POST',
+          headers: { ...authHeaders() as Record<string, string>, 'Content-Type': 'application/json' },
           body: JSON.stringify({ text: event.text }),
         }).catch(() => {});
       }
     }
   });
+
+  const prevConnRef = useRef(connectionStatus);
+  useEffect(() => {
+    if (prevConnRef.current === 'speaking' && connectionStatus === 'listening') {
+      setSpeakingText('');
+    }
+    prevConnRef.current = connectionStatus;
+  }, [connectionStatus]);
 
   // Auto-scroll chat
   useEffect(() => {
@@ -363,19 +428,13 @@ const FridayListenApp: React.FC = () => {
 
     addBubble({ type: 'user', text: raw, ts: Date.now(), persona: USER_BUBBLE_PERSONA });
 
-    // If @speak — ask for confirmation (respect focus mode)
     if (mentions.includes('speak')) {
       setSending(false);
-      setPendingSpeakText(text);
-      setSpeakConfirmOpen(true);
-      return;
-    }
-
-    // OLD: If @speak — just speak directly
-    /* if (mentions.includes('speak')) {
       setConnectionStatus('speaking');
+      setSpeakingText(text);
       fetch('/voice/speak-async', {
-        method: 'POST', headers: { ...authHeaders() as Record<string, string> },
+        method: 'POST',
+        headers: { ...authHeaders() as Record<string, string>, 'Content-Type': 'application/json' },
         body: JSON.stringify({ text }),
       })
         .then(() => {
@@ -387,10 +446,9 @@ const FridayListenApp: React.FC = () => {
           });
         })
         .catch(() => setConnectionStatus('listening'));
-      setSending(false);
       inputRef.current?.focus();
       return;
-    } */
+    }
 
     setConnectionStatus('processing');
     let pendingJarvisSpeak = false;
@@ -530,29 +588,6 @@ const FridayListenApp: React.FC = () => {
     if (!m) setConnectionStatus('listening');
   };
 
-  const handleSpeakConfirm = useCallback(() => {
-    setSpeakConfirmOpen(false);
-    setConnectionStatus('speaking');
-    fetch('/voice/speak-async', {
-      method: 'POST',
-      headers: { ...authHeaders() as Record<string, string> },
-      body: JSON.stringify({ text: pendingSpeakText }),
-    })
-      .then(() => {
-        addBubble({
-          type: 'friday',
-          text: `🔊 Speaking: "${pendingSpeakText}"`,
-          ts: Date.now(),
-          persona: getReplyPersona(),
-        });
-      })
-      .catch(() => setConnectionStatus('listening'))
-      .finally(() => {
-        setSending(false);
-        inputRef.current?.focus();
-      });
-  }, [pendingSpeakText, authHeaders, setConnectionStatus, addBubble, getReplyPersona]);
-
   const applyVoice = useCallback((v: string, toast: string) => {
     setCurrentVoice(v);
     fetch('/voice/set-voice', {
@@ -607,6 +642,12 @@ const FridayListenApp: React.FC = () => {
   const isConnected = connectionStatus !== 'offline';
   const stateIcons: Record<string, string> = { offline: '\u2606', listening: '\uD83C\uDF99\uFE0F', processing: '\u26A1', speaking: '\uD83D\uDD0A' };
   const statusLabels: Record<string, string> = { offline: 'Offline', listening: 'Listening', processing: 'Thinking...', speaking: 'Speaking' };
+  const headerStatusLabel =
+    connectionStatus === 'speaking' && peripheralSpeak
+      ? peripheralSpeak.channel === 'mail'
+        ? 'Speaking · Mail'
+        : 'Speaking · WhatsApp'
+      : statusLabels[connectionStatus];
   const curMeta = vm(currentVoice);
   const replyPersona = mergePersona(activePersonaKey, personaOverrides, currentVoice, personaCatalog);
 
@@ -633,7 +674,7 @@ const FridayListenApp: React.FC = () => {
         <LaunchOverlay onFadeComplete={() => setLaunchOverlayVisible(false)} />
       )}
       <VoiceSiriOverlay
-        open={connectionStatus === 'speaking'}
+        open={connectionStatus === 'speaking' && !peripheralSpeak}
         theme={theme}
         caption={(speakingText.trim() || musicOrbCaption.trim()) || undefined}
         personaKey={speakingPersonaKey}
@@ -666,13 +707,14 @@ const FridayListenApp: React.FC = () => {
       <div className={styles['top-bar']}>
         <div className={styles['top-left']}>
           <span className={styles['brand-text']}>Friday</span>
-          <div className={styles['status-pill']}>
+          <div className={`${styles['status-pill']} ${styles[`status-pill--${connectionStatus}`]}`}>
             <div className={`${styles['status-dot']} ${isConnected ? styles.active : ''}`} />
-            <span>{statusLabels[connectionStatus]}</span>
+            <span>{headerStatusLabel}</span>
           </div>
           <span className={styles['top-meta']}>UP {uptime}</span>
         </div>
-        <div className={styles['top-music-slot']}>
+        {/* Music search bar - disabled for now */}
+        {/* <div className={styles['top-music-slot']}>
           <TopMusicDock
             theme={theme}
             musicOrbCaption={musicOrbCaption}
@@ -680,7 +722,7 @@ const FridayListenApp: React.FC = () => {
             authHeaders={authHeaders}
             showToast={showToast}
           />
-        </div>
+        </div> */}
         <div className={styles['top-right']}>
           {isNarrow && (
             <button
@@ -701,6 +743,25 @@ const FridayListenApp: React.FC = () => {
           >
             {alwaysSpeakViaUi ? '\uD83D\uDD0A' : '\uD83D\uDD07'}
           </button>
+          <button
+            className={`${styles['top-btn']} ${dnd ? styles['top-btn-dnd'] : ''}`}
+            onClick={() => { setDnd(!dnd); showToast(dnd ? 'Do Not Disturb off' : 'Do Not Disturb on — speech silenced', dnd ? 'info' : 'success'); }}
+            title={dnd ? 'Do Not Disturb ON — click to disable' : 'Do Not Disturb OFF — click to enable'}
+            aria-pressed={dnd}
+          >
+            {dnd ? '\uD83D\uDD15' : '\uD83D\uDD14'}
+          </button>
+          {winNotifications.length > 0 && (
+            <button
+              className={`${styles['top-btn']} ${styles['top-btn-notify']}`}
+              onClick={() => setWinNotifyPanelOpen((v) => !v)}
+              title="Windows notifications"
+              aria-label={`${winNotifications.length} Windows notification${winNotifications.length === 1 ? '' : 's'}`}
+            >
+              {'🪟'}
+              <span className={styles['notify-badge']}>{winNotifications.length > 9 ? '9+' : winNotifications.length}</span>
+            </button>
+          )}
           <button className={styles['top-btn']} onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>
             {theme === 'dark' ? '\u2600\uFE0F' : '\uD83C\uDF19'}
           </button>
@@ -898,11 +959,26 @@ const FridayListenApp: React.FC = () => {
               const isError = b.type === 'error';
               const isUser = b.type === 'user';
               const av = b.persona?.voice ? vm(b.persona.voice) : curMeta;
+              // Check if this message's voice is currently speaking
+              const isCurrentlySpeaking = isFriday && b.persona?.voice &&
+                connectionStatus === 'speaking' && speakingPersonaKey &&
+                inferPersonaKeyFromVoice(b.persona.voice, personaCatalog) === speakingPersonaKey;
               return (
                 <div key={b.id} className={`${styles['chat-msg']} ${styles[`msg-${b.type}`]}`}>
                   {(isFriday || isError) && (
                     <div className={styles['msg-avatar']}>
-                      {isError ? '\u26A0\uFE0F' : av.icon}
+                      {isError ? (
+                        <div style={{ fontSize: '1.5rem' }}>⚠️</div>
+                      ) : isFriday && b.persona?.voice ? (
+                        <AnimatedAvatar
+                          voiceId={b.persona.voice}
+                          isSpeaking={isCurrentlySpeaking}
+                          size="small"
+                          showLabel={false}
+                        />
+                      ) : (
+                        av.icon
+                      )}
                     </div>
                   )}
                   <div className={styles['msg-content']}>
@@ -1041,6 +1117,8 @@ const FridayListenApp: React.FC = () => {
           drawerOpen={integrationsDrawerOpen}
           onDrawerClose={() => setIntegrationsDrawerOpen(false)}
           isNarrow={isNarrow}
+          peripheralSpeak={peripheralSpeak}
+          speakingPersonaKey={speakingPersonaKey}
         />
 
         {/* Voice Sessions Sidebar */}
@@ -1066,19 +1144,59 @@ const FridayListenApp: React.FC = () => {
         onSaved={refreshPersonaOverrides}
       />
 
-      <SpeakConfirmModal
-        isOpen={speakConfirmOpen}
-        text={pendingSpeakText}
-        voiceIcon={vm(currentVoice).icon}
-        voiceName={vm(currentVoice).shortName}
-        speakStyle={speakStyle}
-        onConfirm={handleSpeakConfirm}
-        onCancel={() => {
-          setSpeakConfirmOpen(false);
-          setSending(false);
-          inputRef.current?.focus();
-        }}
-      />
+      {/* Windows Notification Panel */}
+      {winNotifyPanelOpen && (
+        <div className={`${styles['win-notify-panel']} ${theme === 'light' ? styles['win-notify-panel-light'] : ''}`}>
+          <div className={styles['win-notify-head']}>
+            <span>{'🪟'} Windows Notifications</span>
+            <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+              {winNotifications.length > 0 && (
+                <button
+                  type="button"
+                  className={styles['win-notify-clear']}
+                  onClick={() => winNotifications.forEach((n) => dismissWinNotification(n.id))}
+                >
+                  Clear all
+                </button>
+              )}
+              <button
+                type="button"
+                className={styles['win-notify-close']}
+                onClick={() => setWinNotifyPanelOpen(false)}
+                aria-label="Close notifications"
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+          <div className={styles['win-notify-list']}>
+            {winNotifications.length === 0 ? (
+              <div className={styles['win-notify-empty']}>No notifications yet</div>
+            ) : (
+              winNotifications.map((n) => (
+                <div key={n.id} className={styles['win-notify-row']}>
+                  <div className={styles['win-notify-row-head']}>
+                    <span className={styles['win-notify-app']}>{n.app}</span>
+                    <span className={styles['win-notify-time']}>
+                      {new Date(n.ts).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })}
+                    </span>
+                    <button
+                      type="button"
+                      className={styles['win-notify-dismiss']}
+                      onClick={() => dismissWinNotification(n.id)}
+                      aria-label="Dismiss"
+                    >✕</button>
+                  </div>
+                  {n.title && <div className={styles['win-notify-title']}>{n.title}</div>}
+                  {n.body && n.body !== n.title && (
+                    <div className={styles['win-notify-body']}>{n.body}</div>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
 
       <ToastContainer />
     </div>

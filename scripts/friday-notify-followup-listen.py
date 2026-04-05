@@ -55,6 +55,7 @@ _sg_scripts = root / "skill-gateway" / "scripts"
 if str(_sg_scripts) not in sys.path:
     sys.path.insert(0, str(_sg_scripts))
 
+from tts_lock_env import tts_lock_ttl_sec  # noqa: E402
 from friday_speaker import speaker  # noqa: E402
 
 logging.basicConfig(
@@ -116,7 +117,7 @@ def _wait_for_tts_clear(timeout: float = 30.0) -> None:
     while TTS_ACTIVE_FILE.exists():
         try:
             age = time.time() - TTS_ACTIVE_FILE.stat().st_mtime
-            if age > 120:
+            if age > tts_lock_ttl_sec():
                 TTS_ACTIVE_FILE.unlink(missing_ok=True)
                 break
         except OSError:

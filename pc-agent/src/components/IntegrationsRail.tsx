@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { safeReadJson } from '../lib/fetchJson';
+import type { SpeakingPersonaKey } from '../contexts/VoiceAppContext';
+import { COMPANY_PERSONAS, personaIcon, type CompanyPersonaKey } from '../data/companyPersonas';
 import styles from '../styles/listen.module.css';
 
 type MailRow = { uid: string; from: string; subject: string; date: string };
@@ -34,6 +36,8 @@ type Props = {
   drawerOpen: boolean;
   onDrawerClose: () => void;
   isNarrow: boolean;
+  peripheralSpeak: { channel: 'mail' | 'whatsapp'; text: string } | null;
+  speakingPersonaKey: SpeakingPersonaKey;
 };
 
 const POLL_MS = 32_000;
@@ -45,6 +49,8 @@ export const IntegrationsRail: React.FC<Props> = ({
   drawerOpen,
   onDrawerClose,
   isNarrow,
+  peripheralSpeak,
+  speakingPersonaKey,
 }) => {
   const [gmail, setGmail] = useState<GmailState>({
     unread: [],
@@ -69,6 +75,7 @@ export const IntegrationsRail: React.FC<Props> = ({
   const [waSending, setWaSending] = useState(false);
   const [selectedMail, setSelectedMail] = useState<MailRow | null>(null);
   const [markedMails, setMarkedMails] = useState<MarkedMail>({});
+  const [archivingMails, setArchivingMails] = useState<{ [uid: string]: boolean }>({});
   const [isDragging, setIsDragging] = useState(false);
   const gmailRef = useRef(gmail);
   gmailRef.current = gmail;
@@ -126,6 +133,34 @@ export const IntegrationsRail: React.FC<Props> = ({
       ...prev,
       [uid]: !prev[uid],
     }));
+  };
+
+  const archiveMail = async (uid: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setArchivingMails((prev) => ({ ...prev, [uid]: true }));
+    try {
+      const r = await fetch('/integrations/mail/archive', {
+        method: 'POST',
+        headers: { ...authHeaders() as Record<string, string>, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ uid }),
+      });
+      const d = await r.json();
+      if (!r.ok) {
+        showToast(d.error || `Archive failed (${r.status})`, 'error');
+      } else {
+        showToast('Email archived', 'success');
+        setGmail((g) => ({
+          ...g,
+          unread: g.unread.filter((m) => m.uid !== uid),
+          recent: g.recent.filter((m) => m.uid !== uid),
+        }));
+        if (selectedMail?.uid === uid) setSelectedMail(null);
+      }
+    } catch (err) {
+      showToast(String((err as Error).message || err), 'error');
+    } finally {
+      setArchivingMails((prev) => { const n = { ...prev }; delete n[uid]; return n; });
+    }
   };
 
   const refreshMail = useCallback(async () => {
@@ -356,6 +391,13 @@ export const IntegrationsRail: React.FC<Props> = ({
     .filter(Boolean)
     .join(' ');
 
+  const mailSpeaking = peripheralSpeak?.channel === 'mail';
+  const waSpeaking = peripheralSpeak?.channel === 'whatsapp';
+  const speakPersona =
+    speakingPersonaKey && speakingPersonaKey !== 'custom'
+      ? COMPANY_PERSONAS[speakingPersonaKey]
+      : null;
+
   return (
     <>
       {isNarrow && drawerOpen && (
@@ -382,7 +424,9 @@ export const IntegrationsRail: React.FC<Props> = ({
               </button>
             </div>
           )}
-          <div className={styles['integrations-section']}>
+          <div
+            className={`${styles['integrations-section']} ${mailSpeaking ? styles['integrations-section-speaking'] : ''}`}
+          >
             <div className={styles['integrations-section-head']}>
               <span className={styles['integrations-title']}>Mail</span>
               <span className={styles['integrations-badge']}>{gmail.unread.length} unread</span>
@@ -398,6 +442,25 @@ export const IntegrationsRail: React.FC<Props> = ({
             {gmail.error && (
               <div className={styles['integrations-error']}>{gmail.error}</div>
             )}
+            {mailSpeaking && (
+              <div className={styles['integrations-speak-banner']} role="status" aria-live="polite">
+                {speakPersona ? (
+                  <span className={styles['integrations-speak-who']}>
+                    <span className={styles['integrations-speak-icon']}>
+                      {personaIcon(speakingPersonaKey as CompanyPersonaKey)}
+                    </span>
+                    <span>
+                      {speakPersona.name} · speaking
+                    </span>
+                  </span>
+                ) : (
+                  <span>Speaking…</span>
+                )}
+                <span className={styles['integrations-speak-snippet']}>
+                  {peripheralSpeak!.text.length > 140 ? `${peripheralSpeak!.text.slice(0, 137)}…` : peripheralSpeak!.text}
+                </span>
+              </div>
+            )}
             <div className={styles['integrations-split']}>
               <div className={styles['integrations-mail-list']}>
                 {gmail.loading && gmail.unread.length === 0 && gmail.recent.length === 0 && (
@@ -407,30 +470,41 @@ export const IntegrationsRail: React.FC<Props> = ({
                   <>
                     <div className={styles['integrations-list-label']}>Unread</div>
                     {gmail.unread.map((m) => (
-                      <button
-                        key={`u-${m.uid}`}
-                        type="button"
-                        className={`${styles['integrations-mail-row']} ${selectedMail?.uid === m.uid ? styles['integrations-mail-row-active'] : ''}`}
-                        onClick={() => setSelectedMail(m)}
-                      >
-                        <div style={{ display: 'flex', alignItems: 'center', width: '100%', minWidth: 0 }}>
-                          <div
-                            className={`${styles['integrations-mail-mark']} ${markedMails[m.uid] ? styles['marked'] : ''}`}
-                            onClick={(e) => toggleMailMark(m.uid, e)}
-                            role="checkbox"
-                            aria-checked={markedMails[m.uid] ?? false}
-                          >
-                            {markedMails[m.uid] ? '✓' : ''}
+                      <div key={`u-${m.uid}`} className={styles['integrations-mail-row-wrap']}>
+                        <button
+                          type="button"
+                          className={`${styles['integrations-mail-row']} ${selectedMail?.uid === m.uid ? styles['integrations-mail-row-active'] : ''}`}
+                          onClick={() => setSelectedMail(m)}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', width: '100%', minWidth: 0 }}>
+                            <div
+                              className={`${styles['integrations-mail-mark']} ${markedMails[m.uid] ? styles['marked'] : ''}`}
+                              onClick={(e) => toggleMailMark(m.uid, e)}
+                              role="checkbox"
+                              aria-checked={markedMails[m.uid] ?? false}
+                            >
+                              {markedMails[m.uid] ? '✓' : ''}
+                            </div>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <span className={styles['integrations-mail-subj']}>{m.subject || '(no subject)'}</span>
+                              <div className={styles['integrations-mail-from']}>{m.from}</div>
+                            </div>
+                            <span style={{ fontSize: '0.52rem', color: 'rgba(255, 255, 255, 0.28)', flexShrink: 0, marginLeft: '6px' }}>
+                              {shortFromDate(m).props.children}
+                            </span>
                           </div>
-                          <div style={{ flex: 1, minWidth: 0 }}>
-                            <span className={styles['integrations-mail-subj']}>{m.subject || '(no subject)'}</span>
-                            <div className={styles['integrations-mail-from']}>{m.from}</div>
-                          </div>
-                          <span style={{ fontSize: '0.52rem', color: 'rgba(255, 255, 255, 0.28)', flexShrink: 0, marginLeft: '6px' }}>
-                            {shortFromDate(m).props.children}
-                          </span>
-                        </div>
-                      </button>
+                        </button>
+                        <button
+                          type="button"
+                          className={styles['integrations-mail-archive']}
+                          onClick={(e) => archiveMail(m.uid, e)}
+                          disabled={archivingMails[m.uid]}
+                          title="Archive (mark done)"
+                          aria-label="Archive email"
+                        >
+                          {archivingMails[m.uid] ? '⋯' : '✓ Done'}
+                        </button>
+                      </div>
                     ))}
                   </>
                 )}
@@ -438,30 +512,41 @@ export const IntegrationsRail: React.FC<Props> = ({
                   <>
                     <div className={styles['integrations-list-label']}>Recent</div>
                     {gmail.recent.map((m) => (
-                      <button
-                        key={`r-${m.uid}`}
-                        type="button"
-                        className={`${styles['integrations-mail-row']} ${selectedMail?.uid === m.uid ? styles['integrations-mail-row-active'] : ''}`}
-                        onClick={() => setSelectedMail(m)}
-                      >
-                        <div style={{ display: 'flex', alignItems: 'center', width: '100%', minWidth: 0 }}>
-                          <div
-                            className={`${styles['integrations-mail-mark']} ${markedMails[m.uid] ? styles['marked'] : ''}`}
-                            onClick={(e) => toggleMailMark(m.uid, e)}
-                            role="checkbox"
-                            aria-checked={markedMails[m.uid] ?? false}
-                          >
-                            {markedMails[m.uid] ? '✓' : ''}
+                      <div key={`r-${m.uid}`} className={styles['integrations-mail-row-wrap']}>
+                        <button
+                          type="button"
+                          className={`${styles['integrations-mail-row']} ${selectedMail?.uid === m.uid ? styles['integrations-mail-row-active'] : ''}`}
+                          onClick={() => setSelectedMail(m)}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', width: '100%', minWidth: 0 }}>
+                            <div
+                              className={`${styles['integrations-mail-mark']} ${markedMails[m.uid] ? styles['marked'] : ''}`}
+                              onClick={(e) => toggleMailMark(m.uid, e)}
+                              role="checkbox"
+                              aria-checked={markedMails[m.uid] ?? false}
+                            >
+                              {markedMails[m.uid] ? '✓' : ''}
+                            </div>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <span className={styles['integrations-mail-subj']}>{m.subject || '(no subject)'}</span>
+                              <div className={styles['integrations-mail-from']}>{m.from}</div>
+                            </div>
+                            <span style={{ fontSize: '0.52rem', color: 'rgba(255, 255, 255, 0.28)', flexShrink: 0, marginLeft: '6px' }}>
+                              {shortFromDate(m).props.children}
+                            </span>
                           </div>
-                          <div style={{ flex: 1, minWidth: 0 }}>
-                            <span className={styles['integrations-mail-subj']}>{m.subject || '(no subject)'}</span>
-                            <div className={styles['integrations-mail-from']}>{m.from}</div>
-                          </div>
-                          <span style={{ fontSize: '0.52rem', color: 'rgba(255, 255, 255, 0.28)', flexShrink: 0, marginLeft: '6px' }}>
-                            {shortFromDate(m).props.children}
-                          </span>
-                        </div>
-                      </button>
+                        </button>
+                        <button
+                          type="button"
+                          className={styles['integrations-mail-archive']}
+                          onClick={(e) => archiveMail(m.uid, e)}
+                          disabled={archivingMails[m.uid]}
+                          title="Archive (mark done)"
+                          aria-label="Archive email"
+                        >
+                          {archivingMails[m.uid] ? '⋯' : '✓ Done'}
+                        </button>
+                      </div>
                     ))}
                   </>
                 )}
@@ -496,7 +581,9 @@ export const IntegrationsRail: React.FC<Props> = ({
             </div>
           </div>
 
-          <div className={styles['integrations-section']}>
+          <div
+            className={`${styles['integrations-section']} ${waSpeaking ? styles['integrations-section-speaking'] : ''}`}
+          >
             <div className={styles['integrations-section-head']}>
               <span className={styles['integrations-title']}>WhatsApp</span>
               <span
@@ -515,6 +602,25 @@ export const IntegrationsRail: React.FC<Props> = ({
             </div>
             {waStatus.error && (
               <div className={styles['integrations-error']}>{waStatus.error}</div>
+            )}
+            {waSpeaking && (
+              <div className={styles['integrations-speak-banner']} role="status" aria-live="polite">
+                {speakPersona ? (
+                  <span className={styles['integrations-speak-who']}>
+                    <span className={styles['integrations-speak-icon']}>
+                      {personaIcon(speakingPersonaKey as CompanyPersonaKey)}
+                    </span>
+                    <span>
+                      {speakPersona.name} · speaking
+                    </span>
+                  </span>
+                ) : (
+                  <span>Speaking…</span>
+                )}
+                <span className={styles['integrations-speak-snippet']}>
+                  {peripheralSpeak!.text.length > 140 ? `${peripheralSpeak!.text.slice(0, 137)}…` : peripheralSpeak!.text}
+                </span>
+              </div>
             )}
             {(waStatus.profileName || waStatus.number) && (
               <div className={styles['integrations-muted']}>

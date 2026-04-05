@@ -1,6 +1,11 @@
 import express from 'express';
 import crypto from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 import { fetchGmailSnapshot } from './gmailRunner.js';
+
+const _ROOT = path.dirname(path.dirname(path.dirname(fileURLToPath(import.meta.url))));
 import { getPoolSnapshot, refreshModelPool } from './openRouterModelPool.js';
 import { getKeyPoolSnapshot, validateAllKeys } from './openRouterKeyPool.js';
 
@@ -321,6 +326,30 @@ export function createIntegrationsRouter(authMiddleware) {
       res.json({ ok: true, keys: results });
     } catch (e) {
       res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  });
+
+  /** Archive (mark done) a Gmail message by UID — removes from inbox and marks read. */
+  r.post('/mail/archive', async (req, res) => {
+    const { uid } = req.body || {};
+    if (!uid) return res.status(400).json({ error: 'uid required' });
+    try {
+      const result = spawnSync(
+        'python',
+        ['scripts/gmail.py', 'archive', String(uid)],
+        { cwd: _ROOT, encoding: 'utf8', timeout: 15_000 },
+      );
+      if (result.error) throw result.error;
+      if (result.status !== 0) {
+        const msg = (result.stderr || '').trim() || `exit ${result.status}`;
+        return res.status(500).json({ ok: false, error: msg });
+      }
+      const out = (result.stdout || '').trim();
+      let data = null;
+      try { data = out ? JSON.parse(out) : null; } catch { data = { raw: out }; }
+      return res.json({ ok: true, uid, ...(data || {}) });
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: String(e.message || e) });
     }
   });
 

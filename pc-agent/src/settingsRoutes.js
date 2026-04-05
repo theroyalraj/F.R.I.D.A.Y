@@ -8,6 +8,35 @@ import {
   resetVoiceAgentPersonaPatch,
   SETTINGS_KEY,
 } from './voiceAgentPersona.js';
+import { createClient } from 'redis';
+
+const DND_KEY = 'openclaw:dnd';
+
+let _dndRedis = null;
+async function _dndRedisClient() {
+  if (_dndRedis?.isOpen) return _dndRedis;
+  const c = createClient({ url: (process.env.OPENCLAW_REDIS_URL || '').trim() || 'redis://127.0.0.1:6379' });
+  c.on('error', () => {});
+  try { await c.connect(); _dndRedis = c; return _dndRedis; } catch { return null; }
+}
+
+async function getDndEnabled() {
+  try {
+    const rc = await _dndRedisClient();
+    if (!rc) return false;
+    return (await rc.get(DND_KEY)) === '1';
+  } catch { return false; }
+}
+
+async function setDndEnabled(enabled) {
+  try {
+    const rc = await _dndRedisClient();
+    if (!rc) return false;
+    if (enabled) await rc.set(DND_KEY, '1');
+    else await rc.del(DND_KEY);
+    return true;
+  } catch { return false; }
+}
 
 /**
  * @param {import('express').RequestHandler} authMiddleware
@@ -147,6 +176,29 @@ export function createSettingsRouter(authMiddleware, broadcastEvent) {
     } catch (e) {
       res.status(400).json({ ok: false, error: String(e.message || e) });
     }
+  });
+
+  /** DND (Do Not Disturb) — silences all spoken daemons (win-notify, email, ambient). Stored in Redis. */
+  r.get('/dnd', async (_req, res) => {
+    const enabled = await getDndEnabled();
+    res.json({ ok: true, dnd: enabled });
+  });
+
+  r.post('/dnd', async (req, res) => {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    let enabled;
+    if (typeof body.enabled === 'boolean') {
+      enabled = body.enabled;
+    } else if (body.toggle === true) {
+      enabled = !(await getDndEnabled());
+    } else {
+      return res.status(400).json({ error: 'Provide { enabled: bool } or { toggle: true }' });
+    }
+    const ok = await setDndEnabled(enabled);
+    if (typeof broadcastEvent === 'function') {
+      broadcastEvent('dnd_changed', { dnd: enabled });
+    }
+    res.json({ ok, dnd: enabled });
   });
 
   return r;

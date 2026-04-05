@@ -70,6 +70,7 @@ if str(_scripts_dir) not in sys.path:
 _sg_scripts = root / "skill-gateway" / "scripts"
 if str(_sg_scripts) not in sys.path:
     sys.path.insert(0, str(_sg_scripts))
+from tts_lock_env import tts_lock_ttl_sec  # noqa: E402
 from friday_greeting_delivery import sample_greeting_rate_pitch  # noqa: E402
 from friday_win_focus import should_defer_voice_for_cursor  # noqa: E402
 
@@ -384,7 +385,7 @@ def _wait_for_tts_clear(timeout: float = 45.0) -> None:
     while TTS_ACTIVE_FILE.exists():
         try:
             age = time.time() - TTS_ACTIVE_FILE.stat().st_mtime
-            if age > 120:          # stale file from crashed process
+            if age > tts_lock_ttl_sec():  # stale file — threshold matches friday-speak lock TTL
                 TTS_ACTIVE_FILE.unlink(missing_ok=True)
                 break
         except OSError:

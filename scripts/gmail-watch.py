@@ -58,6 +58,8 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
+from tts_lock_env import tts_lock_ttl_sec  # noqa: E402
+
 _ENV_FILE = _REPO_ROOT / ".env"
 if _ENV_FILE.exists():
     for line in _ENV_FILE.read_text(encoding="utf-8").splitlines():
@@ -84,6 +86,7 @@ FOLDERS = [f.strip() for f in os.environ.get("FRIDAY_EMAIL_FOLDERS", "INBOX").sp
 NOTIFY_VOICE = os.environ.get("FRIDAY_EMAIL_NOTIFY_VOICE", "").strip()  # overrides NOVA company voice
 USER_NAME = os.environ.get("FRIDAY_USER_NAME", "").strip() or "sir"
 PC_AGENT_URL = os.environ.get("PC_AGENT_URL", "http://127.0.0.1:3847").rstrip("/")
+PC_AGENT_SECRET = os.environ.get("PC_AGENT_SECRET", "").strip()
 
 
 def _env_bool(key: str, default: bool = True) -> bool:
@@ -122,7 +125,7 @@ def _wait_for_tts_clear(timeout: float) -> None:
     while TTS_ACTIVE_FILE.exists():
         try:
             age = time.time() - TTS_ACTIVE_FILE.stat().st_mtime
-            if age > 120:
+            if age > tts_lock_ttl_sec():
                 TTS_ACTIVE_FILE.unlink(missing_ok=True)
                 break
         except OSError:
@@ -405,8 +408,47 @@ def _build_digest_speak_text(entries: list[tuple[dict, dict | None]]) -> str:
     return " ".join(parts)
 
 
+def _is_dnd() -> bool:
+    """Check Redis openclaw:dnd — returns True when Do Not Disturb is on."""
+    try:
+        import redis as _redis
+        rc = _redis.Redis.from_url(
+            os.environ.get("OPENCLAW_REDIS_URL", "redis://127.0.0.1:6379"),
+            socket_connect_timeout=1, socket_timeout=1,
+        )
+        return rc.get("openclaw:dnd") == b"1"
+    except Exception:
+        return False
+
+
 def _speak_text(text: str) -> None:
-    """Fire-and-forget highest priority TTS for email notification (NOVA, Director of Comms)."""
+    """Email TTS: prefer pc-agent /voice/speak-async so Friday Listen gets SSE + Mail rail (Nova)."""
+    if _is_dnd():
+        print(f"[gmail-watch] DND on — skipping speech", flush=True)
+        return
+    use_pc_agent = _env_bool("FRIDAY_EMAIL_SPEAK_VIA_PC_AGENT", True)
+    if use_pc_agent and PC_AGENT_SECRET:
+        payload: dict = {"text": text, "channel": "mail", "personaKey": "nova"}
+        if NOTIFY_VOICE:
+            payload["voice"] = NOTIFY_VOICE
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            f"{PC_AGENT_URL}/voice/speak-async",
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {PC_AGENT_SECRET}",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                if resp.status < 300:
+                    print(f"[nova] speak-async: {text[:120]}", flush=True)
+                    return
+        except Exception as exc:
+            print(f"[gmail-watch] speak-async failed, fallback to local speak: {exc}", file=sys.stderr, flush=True)
+
     env = {
         **os.environ,
         "FRIDAY_TTS_PRIORITY": "1",
@@ -432,7 +474,7 @@ def _speak_text(text: str) -> None:
             env=env,
             **kwargs,
         )
-        print(f"[nova] spoke: {text[:120]}", flush=True)
+        print(f"[nova] spoke (local): {text[:120]}", flush=True)
     except Exception as exc:
         print(f"[gmail-watch] speak failed: {exc}", file=sys.stderr, flush=True)
 
