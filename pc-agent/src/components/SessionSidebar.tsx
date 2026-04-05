@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import SessionCard from './SessionCard';
 import CurrentVoiceShowcase from './CurrentVoiceShowcase';
+import TodoPanel from './TodoPanel';
 import styles from '../styles/listen.module.css';
 
 interface VoiceSession {
@@ -28,6 +29,7 @@ interface SessionSidebarProps {
   isLoading?: boolean;
   onVoiceChange?: (voice: string) => void;
   theme?: 'light' | 'dark';
+  authHeaders?: () => Record<string, string>;
 }
 
 /**
@@ -45,6 +47,7 @@ const SessionSidebar: React.FC<SessionSidebarProps> = ({
   isLoading = false,
   onVoiceChange,
   theme = 'dark',
+  authHeaders,
 }) => {
   const [sortedSessions, setSortedSessions] = useState<VoiceSession[]>([]);
 
@@ -114,6 +117,10 @@ const SessionSidebar: React.FC<SessionSidebarProps> = ({
           rate={100}
           isActive={true}
         />
+
+        {/* Todo panel */}
+        <div className={styles['session-sidebar-divider']} />
+        <TodoPanel authHeaders={authHeaders} theme={theme} />
       </div>
     </div>
   );

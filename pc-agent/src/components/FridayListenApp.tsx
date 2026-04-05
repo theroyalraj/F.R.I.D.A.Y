@@ -135,7 +135,7 @@ const FridayListenApp: React.FC = () => {
     roleCount: number;
     err?: string;
   } | null>(null);
-  const [launchOverlayVisible, setLaunchOverlayVisible] = useState(true);
+  const [launchOverlayVisible, setLaunchOverlayVisible] = useState(false);
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [speakStyle, setSpeakStyle] = useState<{
     funny: boolean;
@@ -1027,6 +1027,7 @@ const FridayListenApp: React.FC = () => {
             currentVoiceDescription={replyPersona.personality || `${replyPersona.title} — ${replyPersona.name}`}
             isLoading={sessionsLoading}
             theme={theme}
+            authHeaders={authHeaders}
           />
         )}
       </div>

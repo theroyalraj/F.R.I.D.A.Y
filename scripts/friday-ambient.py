@@ -1757,6 +1757,16 @@ def generate_line_ai(
         )
         system += _ambient_steward_system_inject()
 
+        # Hindi language override — inject at the very end so it overrides any per-mode lang hints
+        _ambient_lang = os.environ.get("FRIDAY_AMBIENT_LANG", "").strip().lower()
+        if _ambient_lang == "hindi" and not (mode == "cricket" and cin):
+            system += (
+                "\n\nLANGUAGE — MANDATORY: Respond entirely in Hindi using Devanagari script. "
+                "Sound natural and conversational like someone who grew up speaking Hindi at home. "
+                "Technical terms, app/product names, and proper nouns may stay in Roman script. "
+                "Do NOT switch to English mid-sentence. The full response must be in Hindi."
+            )
+
         # ── Mode-specific user prompts ─────────────────────────────────────
         if mode == "cricket":
             if cricket_line:
@@ -2860,9 +2870,36 @@ _CHECKIN_TEMPLATES = [
     "Hey {user}, {time}. The screen wins if you never look away; let's not hand it the trophy.",
 ]
 
+# Hindi check-in templates — used when FRIDAY_AMBIENT_LANG=hindi
+_CHECKIN_TEMPLATES_HI = [
+    # ── घर की बड़ी बुजुर्ग — housekeeping, काम ──────────────────────────────
+    "{time} हो गए, {user}। ज़रा देखो — जो काम किया वो save किया या नहीं? बाद में पछताना ठीक नहीं।",
+    "{user}, {time} बज रहे हैं। मैं यहाँ सब संभालती हूँ — तुम बताओ, काम सही दिशा में है ना?",
+    "{time}, {user}। एक बात बताओ — असल ज़रूरी काम पर हो, या कहीं भटक गए?",
+    "{user}, {time}। सच बताना — मैं मदद कर रही हूँ या परेशान कर रही हूँ? दोनों जवाब ठीक हैं।",
+    # ── आराम, चाय, पानी ─────────────────────────────────────────────────────
+    "{time} हो गए, {user}। कब से बैठे हो? चाय पियो, पानी पियो, ज़रा उठो तो।",
+    "{user}, {time}। थोड़ा साँस लो — कंधे हिलाओ, कुछ गरम पियो, फिर काम पर लगो।",
+    "{time}, {user}। अगले दस साल भी काम करना है — पाँच मिनट का break बाद में घंटों की clarity देता है।",
+    "{user}, {time}। बोलो — एकदम focus चाहिए या बीच-बीच में check-in? जैसा कहो वैसा करूँगी।",
+    # ── शरीर का ख़याल ────────────────────────────────────────────────────────
+    "अरे {user}, {time} बज गए। पानी पिया? थोड़ा stretch किया? बीस सेकंड के लिए screen से आँखें हटाओ।",
+    "{time}, {user}। कमर सीधी है? जबड़ा tight तो नहीं? बरसों से computers देखती हूँ — प्यार से टोकती हूँ।",
+    "{user}, एक बार पलकें झपकाओ — {time} हो गए। ticket queue थोड़ी देर रुक सकती है।",
+    # ── बुज़ुर्ग वाली ज़िद ────────────────────────────────────────────────────
+    "{user}, {time}। कुछ खाया आज? सिर्फ चाय और code से काम नहीं चलेगा।",
+    "{time}। {user}, कुर्सी घर नहीं है — उठो, थोड़ा टहलो, फिर ताज़े दिमाग़ से बैठो।",
+    "{time}, {user}। ज़रा check करो — जो काम शुरू किया था उस पर हो या कहीं नई पगडंडी पर चले गए?",
+    # ── देर रात ──────────────────────────────────────────────────────────────
+    "{time} और अभी भी काम, {user}। गर्व भी है, चिंता भी — थोड़ा break लो, नुकसान नहीं होगा।",
+    "अरे {user}, {time}। screen को जीतने मत दो — एक नज़र हटाओ, थोड़ा सुस्ताओ।",
+]
+
 
 def _pick_checkin_line() -> str:
-    return random.choice(_CHECKIN_TEMPLATES).format(user=USER_NAME, time=_format_local_time_spoken())
+    lang = os.environ.get("FRIDAY_AMBIENT_LANG", "").strip().lower()
+    pool = _CHECKIN_TEMPLATES_HI if lang == "hindi" else _CHECKIN_TEMPLATES
+    return random.choice(pool).format(user=USER_NAME, time=_format_local_time_spoken())
 
 
 def speak_subagent_blocking(
