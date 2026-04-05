@@ -54,6 +54,11 @@ Env vars (all optional):
                      sentences, speak sentence-by-sentence (same voice) so first audio starts
                      sooner instead of one full MP3 download. Default 300; set 0 to disable.
   FRIDAY_TTS_CHUNK_MAX_CHARS  Max merged sentence length per chunk (default 380; clamped).
+  FRIDAY_TTS_EMIT_EVENT  When true (default), POST tts_speak / tts_done to pc-agent for the
+                     Friday web UI. Set false when the parent already broadcasts (e.g. speak-async).
+  FRIDAY_PC_AGENT_URL  Base URL for /voice/event (default http://127.0.0.1:3847). Uses PC_AGENT_SECRET
+                     Bearer auth when set.
+  FRIDAY_TTS_AUDIT  When true (default), LPUSH JSON lines to Redis friday:tts:audit and emit tts_audit SSE.
 
 Good voices (respect FRIDAY_TTS_VOICE_BLOCK in .env — blocked ids are never used):
   en-US-AvaMultilingualNeural  US female multilingual — repo default when env unset
@@ -725,11 +730,14 @@ def _play_ffplay(mp3_data: bytes, my_gen: int | None = None) -> None:
     if platform.system() == "Windows":
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
 
+    play_t0 = time.monotonic()
     try:
         proc = subprocess.Popen(
             ["friday-player", "-nodisp", "-autoexit", "-loglevel", "quiet", tmp],
             **kwargs,
         )
+        _emit_tts_speak_if_needed()
+        _audit_playback_segment_start(proc.pid, my_gen)
         threading.Thread(target=_fix_ffplay_volume, args=(proc.pid,), daemon=True).start()
         max_pb = _get_max_playback_sec()
         if max_pb > 0:
@@ -738,11 +746,17 @@ def _play_ffplay(mp3_data: bytes, my_gen: int | None = None) -> None:
             except subprocess.TimeoutExpired:
                 print("[friday-speak] playback timed out — stopping player (silent)", flush=True)
                 _stop_playback_after_cap(proc)
+                _audit_playback_segment_end(
+                    my_gen, play_t0, proc.poll(), timed_out_cap=True
+                )
                 return
         else:
             proc.wait()
-        if proc.returncode not in (0, None):
-            raise subprocess.CalledProcessError(proc.returncode, "ffplay")
+        rc = proc.returncode
+        if rc not in (0, None):
+            _audit_playback_segment_end(my_gen, play_t0, rc, timed_out_cap=False)
+            raise subprocess.CalledProcessError(rc, "ffplay")
+        _audit_playback_segment_end(my_gen, play_t0, rc, timed_out_cap=False)
         _write_last_spoken_ts()
     except subprocess.CalledProcessError as e:
         print(f"friday-speak: ffplay error {e.returncode}", file=sys.stderr)
@@ -808,6 +822,8 @@ async def _stream_and_play(switch_done: threading.Event, my_gen: int) -> None:
         ["friday-player", "-nodisp", "-autoexit", "-loglevel", "quiet", "-"],
         **kwargs,
     )
+    _emit_tts_speak_if_needed()
+    _audit_playback_segment_start(proc.pid, my_gen)
     threading.Thread(target=_fix_ffplay_volume, args=(proc.pid,), daemon=True).start()
     play_start = time.monotonic()
     max_pb = _get_max_playback_sec()
@@ -856,6 +872,7 @@ async def _stream_and_play(switch_done: threading.Event, my_gen: int) -> None:
             pass
         print("[friday-speak] streaming cut off — playback budget exceeded (silent)", flush=True)
         _stop_playback_after_cap(proc)
+        _audit_playback_segment_end(my_gen, play_start, proc.poll(), timed_out_cap=True)
         return
 
     await producer
@@ -863,6 +880,7 @@ async def _stream_and_play(switch_done: threading.Event, my_gen: int) -> None:
     rem_fin = _remaining_play()
     if max_pb > 0 and rem_fin is not None and rem_fin <= 0:
         _stop_playback_after_cap(proc)
+        _audit_playback_segment_end(my_gen, play_start, proc.poll(), timed_out_cap=True)
         return
 
     try:
@@ -873,8 +891,11 @@ async def _stream_and_play(switch_done: threading.Event, my_gen: int) -> None:
     except subprocess.TimeoutExpired:
         print("[friday-speak] streaming playback timed out after stdin closed (silent)", flush=True)
         _stop_playback_after_cap(proc)
+        _audit_playback_segment_end(my_gen, play_start, proc.poll(), timed_out_cap=True)
         return
 
+    _s_rc = proc.returncode
+    _audit_playback_segment_end(my_gen, play_start, _s_rc, timed_out_cap=False)
     _write_last_spoken_ts()
 
     if produce_exc:
@@ -1087,6 +1108,171 @@ def _get_redis_client():
     except Exception:
         _redis_c = None
     return _redis_c
+
+
+# ── UI / SSE + TTS audit (POST /voice/event, Redis friday:tts:audit) ───────────
+_TTS_AUDIT_REDIS_KEY = "friday:tts:audit"
+_TTS_AUDIT_MAX = 50
+_tts_ui_posted_event = False
+
+
+def _reset_tts_ui_state() -> None:
+    global _tts_ui_posted_event
+    _tts_ui_posted_event = False
+
+
+def _emit_ui_events_enabled() -> bool:
+    raw = os.environ.get("FRIDAY_TTS_EMIT_EVENT", "1").strip().lower()
+    return raw not in ("0", "false", "off", "no", "none")
+
+
+def _tts_audit_enabled() -> bool:
+    raw = os.environ.get("FRIDAY_TTS_AUDIT", "1").strip().lower()
+    return raw not in ("0", "false", "off", "no", "none")
+
+
+def _pc_agent_base_url() -> str:
+    return (os.environ.get("FRIDAY_PC_AGENT_URL", "http://127.0.0.1:3847").strip().rstrip("/") or "http://127.0.0.1:3847")
+
+
+def _post_voice_event_async(payload: dict) -> None:
+    """Fire-and-forget POST to pc-agent /voice/event (never blocks playback)."""
+
+    def _send() -> None:
+        try:
+            from urllib.request import Request, urlopen
+
+            body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            headers = {
+                "Content-Type": "application/json",
+                "ngrok-skip-browser-warning": "69420",
+            }
+            secret = (os.environ.get("PC_AGENT_SECRET") or "").strip()
+            if secret:
+                headers["Authorization"] = f"Bearer {secret}"
+            req = Request(
+                f"{_pc_agent_base_url()}/voice/event",
+                data=body,
+                headers=headers,
+                method="POST",
+            )
+            urlopen(req, timeout=1.5)
+        except Exception:
+            pass
+
+    threading.Thread(target=_send, daemon=True).start()
+
+
+def _push_tts_audit_record(entry: dict) -> None:
+    if not _tts_audit_enabled():
+        return
+    try:
+        line = json.dumps(entry, separators=(",", ":"))
+    except Exception:
+        return
+    r = _get_redis_client()
+    if r is not None:
+        try:
+            r.lpush(_TTS_AUDIT_REDIS_KEY, line)
+            r.ltrim(_TTS_AUDIT_REDIS_KEY, 0, _TTS_AUDIT_MAX - 1)
+        except Exception:
+            pass
+    _post_voice_event_async({"type": "tts_audit", **entry})
+
+
+def _tts_session_label() -> str:
+    return _SESSION_KIND or "main"
+
+
+def _tts_priority_flag() -> bool:
+    p = os.environ.get("FRIDAY_TTS_PRIORITY", "").strip().lower()
+    return p in ("1", "true", "yes", "on", "high", "hard")
+
+
+def _emit_tts_speak_if_needed() -> None:
+    """Single tts_speak per process — shows full TEXT in Friday web UI."""
+    global _tts_ui_posted_event
+    if _tts_ui_posted_event:
+        return
+    if not _emit_ui_events_enabled():
+        return
+    _tts_ui_posted_event = True
+    preview = TEXT if len(TEXT) <= 500 else TEXT[:497] + "…"
+    _post_voice_event_async(
+        {
+            "type": "tts_speak",
+            "text": preview,
+            "voice": VOICE,
+            "session": _tts_session_label(),
+        }
+    )
+
+
+def _emit_tts_done_if_needed() -> None:
+    global _tts_ui_posted_event
+    if not _tts_ui_posted_event:
+        return
+    if _emit_ui_events_enabled():
+        _post_voice_event_async({"type": "tts_done", "session": _tts_session_label()})
+    _tts_ui_posted_event = False
+
+
+def _audit_playback_segment_start(proc_pid: int | None, my_gen: int | None) -> None:
+    preview = TEXT if len(TEXT) <= 120 else TEXT[:117] + "…"
+    _push_tts_audit_record(
+        {
+            "state": "speak_start",
+            "ts": int(time.time() * 1000),
+            "session": _tts_session_label(),
+            "priority": _tts_priority_flag(),
+            "voice": VOICE,
+            "text_preview": preview,
+            "pid": proc_pid,
+            "gen": my_gen,
+        }
+    )
+
+
+def _audit_playback_segment_end(
+    my_gen: int | None,
+    t0_mono: float,
+    returncode: int | None,
+    *,
+    timed_out_cap: bool = False,
+) -> None:
+    dur_ms = int(max(0.0, (time.monotonic() - t0_mono) * 1000))
+    interrupted = timed_out_cap or (returncode not in (0, None))
+    reason = None
+    if timed_out_cap:
+        reason = "playback_cap"
+    elif interrupted:
+        if my_gen is not None and _playback_superseded(my_gen):
+            reason = "priority_kill"
+        else:
+            reason = "player_exit"
+    if interrupted:
+        _push_tts_audit_record(
+            {
+                "state": "speak_interrupted",
+                "ts": int(time.time() * 1000),
+                "session": _tts_session_label(),
+                "duration_ms": dur_ms,
+                "reason": reason or "unknown",
+                "returncode": returncode,
+                "gen": my_gen,
+            }
+        )
+    else:
+        _push_tts_audit_record(
+            {
+                "state": "speak_done",
+                "ts": int(time.time() * 1000),
+                "session": _tts_session_label(),
+                "duration_ms": dur_ms,
+                "was_interrupted": False,
+                "gen": my_gen,
+            }
+        )
 
 
 _SPEAK_STYLE_REDIS_KEY = "friday:speak_style"
@@ -1771,9 +1957,14 @@ async def speak():
 
             await asyncio.sleep(0.10)
 
+    if is_playback:
+        _reset_tts_ui_state()
+
     try:
         await _speak_inner(_my_gen)
     finally:
+        if is_playback:
+            _emit_tts_done_if_needed()
         if is_playback:
             _release_own_tts_lock()
             if _is_thinking:

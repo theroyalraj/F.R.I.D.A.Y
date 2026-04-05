@@ -77,12 +77,23 @@ export async function tryReadAiCaches(args) {
   return null;
 }
 
+function compactExtraMetadata(meta) {
+  if (!meta || typeof meta !== 'object') return undefined;
+  /** @type {Record<string, unknown>} */
+  const o = {};
+  for (const [k, v] of Object.entries(meta)) {
+    if (v !== null && v !== undefined) o[k] = v;
+  }
+  return Object.keys(o).length ? o : undefined;
+}
+
 /**
- * @param {{ prompt: string, system: string, modelKey: string, responseText: string, model: string, mode: string, provider: string, source: string, latencyMs?: number, orgId?: string|null, userId?: string|null, log?: import('pino').Logger, cacheHitType?: 'exact'|'semantic'|null, skipExactRedis?: boolean }} args
+ * @param {{ prompt: string, system: string, modelKey: string, responseText: string, model: string, mode: string, provider: string, source: string, latencyMs?: number, orgId?: string|null, userId?: string|null, log?: import('pino').Logger, cacheHitType?: 'exact'|'semantic'|null, skipExactRedis?: boolean, extraMetadata?: Record<string, unknown> }} args
+ * @returns {Promise<string|null>} generation log UUID when inserted
  */
 export async function persistAiGeneration(args) {
   const text = String(args.responseText || '').trim();
-  if (!text) return;
+  if (!text) return null;
 
   const systemFp = fingerprintSystem(args.system);
   const promptHash = aiCacheHashKey(args.modelKey, systemFp, args.prompt);
@@ -110,7 +121,7 @@ export async function persistAiGeneration(args) {
     });
   }
 
-  if (!isAiGenerationLogEnabled()) return;
+  if (!isAiGenerationLogEnabled()) return null;
 
   let embedding = null;
   if (isFresh) {
@@ -122,7 +133,7 @@ export async function persistAiGeneration(args) {
   }
 
   try {
-    await insertGenerationLog({
+    const row = await insertGenerationLog({
       promptHash,
       promptText: args.prompt,
       systemFingerprint: systemFp,
@@ -138,9 +149,12 @@ export async function persistAiGeneration(args) {
       orgId: args.orgId ?? null,
       userId: args.userId ?? null,
       cacheModelKey: args.modelKey,
+      extraMetadata: compactExtraMetadata(args.extraMetadata),
     });
+    return row?.id ? String(row.id) : null;
   } catch (e) {
     args.log?.warn({ err: String(e?.message || e).slice(0, 200) }, 'persistAiGeneration: insert failed');
+    return null;
   }
 }
 

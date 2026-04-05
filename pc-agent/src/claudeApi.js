@@ -70,7 +70,7 @@ function anthropicPromptCacheEnabled() {
 
 /**
  * Anthropic Messages API: string system or block array with ephemeral cache on the stable voice base.
- * @param {{ speakStyleExtra?: string, companyContext?: string, personaInstruction?: string }} opts
+ * @param {{ speakStyleExtra?: string, companyContext?: string, personaInstruction?: string, learningContext?: string }} opts
  */
 function buildAnthropicSystemPayload(opts) {
   const company =
@@ -85,9 +85,15 @@ function buildAnthropicSystemPayload(opts) {
     opts.personaInstruction && String(opts.personaInstruction).trim()
       ? String(opts.personaInstruction).trim()
       : '';
+  const learning =
+    opts.learningContext && String(opts.learningContext).trim()
+      ? String(opts.learningContext).trim()
+      : '';
 
   if (!anthropicPromptCacheEnabled()) {
-    return { system: buildVoiceSystem(opts), headers: {} };
+    let s = buildVoiceSystem(opts);
+    if (learning) s = `${s}\n\n${learning}`;
+    return { system: s, headers: {} };
   }
 
   const blocks = [
@@ -100,6 +106,7 @@ function buildAnthropicSystemPayload(opts) {
   if (company) blocks.push({ type: 'text', text: company });
   if (persona) blocks.push({ type: 'text', text: persona });
   if (style) blocks.push({ type: 'text', text: style });
+  if (learning) blocks.push({ type: 'text', text: learning });
   return {
     system: blocks,
     headers: { 'anthropic-beta': 'prompt-caching-2024-07-31' },
@@ -153,7 +160,7 @@ export function isApiKeyAvailable() {
 /**
  * Call the Anthropic Messages API directly.
  * @param {string} prompt — latest user message (after priorTurns when multi-turn)
- * @param {{ model?: string, timeoutMs?: number, log?: import('pino').Logger, speakStyleExtra?: string, companyContext?: string, personaInstruction?: string, priorTurns?: Array<{ role: string, content: string }> }} opts
+ * @param {{ model?: string, timeoutMs?: number, log?: import('pino').Logger, speakStyleExtra?: string, companyContext?: string, personaInstruction?: string, priorTurns?: Array<{ role: string, content: string }>, learningContext?: string }} opts
  * @returns {Promise<{ ok: boolean, text: string, model: string, ms: number, needsOpenRouterKey?: boolean, deferred?: boolean, deferredContext?: { prompt: string, system: string, tier: string, timeoutMs: number, log?: import('pino').Logger } }>}
  */
 export async function callClaudeApi(prompt, opts = {}) {
@@ -175,16 +182,21 @@ export async function callClaudeApi(prompt, opts = {}) {
       ? [...priorTurns, { role: 'user', content: latest }]
       : [{ role: 'user', content: latest }];
 
-  const systemString = buildVoiceSystem({
+  const learning = opts.learningContext && String(opts.learningContext).trim()
+    ? String(opts.learningContext).trim()
+    : '';
+  const baseSystem = buildVoiceSystem({
     speakStyleExtra: opts.speakStyleExtra,
     companyContext: opts.companyContext,
     personaInstruction: opts.personaInstruction,
   });
+  const systemString = learning ? `${baseSystem}\n\n${learning}` : baseSystem;
   const deferredPrompt = buildDeferredPrompt(latest, priorTurns);
   const { system: systemPayload, headers: anthropicExtraHeaders } = buildAnthropicSystemPayload({
     speakStyleExtra: opts.speakStyleExtra,
     companyContext: opts.companyContext,
     personaInstruction: opts.personaInstruction,
+    learningContext: learning || undefined,
   });
 
   if (await isAnthropicCooldownActive()) {

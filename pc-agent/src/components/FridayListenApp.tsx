@@ -157,6 +157,8 @@ const FridayListenApp: React.FC = () => {
   } | null>(null);
   const [launchOverlayVisible, setLaunchOverlayVisible] = useState(false);
   const [sessionsLoading, setSessionsLoading] = useState(false);
+  /** Which Redis voice context the sidebar card is editing (api = main Listen / chat defaults). */
+  const [voicePanelContext, setVoicePanelContext] = useState<string>('api');
   const [alwaysSpeakViaUi, setAlwaysSpeakViaUi] = useState(() => {
     try { return localStorage.getItem(LS_ALWAYS_SPEAK) === 'true'; } catch { return false; }
   });
@@ -216,10 +218,11 @@ const FridayListenApp: React.FC = () => {
       .catch(() => {});
   }, [setEdgeVoices, setCurrentVoice, setActivePersonaKey, authHeaders]);
 
+  /** Only sync default chat persona from the main Listen voice when editing the api context. */
   useEffect(() => {
-    if (!personaCatalog) return;
+    if (!personaCatalog || voicePanelContext !== 'api') return;
     setActivePersonaKey(inferPersonaKeyFromVoice(currentVoice, personaCatalog));
-  }, [personaCatalog, currentVoice, setActivePersonaKey]);
+  }, [personaCatalog, currentVoice, setActivePersonaKey, voicePanelContext]);
 
   // OpenClaw stack status (proxies skill-gateway) — visible by default on Listen
   useEffect(() => {
@@ -639,31 +642,53 @@ const FridayListenApp: React.FC = () => {
     if (!m) setConnectionStatus('listening');
   };
 
-  const applyVoice = useCallback((v: string, toast: string) => {
-    setCurrentVoice(v);
-    fetch('/voice/set-voice', {
-      method: 'POST',
-      headers: { ...authHeaders() as Record<string, string> },
-      body: JSON.stringify({ voice: v }),
-    })
-      .then(() => showToast(toast, 'success'))
-      .catch(() => {});
-  }, [authHeaders, showToast]);
+  const applyVoice = useCallback(
+    (v: string, toast: string, ctx: string = 'api') => {
+      if (ctx === 'api') {
+        setCurrentVoice(v);
+      }
+      const body = ctx === 'api' ? { voice: v } : { voice: v, context: ctx };
+      fetch('/voice/set-voice', {
+        method: 'POST',
+        headers: { ...authHeaders() as Record<string, string> },
+        body: JSON.stringify(body),
+      })
+        .then(() => {
+          showToast(toast, 'success');
+          setSessions((prev) => prev.map((s) => (s.context === ctx ? { ...s, voice: v } : s)));
+        })
+        .catch(() => {});
+    },
+    [authHeaders, showToast],
+  );
 
   const handlePersonaTeamChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const key = e.target.value as CompanyPersonaKey | 'custom';
-    setActivePersonaKey(key);
-    if (key === 'custom') return;
+    const ctx = voicePanelContext;
+    if (key === 'custom') {
+      if (ctx === 'api') setActivePersonaKey('custom');
+      return;
+    }
     const row = personaCatalog?.[key as string];
-    const v = (row?.voice?.trim() || COMPANY_PERSONAS[key].voice);
+    const v = row?.voice?.trim() || COMPANY_PERSONAS[key].voice;
     const nm = row?.name?.trim() || COMPANY_PERSONAS[key].name;
-    applyVoice(v, `${nm} · team voice`);
+    if (ctx === 'api') {
+      setActivePersonaKey(key);
+      applyVoice(v, `${nm} · team voice`, 'api');
+    } else {
+      const slot = CTX[ctx]?.label || ctx;
+      applyVoice(v, `${nm} · ${slot}`, ctx);
+    }
   };
 
   const handleCatalogueVoiceChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const v = e.target.value;
-    setActivePersonaKey('custom');
-    applyVoice(v, `Catalogue · ${vm(v).shortName}`);
+    const ctx = voicePanelContext;
+    if (ctx === 'api') {
+      setActivePersonaKey('custom');
+    }
+    const slot = ctx === 'api' ? 'Catalogue' : CTX[ctx]?.label || ctx;
+    applyVoice(v, `${slot} · ${vm(v).shortName}`, ctx);
   };
 
   const handleClaudeModelChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
@@ -701,6 +726,45 @@ const FridayListenApp: React.FC = () => {
       : statusLabels[connectionStatus];
   const curMeta = vm(currentVoice);
   const replyPersona = mergePersona(activePersonaKey, personaOverrides, currentVoice, personaCatalog);
+
+  const panelSession = useMemo(
+    () => sessions.find((s) => s.context === voicePanelContext),
+    [sessions, voicePanelContext],
+  );
+  const panelVoice = useMemo(() => {
+    const fromRedis = panelSession?.voice?.trim();
+    if (fromRedis) return fromRedis;
+    if (voicePanelContext === 'api') return currentVoice;
+    return currentVoice;
+  }, [panelSession, voicePanelContext, currentVoice]);
+  const panelPersonaKey = useMemo(
+    () => inferPersonaKeyFromVoice(panelVoice, personaCatalog),
+    [panelVoice, personaCatalog],
+  );
+  const panelPersona = useMemo(
+    () => mergePersona(panelPersonaKey, personaOverrides, panelVoice, personaCatalog),
+    [panelPersonaKey, personaOverrides, panelVoice, personaCatalog],
+  );
+  const panelMeta = useMemo(() => vm(panelVoice), [panelVoice]);
+  const panelVoiceInCatalogue = useMemo(
+    () => (edgeVoices as EdgeVoice[]).some((v) => v.voice === panelVoice),
+    [edgeVoices, panelVoice],
+  );
+  const displayBubbles = useMemo(() => {
+    const out: ChatBubble[] = [];
+    let prevDivider = false;
+    for (const b of bubbles) {
+      if (b.type === 'divider') {
+        if (prevDivider) continue;
+        prevDivider = true;
+        out.push(b);
+      } else {
+        prevDivider = false;
+        out.push(b);
+      }
+    }
+    return out;
+  }, [bubbles]);
 
   // Sidebar orb: use the speaking persona's colour + icon while TTS is active
   const speakOrbPalette = speakingPersonaKey
@@ -924,14 +988,30 @@ const FridayListenApp: React.FC = () => {
             </div>
           )}
 
-          {/* Sessions */}
+          {/* Sessions — click to edit that context’s voice and linked roster role */}
           <div className={styles['sessions-section']}>
             <div className={styles['sessions-heading']}>Sessions</div>
-            {sessions.map(s => {
+            {sessions.map((s) => {
               const ctxLabel = CTX[s.context] || { label: s.context, desc: '' };
               const meta = vm(s.voice);
+              const selected = voicePanelContext === s.context;
+              const pickSession = () => setVoicePanelContext(s.context);
               return (
-                <div key={s.context} className={styles['session-row']}>
+                <div
+                  key={s.context}
+                  role="button"
+                  tabIndex={0}
+                  className={`${styles['session-row']} ${selected ? styles['session-row-selected'] : ''}`}
+                  onClick={pickSession}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      pickSession();
+                    }
+                  }}
+                  aria-pressed={selected}
+                  aria-label={`${ctxLabel.label}, voice ${meta.shortName}, ${s.status}`}
+                >
                   <span className={styles['session-icon']} style={{ color: meta.color }}>{meta.icon}</span>
                   <div className={styles['session-details']}>
                     <div className={styles['session-label']}>{ctxLabel.label}</div>
@@ -947,17 +1027,25 @@ const FridayListenApp: React.FC = () => {
 
           {/* Team speaker + voice pool */}
           <div className={styles['voice-card']}>
+            <div className={styles['voice-card-context-hint']}>
+              Editing · {CTX[voicePanelContext]?.label || voicePanelContext}
+              {voicePanelContext !== 'api' ? (
+                <span className={styles['voice-card-context-sub']}> Chat defaults stay on Listen UI until you switch back.</span>
+              ) : null}
+            </div>
             <div className={styles['voice-card-top']}>
-              <span className={styles['voice-card-icon']} style={{ color: curMeta.color }}>{curMeta.icon}</span>
+              <span className={styles['voice-card-icon']} style={{ color: panelMeta.color }}>{panelMeta.icon}</span>
               <div className={styles['voice-card-info']}>
-                <span className={styles['voice-card-name']}>{replyPersona.name}</span>
-                <span className={styles['voice-card-role']}>{replyPersona.title}</span>
+                <span className={styles['voice-card-name']}>{panelPersona.name}</span>
+                <span className={styles['voice-card-role']}>{panelPersona.title}</span>
               </div>
             </div>
-            <div className={styles['voice-card-row-label']}>Who speaks (default replies)</div>
+            <div className={styles['voice-card-row-label']}>
+              {voicePanelContext === 'api' ? 'Who speaks (default replies)' : 'Team voice (this session)'}
+            </div>
             <select
               className={styles['voice-card-select']}
-              value={activePersonaKey}
+              value={panelPersonaKey}
               onChange={handlePersonaTeamChange}
               aria-label="Team speaker"
             >
@@ -974,10 +1062,15 @@ const FridayListenApp: React.FC = () => {
             <div className={styles['voice-card-row-label']}>Edge voice catalogue</div>
             <select
               className={styles['voice-card-select']}
-              value={currentVoice}
+              value={panelVoice}
               onChange={handleCatalogueVoiceChange}
               aria-label="Edge TTS voice"
             >
+              {!panelVoiceInCatalogue && panelVoice ? (
+                <option value={panelVoice}>
+                  {vm(panelVoice).shortName} — current session
+                </option>
+              ) : null}
               {(edgeVoices as EdgeVoice[]).map((v) => (
                 <option key={v.voice} value={v.voice}>
                   {vm(v.voice).shortName} — {v.lang} {v.gender}
@@ -1027,7 +1120,7 @@ const FridayListenApp: React.FC = () => {
                 </div>
               </div>
             )}
-            {bubbles.map(b => {
+            {displayBubbles.map(b => {
               if (b.type === 'divider') return (
                 <div key={b.id} className={styles['chat-divider']}>
                   <span>{b.text}</span>
@@ -1205,6 +1298,7 @@ const FridayListenApp: React.FC = () => {
         onClose={() => setPersonaModalOpen(false)}
         theme={theme}
         onSaved={refreshPersonaOverrides}
+        scrollToKey={panelPersonaKey !== 'custom' ? panelPersonaKey : undefined}
       />
 
       {/* Windows Notification Panel */}

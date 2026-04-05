@@ -14,14 +14,24 @@ type Props = {
   onClose: () => void;
   theme: 'light' | 'dark';
   onSaved: () => void;
+  /** When opening from a selected session, scroll this roster entry into view. */
+  scrollToKey?: CompanyPersonaKey;
 };
 
-export const PersonaRosterModal: React.FC<Props> = ({ open, onClose, theme, onSaved }) => {
+export const PersonaRosterModal: React.FC<Props> = ({ open, onClose, theme, onSaved, scrollToKey }) => {
   const [draft, setDraft] = useState<Record<string, PersonaOverride>>({});
 
   useEffect(() => {
     if (open) setDraft(loadPersonaOverrides());
   }, [open]);
+
+  useEffect(() => {
+    if (!open || !scrollToKey) return;
+    const t = window.setTimeout(() => {
+      document.getElementById(`persona-roster-card-${scrollToKey}`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }, 80);
+    return () => window.clearTimeout(t);
+  }, [open, scrollToKey]);
 
   if (!open) return null;
 
@@ -80,7 +90,11 @@ export const PersonaRosterModal: React.FC<Props> = ({ open, onClose, theme, onSa
             const titleVal = o.title !== undefined ? o.title : base.title;
             const persVal = o.personality !== undefined ? o.personality : base.personality;
             return (
-              <div key={key} className={styles['persona-modal-card']}>
+              <div
+                key={key}
+                id={`persona-roster-card-${key}`}
+                className={`${styles['persona-modal-card']} ${scrollToKey === key ? styles['persona-modal-card-highlight'] : ''}`}
+              >
                 <div className={styles['persona-modal-card-top']}>
                   <span className={styles['persona-modal-name']}>{base.name}</span>
                   <span className={styles['persona-modal-voice']}>{base.voice}</span>

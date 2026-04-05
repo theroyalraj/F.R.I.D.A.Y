@@ -16,6 +16,8 @@ Env (see .env):
   FRIDAY_TRACKER_QUIET_START / FRIDAY_TRACKER_QUIET_END  optional 24h local hours
   FRIDAY_TRACKER_LISTEN_SEC    mic window after check-in prompt (default 12)
   FRIDAY_TRACKER_CHECKIN_PROMPT optional override for the yes or no question line
+  FRIDAY_TRACKER_SKIP_BRIEFING_IF_COMMIT_WITHIN_SEC  skip the whole check-in when the repo
+      has a commit newer than this many seconds (default 1800 = 30 min). Set 0 to disable.
 
 CLI:
   python scripts/friday-action-tracker.py --once              one cycle then exit
@@ -32,6 +34,9 @@ Env (briefing / cron):
   FRIDAY_BRIEFING_GIT_COMMITS           how many git log lines (default 10)
   FRIDAY_BRIEFING_DONE_TODOS            max completed todos to mention (default 12)
   FRIDAY_TRACKER_SILENT_DEFAULT        no | yes — when mic silence / STT fail (default no: skip briefing)
+  FRIDAY_BRIEFING_SILENT_CRON_WELLNESS  when true, skill-gateway briefing cron may speak a short break or self-care line
+  FRIDAY_BRIEFING_SILENT_CRON_WELLNESS_INTERVAL_SEC  min seconds between those lines (default 1800 = half an hour; 0 = every run)
+  FRIDAY_BRIEFING_FROM_GATEWAY_CRON  set by skill-gateway when spawning the tracker (do not set manually)
 """
 from __future__ import annotations
 
@@ -43,6 +48,7 @@ import io
 import json
 import logging
 import os
+import random
 import re
 import platform
 import subprocess
@@ -101,6 +107,17 @@ def _env_int(key: str, default: int) -> int:
         return default
 
 
+def _env_int_non_negative(key: str, default: int) -> int:
+    """Like _env_int but allows zero (empty env uses default)."""
+    try:
+        raw = os.environ.get(key, "").split("#")[0].strip()
+        if raw == "":
+            return default
+        return max(0, int(raw))
+    except ValueError:
+        return default
+
+
 def _env_float(key: str, default: float) -> float:
     try:
         return float(os.environ.get(key, "").split("#")[0].strip() or default)
@@ -139,6 +156,10 @@ USER_TZ = os.environ.get("FRIDAY_USER_TZ", os.environ.get("TZ", "UTC")).strip() 
 QUIET_START = os.environ.get("FRIDAY_TRACKER_QUIET_START", "").strip()
 QUIET_END = os.environ.get("FRIDAY_TRACKER_QUIET_END", "").strip()
 TRACKER_LISTEN_SEC = max(3.0, _env_float("FRIDAY_TRACKER_LISTEN_SEC", 12.0))
+# Skip Dexter check-in when last git commit is within this many seconds (0 = never skip for this reason).
+SKIP_BRIEFING_IF_COMMIT_WITHIN_SEC = _env_int_non_negative(
+    "FRIDAY_TRACKER_SKIP_BRIEFING_IF_COMMIT_WITHIN_SEC", 1800
+)
 SAMPLE_RATE = 16000
 CHANNELS = 1
 TTS_ACTIVE_FILE = Path(tempfile.gettempdir()) / "friday-tts-active"
@@ -316,27 +337,35 @@ def _prompt_listen_yes_no() -> tuple[str, str]:
     if custom:
         prompt = custom
     else:
-        prompt = (
-            f"Hey {USER_NAME}, time for your fifteen-minute check-in. "
+        tail = (
             f"Want me to read your action plan for today? Say yes or no — I am listening for about {n} seconds. "
             f"If you say nothing, I will assume you are busy and skip it."
         )
+        if SKIP_BRIEFING_IF_COMMIT_WITHIN_SEC > 0:
+            prompt = (
+                f"Hey {USER_NAME}, time for your fifteen-minute check-in. "
+                f"It has been a while since your last commit. "
+                + tail
+            )
+        else:
+            prompt = f"Hey {USER_NAME}, time for your fifteen-minute check-in. " + tail
 
     _wait_for_tts_clear(45.0)
     try:
-        speaker.speak_blocking(
+        # Fire-and-forget TTS, then wait on the shared TTS active marker so the mic opens after playback.
+        speaker.speak(
             prompt,
             priority=True,
             bypass_cursor_defer=True,
             interrupt_music=True,
             use_session_sticky=True,
-            timeout=120.0,
         )
     except Exception as e:
         _log.warning("Check-in speak failed: %s → silent default %s", e, d)
         return (d, "error")
+    time.sleep(0.2)
+    _wait_for_tts_clear(120.0)
     time.sleep(0.35)
-    _wait_for_tts_clear(20.0)
 
     try:
         import numpy as np  # noqa: F401
@@ -367,6 +396,36 @@ def _prompt_listen_yes_no() -> tuple[str, str]:
     _log.info("Heard: %s", text[:120])
     ans = _interpret_yes_no(text)
     return (ans, "heard_yes" if ans == "yes" else "heard_no")
+
+
+def _git_last_commit_unix() -> float | None:
+    """Unix time of HEAD commit, or None if unavailable."""
+    try:
+        p = subprocess.run(
+            ["git", "-C", str(_REPO_ROOT), "log", "-1", "--format=%ct"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if p.returncode != 0:
+            return None
+        raw = (p.stdout or "").strip().splitlines()
+        if not raw:
+            return None
+        return float(raw[0].strip())
+    except Exception as e:
+        _log.debug("git log -1 ct failed: %s", e)
+        return None
+
+
+def _skip_briefing_for_fresh_commit() -> bool:
+    """True when we should skip this cycle because the user committed recently."""
+    if SKIP_BRIEFING_IF_COMMIT_WITHIN_SEC <= 0:
+        return False
+    ts = _git_last_commit_unix()
+    if ts is None:
+        return False
+    return (time.time() - ts) < float(SKIP_BRIEFING_IF_COMMIT_WITHIN_SEC)
 
 
 def _git_recent_commit_summaries() -> list[str]:
@@ -791,6 +850,48 @@ Existing open action titles (do not duplicate):
     return out
 
 
+_SILENT_CRON_WELLNESS_LAST = _REPO_ROOT / ".friday-silent-wellness-last"
+
+_GATEWAY_CRON_WELLNESS_LINES = [
+    "Hey {user}, Dexter on the quiet timer. Take care of yourself. Sip water, rest your eyes, and plan a real break inside the next half hour.",
+    "{user}, quick wellness ping. You have been heads down. Stretch, unclench your jaw, and step away for five minutes when you can.",
+    "{user}, housekeeping only this round. Hydrate, loosen your shoulders, and give yourself a short break before the next half hour is gone.",
+    "Dexter here, {user}. Silent cron reminder. Look after your body and mind. A break soon beats pushing flat out forever.",
+]
+
+
+def _wellness_nudge_eligible(*, gateway_cron: bool) -> bool:
+    """True when this run is gateway silent cron or any skill-gateway briefing cron spawn."""
+    if gateway_cron:
+        return True
+    return _env_bool("FRIDAY_BRIEFING_FROM_GATEWAY_CRON", False)
+
+
+def _maybe_gateway_cron_wellness_nudge(*, gateway_cron: bool) -> None:
+    """Short async TTS for skill-gateway cron (or silent gateway-cron), throttled (default half an hour)."""
+    if not _wellness_nudge_eligible(gateway_cron=gateway_cron):
+        return
+    if not _env_bool("FRIDAY_BRIEFING_SILENT_CRON_WELLNESS", True):
+        return
+    interval = _env_int_non_negative("FRIDAY_BRIEFING_SILENT_CRON_WELLNESS_INTERVAL_SEC", 1800)
+    now = time.time()
+    last = 0.0
+    try:
+        if _SILENT_CRON_WELLNESS_LAST.is_file():
+            last = float((_SILENT_CRON_WELLNESS_LAST.read_text(encoding="utf-8") or "0").strip() or 0.0)
+    except (OSError, ValueError):
+        last = 0.0
+    if interval > 0 and (now - last) < float(interval):
+        return
+    line = random.choice(_GATEWAY_CRON_WELLNESS_LINES).format(user=USER_NAME)
+    print("[action-tracker] briefing-cron wellness nudge (async speak)", flush=True)
+    _speak(line)
+    try:
+        _SILENT_CRON_WELLNESS_LAST.write_text(str(now), encoding="utf-8")
+    except OSError as e:
+        _log.debug("wellness state write failed: %s", e)
+
+
 def _speak(text: str) -> None:
     if not text or not _SPEAK_SCRIPT.exists():
         print(f"[dexter] would speak: {text[:120]}", flush=True)
@@ -1181,6 +1282,14 @@ def run_briefing_cycle(conn, *, gateway_cron: bool = False) -> None:
         print("[action-tracker] quiet hours — skipping check-in", flush=True)
         return
 
+    if _skip_briefing_for_fresh_commit():
+        print(
+            f"[action-tracker] commit within last {SKIP_BRIEFING_IF_COMMIT_WITHIN_SEC}s — skipping check-in",
+            flush=True,
+        )
+        _maybe_gateway_cron_wellness_nudge(gateway_cron=gateway_cron)
+        return
+
     meta = "cron"
     if gateway_cron:
         answer = "yes"
@@ -1207,6 +1316,7 @@ def run_briefing_cycle(conn, *, gateway_cron: bool = False) -> None:
             db_bump_reminders(cur, ids)
         conn.commit()
     print(f"[action-tracker] briefing ({len(actions)} actions, {len(todos)} todos)", flush=True)
+    _maybe_gateway_cron_wellness_nudge(gateway_cron=gateway_cron)
 
 
 def main() -> None:

@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import express from 'express';
 import dotenv from 'dotenv';
 import pinoHttp from 'pino-http';
@@ -24,7 +24,13 @@ import {
   isVoiceBlocked,
   restoreSessionVoiceFromRedis,
 } from './edgeTts.js';
-import { getAllVoiceContexts } from './voiceRedis.js';
+import {
+  getAllVoiceContexts,
+  getTtsAuditEntries,
+  getWatcherOutputHealth,
+  setVoiceContext,
+  setWatcherOutputHealth,
+} from './voiceRedis.js';
 import { openAiTtsApiKey, openAiTtsConfigured, synthesizeOpenAiMp3 } from './openaiTts.js';
 import { createPerceptionRouter } from './perceptionRoutes.js';
 import { createSettingsRouter } from './settingsRoutes.js';
@@ -45,7 +51,8 @@ import { buildMusicPlaySsePayload } from './musicVisualSse.js';
 import { createAuthRouter } from './authRoutes.js';
 import { createOrganizationRouter } from './organizationRoutes.js';
 import { authJwtOrAgentSecret } from './authMiddleware.js';
-import { ensureAuthSchema, ensureAiGenerationLogSchema } from './ensureAuthSchema.js';
+import { ensureAuthSchema, ensureAiGenerationLogSchema, ensureLearningSchema } from './ensureAuthSchema.js';
+import { createLearningRouter } from './learningRoutes.js';
 import { registerDeferredOpenRouterEmitter } from './deferredOpenRouter.js';
 import { refreshModelPool } from './openRouterModelPool.js';
 import {
@@ -89,6 +96,27 @@ function gatewayBaseUrl() {
 
 // ── Friday startup voice ──────────────────────────────────────────────────────
 const SPEAK_SCRIPT = path.resolve(__dirname, '../../skill-gateway/scripts/friday-speak.py');
+const REPO_ROOT = path.resolve(__dirname, '../..');
+/** Run as script — prints one JSON line (default output mute + audioDisabled). */
+const OUTPUT_HEALTH_CLI = path.resolve(__dirname, '../../skill-gateway/scripts/friday_win_audio.py');
+
+function probeWatcherOutputHealth() {
+  try {
+    const r = spawnSync('python', [OUTPUT_HEALTH_CLI], {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+      timeout: 5000,
+      windowsHide: true,
+    });
+    if (r.error || r.status !== 0) return null;
+    const lines = (r.stdout || '').trim().split(/\r?\n/).filter(Boolean);
+    const line = lines[lines.length - 1];
+    if (!line) return null;
+    return JSON.parse(line);
+  } catch {
+    return null;
+  }
+}
 
 function pcAgentStartupGreetingPhrase() {
   const n = (process.env.FRIDAY_USER_NAME || 'Raj').trim() || 'Raj';
@@ -285,12 +313,14 @@ function ttsProviderLabel() {
   return 'browser';
 }
 
-function sendVoicePing(_req, res) {
+async function sendVoicePing(_req, res) {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('X-Friday-Ping', '1');
   res.type('application/json');
   const provider = ttsProviderLabel();
+  const watcherOutput = probeWatcherOutputHealth();
+  if (watcherOutput) await setWatcherOutputHealth(watcherOutput);
   res.status(200).send(
     JSON.stringify({
       ok: true,
@@ -306,11 +336,14 @@ function sendVoicePing(_req, res) {
         openai: openAiTtsConfigured(),
         edgeVoice: edgeTtsConfigured() ? edgeTtsVoice() : undefined,
       },
+      watcherOutput: watcherOutput || null,
     }),
   );
 }
 
-voiceRouter.get('/ping', sendVoicePing);
+voiceRouter.get('/ping', (req, res, next) => {
+  Promise.resolve(sendVoicePing(req, res)).catch(next);
+});
 voiceRouter.head('/ping', (_req, res) => {
   res.setHeader('X-Friday-Ping', '1');
   res.setHeader('Cache-Control', 'no-store');
@@ -482,6 +515,7 @@ voiceRouter.post('/speak-async', async (req, res) => {
       FRIDAY_TTS_DEVICE: process.env.FRIDAY_TTS_DEVICE || 'default',
       FRIDAY_TTS_PRIORITY: '1',
       FRIDAY_TTS_BYPASS_CURSOR_DEFER: 'true',
+      FRIDAY_TTS_EMIT_EVENT: '0',
       ...delivery,
     },
     detached: true,
@@ -647,6 +681,17 @@ voiceRouter.post('/event', (req, res) => {
   res.json({ ok: true, clients: sseClients.size });
 });
 
+/** TTS audit trail from Redis (friday-speak.py LPUSH). Newest first. */
+voiceRouter.get('/tts-audit', async (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    const entries = await getTtsAuditEntries(50);
+    res.json({ ok: true, entries });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: String(err.message || err) });
+  }
+});
+
 /** Return curated Edge TTS voice catalogue + current active voice. */
 voiceRouter.get('/voices', (_req, res) => {
   res.setHeader('Cache-Control', 'no-store');
@@ -674,7 +719,10 @@ voiceRouter.get('/status', async (_req, res) => {
 voiceRouter.get('/sessions', async (_req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   try {
-    const contexts = await getAllVoiceContexts();
+    const [contexts, watcherOutputRedis] = await Promise.all([
+      getAllVoiceContexts(),
+      getWatcherOutputHealth(),
+    ]);
     // Enrich sessions with metadata
     const sessions = contexts.map((ctx) => {
       const voice = String(ctx.voice || '').toLowerCase();
@@ -718,15 +766,15 @@ voiceRouter.get('/sessions', async (_req, res) => {
       };
     });
 
-    res.json({ ok: true, sessions });
+    res.json({ ok: true, sessions, watcherOutput: watcherOutputRedis });
   } catch (err) {
     res.status(500).json({ ok: false, error: String(err.message || err) });
   }
 });
 
-/** Set the active Edge TTS voice for this server session (persisted to Redis). */
-voiceRouter.post('/set-voice', (req, res) => {
-  const { voice } = req.body || {};
+/** Set Edge TTS voice for the main Listen session (api) or a specific Redis voice context (e.g. cursor:subagent). */
+voiceRouter.post('/set-voice', async (req, res) => {
+  const { voice, context: ctxRaw } = req.body || {};
   if (!voice || typeof voice !== 'string') {
     return res.status(400).json({ error: 'Missing voice name in body: { "voice": "en-US-AvaMultilingualNeural" }' });
   }
@@ -736,6 +784,16 @@ voiceRouter.post('/set-voice', (req, res) => {
       error: 'Voice is blocked (FRIDAY_TTS_VOICE_BLOCK). Choose another from GET /voice/voices.',
       blockedVoices: [...getVoiceBlockSet()],
     });
+  }
+  const ctx = ctxRaw != null && typeof ctxRaw === 'string' ? ctxRaw.trim() : '';
+  if (ctx && ctx !== 'api') {
+    try {
+      await setVoiceContext(ctx, trimmed);
+      broadcastEvent('voice_changed', { voice: trimmed, context: ctx });
+      return res.json({ ok: true, active: trimmed, context: ctx });
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: String(err && err.message ? err.message : err) });
+    }
   }
   setSessionVoice(trimmed);
   const active = edgeTtsVoice();
@@ -939,6 +997,8 @@ app.get('/jarvis', (_req, res) => {
   res.redirect(302, '/friday');
 });
 
+app.use('/learning', authJwtOrAgentSecret(SECRET), createLearningRouter());
+
 app.post('/task', authTaskOrUser, async (req, res, next) => {
   try {
     const orgId = req.user?.orgId ?? null;
@@ -1024,6 +1084,7 @@ async function bootstrap() {
   }
 
   await ensureAiGenerationLogSchema(rootLogger);
+  await ensureLearningSchema(rootLogger);
 
   server = app.listen(PORT, BIND, () => {
     // Jarvis-style startup banner

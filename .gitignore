@@ -15,4 +15,5 @@ data/*.db
 data/*.db-*
 data/perception/
 .session-voice.json
+.friday-silent-wellness-last
 pc-agent/tmp-signup-body.json

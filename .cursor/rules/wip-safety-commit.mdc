@@ -7,6 +7,8 @@ alwaysApply: true
 
 Before making any change that could break existing behaviour **or** introduces a new feature, commit all current work to the `wip` branch and push it first.
 
+**Prerequisite:** When you run the WIP commit flow, follow **`pre-commit-quality-scan.mdc`** first: launch a **new readonly subagent** for a security, quality, and standards scan, then proceed with staging and commit below.
+
 ## When to trigger
 
 Commit to `wip` before:

@@ -113,7 +113,7 @@ export function startBriefingCron(log) {
       );
       const child = spawn(py, args, {
         cwd: REPO_ROOT,
-        env: { ...process.env },
+        env: { ...process.env, FRIDAY_BRIEFING_FROM_GATEWAY_CRON: '1' },
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe'],
       });

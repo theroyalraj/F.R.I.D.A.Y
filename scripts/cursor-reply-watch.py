@@ -29,6 +29,11 @@ Optional:
   .session-voice.json cursor_reply_voice; else Sentinel persona (OPENCLAW_SENTINEL_*).
   CURSOR_TRANSCRIPTS_DIR — override path to agent-transcripts
 
+Windows default output (pycaw): UI + Redis friday:voice:watcher:output_health expose ``muted`` and
+``audioDisabled`` (device disabled / unplugged / no default — not the same as mute).
+  FRIDAY_CURSOR_WATCHER_SKIP_IF_OUTPUT_DISABLED — default true: skip Sentinel TTS when output unusable
+  FRIDAY_CURSOR_WATCHER_SKIP_IF_MUTED — default false: also skip when the default device is muted
+
 Perf logging (compare with cursor-grpc-watch): when FRIDAY_CURSOR_GRPC_LOG is on (default), prints
   [JSONL:t0] … [JSONL:t4_tts_fire] with perf_counter deltas from the first fs event for this debounce burst.
 
@@ -121,6 +126,21 @@ from thinking_openers import pick_thinking_opener
 
 _PICK_SCRIPT = _SKILL_SCRIPTS / "pick-session-voice.py"
 _SPEAK_SCRIPT = _REPO_ROOT / "skill-gateway" / "scripts" / "friday-speak.py"
+
+
+def _watcher_tts_gated() -> bool:
+    """Skip Sentinel TTS when default playback is disabled (and optionally muted). Updates Redis."""
+    try:
+        from friday_output_health import watcher_should_skip_tts
+
+        skip, reason = watcher_should_skip_tts()
+        if skip:
+            print(f"cursor-reply-watch: skip TTS — {reason}", flush=True)
+            return True
+    except Exception:
+        pass
+    return False
+
 
 # Legacy poll tuning (unused when watchdog is active; kept for reference / tooling).
 POLL_SEC = 0.35
@@ -515,6 +535,8 @@ def strip_to_prose(raw: str) -> str:
 
 
 def _speak_main(text: str, *, jsonl_perf_t0: float | None = None) -> None:
+    if _watcher_tts_gated():
+        return
     from friday_speaker import speaker
 
     if jsonl_perf_t0 is not None and _cursor_perf_log_enabled():
@@ -554,6 +576,8 @@ def _speak_main(text: str, *, jsonl_perf_t0: float | None = None) -> None:
 
 
 def _speak_subagent(text: str, *, jsonl_perf_t0: float | None = None) -> None:
+    if _watcher_tts_gated():
+        return
     from friday_speaker import speaker
 
     if jsonl_perf_t0 is not None and _cursor_perf_log_enabled():
@@ -680,6 +704,8 @@ def _speak_thinking_paced(
     pass the **current total** character length of the block so adaptive rate stays slow
     enough; defaults to ``len(full_text)`` (this batch only).
     """
+    if _watcher_tts_gated():
+        return
     from friday_speaker import speaker, thinking_tts_rate_for_length
 
     max_chars = int(_env_float("FRIDAY_CURSOR_THINKING_MAX_CHUNK_CHARS", 520))

@@ -17,7 +17,10 @@ import { getCachedCompanyContextString } from './companyDb.js';
 import { getModelCascade, isClaudeFallbackEnabled, refreshModelPool } from './openRouterModelPool.js';
 import { sanitizeConversationTail, flattenConversationForSingleShot } from './chatContext.js';
 import { buildListenGmailContextBlock, listenGmailContextEnabledForSource } from './listenGmailContext.js';
-import { tryReadAiCaches, persistAiGeneration } from './aiTaskCache.js';
+import { tryReadAiCaches, persistAiGeneration, shouldBypassAiCache } from './aiTaskCache.js';
+import { upsertConversationSession } from './learningSessionDb.js';
+import { buildLearningContextBlock } from './learningRetrieval.js';
+import { exposeGenerationIdInResponses, isLearningEnabled } from './learningEnv.js';
 import { getVoiceAgentPersonasMerged } from './voiceAgentPersona.js';
 import {
   resolveAssignedPersonaKey,
@@ -222,6 +225,64 @@ export async function runTask(body, reqLog, options = {}) {
 
   const systemForCache = buildVoiceSystem({ speakStyleExtra, companyContext, personaInstruction });
 
+  let conversationSessionId = null;
+  if (isLearningEnabled()) {
+    const cskRaw =
+      typeof body?.clientSessionId === 'string'
+        ? body.clientSessionId
+        : typeof body?.conversationSessionId === 'string'
+          ? body.conversationSessionId
+          : '';
+    const csk = cskRaw.trim();
+    if (csk) {
+      conversationSessionId = await upsertConversationSession({
+        userId: userId ?? '',
+        orgId: options.orgId ?? null,
+        source: src,
+        clientSessionKey: csk,
+        log: reqLog,
+      });
+    }
+  }
+
+  const tailDigest = crypto
+    .createHash('sha256')
+    .update(
+      JSON.stringify({
+        n: tailOk.length,
+        lens: tailOk.map((x) => String(x.content || '').length),
+      }),
+      'utf8',
+    )
+    .digest('hex');
+
+  let learningBlock = '';
+  if (isLearningEnabled() && !shouldBypassAiCache(body, src)) {
+    learningBlock = await buildLearningContextBlock({
+      shotPrompt,
+      systemForCache,
+      source: src,
+      log: reqLog,
+    });
+  }
+
+  /** @type {Record<string, unknown>} */
+  const learningExtraMetadata = {
+    ...(correlationId != null ? { correlationId: String(correlationId).slice(0, 200) } : {}),
+    ...(conversationSessionId ? { conversationSessionId } : {}),
+    tailDigest,
+    ...(assignedFast ? { assignedFast: true } : {}),
+    ...(learningBlock ? { learningInjection: learningBlock.slice(0, 2000) } : {}),
+  };
+
+  function generationJsonExtras(genId) {
+    const o = {};
+    if (exposeGenerationIdInResponses() && genId) o.generationLogId = genId;
+    return o;
+  }
+
+  const systemWithLearning = learningBlock ? `${systemForCache}\n\n${learningBlock}` : systemForCache;
+
   /**
    * @param {{ summary: string, mode: string, model: string, provider?: string, fromCache: 'exact' | 'semantic' }} cached
    * @param {string} modelKey
@@ -229,7 +290,7 @@ export async function runTask(body, reqLog, options = {}) {
    */
   async function finishFromCache(cached, modelKey, systemStr = systemForCache) {
     const latencyMs = Date.now() - t0;
-    await persistAiGeneration({
+    const genId = await persistAiGeneration({
       prompt: shotPrompt,
       system: systemStr,
       modelKey,
@@ -243,6 +304,7 @@ export async function runTask(body, reqLog, options = {}) {
       userId: userId ?? null,
       log: reqLog,
       cacheHitType: cached.fromCache,
+      extraMetadata: learningExtraMetadata,
     });
     reqLog.info({ mode: cached.mode, fromCache: cached.fromCache, ms: latencyMs }, 'task done (cache)');
     return {
@@ -255,6 +317,7 @@ export async function runTask(body, reqLog, options = {}) {
         summary: cached.summary,
         cacheHit: cached.fromCache,
         ...replyExtras,
+        ...generationJsonExtras(genId),
       },
     };
   }
@@ -290,6 +353,7 @@ export async function runTask(body, reqLog, options = {}) {
         companyContext,
         personaInstruction,
         priorTurns: tailOk,
+        learningContext: learningBlock || undefined,
       });
       if (result.needsOpenRouterKey) {
         reqLog.info({ mode: 'api', taskRoute: 'assigned' }, 'assigned: anthropic limited, no OpenRouter key');
@@ -313,6 +377,7 @@ export async function runTask(body, reqLog, options = {}) {
           source: src,
           orgId: options.orgId ?? null,
           userId: userId ?? null,
+          extraMetadata: learningExtraMetadata,
         });
         return {
           status: 200,
@@ -345,7 +410,7 @@ export async function runTask(body, reqLog, options = {}) {
         };
       }
       if (result.ok && (result.text || '').trim()) {
-        await persistAiGeneration({
+        const genId = await persistAiGeneration({
           prompt: shotPrompt,
           system: systemForCache,
           modelKey: apiModelKey,
@@ -358,6 +423,7 @@ export async function runTask(body, reqLog, options = {}) {
           orgId: options.orgId ?? null,
           userId: userId ?? null,
           log: reqLog,
+          extraMetadata: learningExtraMetadata,
         });
         return {
           status: 200,
@@ -369,6 +435,7 @@ export async function runTask(body, reqLog, options = {}) {
             summary: result.text,
             taskRoute: 'assigned-claude',
             ...replyExtras,
+            ...generationJsonExtras(genId),
           },
         };
       }
@@ -389,7 +456,7 @@ export async function runTask(body, reqLog, options = {}) {
     );
 
     if (cascade.length > 0) {
-      const system = systemForCache;
+      const system = systemWithLearning;
       const orFreeModelKey = `or-free:${cascade.join('|')}`;
       const cachedOr = await tryReadAiCaches({
         prompt: shotPrompt,
@@ -414,7 +481,7 @@ export async function runTask(body, reqLog, options = {}) {
           { mode: 'openrouter', ok: true, ms: result.ms, model: result.model, attempts: result.attempts },
           'openrouter cascade done',
         );
-        await persistAiGeneration({
+        const genOr = await persistAiGeneration({
           prompt: shotPrompt,
           system: systemForCache,
           modelKey: orFreeModelKey,
@@ -427,6 +494,7 @@ export async function runTask(body, reqLog, options = {}) {
           orgId: options.orgId ?? null,
           userId: userId ?? null,
           log: reqLog,
+          extraMetadata: learningExtraMetadata,
         });
         return {
           status: 200,
@@ -438,6 +506,7 @@ export async function runTask(body, reqLog, options = {}) {
             summary: result.text,
             taskRoute: assignedFast ? 'assigned-openrouter' : 'openrouter',
             ...replyExtras,
+            ...generationJsonExtras(genOr),
           },
         };
       }
@@ -473,13 +542,14 @@ export async function runTask(body, reqLog, options = {}) {
           companyContext,
           personaInstruction,
           priorTurns: tailOk,
+          learningContext: learningBlock || undefined,
         });
         if (opusResult.ok && (opusResult.text || '').trim()) {
           reqLog.info(
             { mode: 'api', model: opusResult.model, ms: opusResult.ms, via: 'claude-fallback' },
             'Claude Opus fallback succeeded',
           );
-          await persistAiGeneration({
+          const genOpus = await persistAiGeneration({
             prompt: shotPrompt,
             system: systemForCache,
             modelKey: opusFallbackKey,
@@ -492,6 +562,7 @@ export async function runTask(body, reqLog, options = {}) {
             orgId: options.orgId ?? null,
             userId: userId ?? null,
             log: reqLog,
+            extraMetadata: learningExtraMetadata,
           });
           return {
             status: 200,
@@ -503,6 +574,7 @@ export async function runTask(body, reqLog, options = {}) {
               summary: opusResult.text,
               taskRoute: assignedFast ? 'assigned-openrouter-fallback' : 'openrouter-fallback',
               ...replyExtras,
+              ...generationJsonExtras(genOpus),
             },
           };
         }
@@ -513,6 +585,7 @@ export async function runTask(body, reqLog, options = {}) {
             source: src,
             orgId: options.orgId ?? null,
             userId: userId ?? null,
+            extraMetadata: learningExtraMetadata,
           });
           return {
             status: 200,
@@ -570,6 +643,7 @@ export async function runTask(body, reqLog, options = {}) {
         companyContext,
         personaInstruction,
         priorTurns: tailOk,
+        learningContext: learningBlock || undefined,
       });
       if (result.needsOpenRouterKey) {
         reqLog.info({ mode: 'api' }, 'task done — anthropic limited, openrouter key missing');
@@ -592,6 +666,7 @@ export async function runTask(body, reqLog, options = {}) {
           source: src,
           orgId: options.orgId ?? null,
           userId: userId ?? null,
+          extraMetadata: learningExtraMetadata,
         });
         reqLog.info(
           {
@@ -633,8 +708,9 @@ export async function runTask(body, reqLog, options = {}) {
         };
       }
       reqLog.info({ mode: 'api', ok: result.ok, ms: result.ms, model: result.model }, 'task done');
+      let genFast = null;
       if (result.ok && (result.text || '').trim()) {
-        await persistAiGeneration({
+        genFast = await persistAiGeneration({
           prompt: shotPrompt,
           system: systemForCache,
           modelKey: apiModelKey,
@@ -647,6 +723,7 @@ export async function runTask(body, reqLog, options = {}) {
           orgId: options.orgId ?? null,
           userId: userId ?? null,
           log: reqLog,
+          extraMetadata: learningExtraMetadata,
         });
       }
       return {
@@ -659,6 +736,7 @@ export async function runTask(body, reqLog, options = {}) {
           summary: result.text,
           taskRoute: 'claude-fast',
           ...replyExtras,
+          ...generationJsonExtras(genFast),
         },
       };
     } catch (e) {
@@ -701,8 +779,9 @@ export async function runTask(body, reqLog, options = {}) {
     },
     'task done',
   );
+  let genCli = null;
   if (claude.ok && summary && summary !== 'No output') {
-    await persistAiGeneration({
+    genCli = await persistAiGeneration({
       prompt: shotPrompt,
       system: cliSystemStub,
       modelKey: cliModelKey,
@@ -715,6 +794,7 @@ export async function runTask(body, reqLog, options = {}) {
       orgId: options.orgId ?? null,
       userId: userId ?? null,
       log: reqLog,
+      extraMetadata: learningExtraMetadata,
     });
   }
   return {
@@ -726,6 +806,7 @@ export async function runTask(body, reqLog, options = {}) {
       correlationId,
       summary,
       stderr: claude.err || undefined,
+      ...generationJsonExtras(genCli),
     },
   };
 }

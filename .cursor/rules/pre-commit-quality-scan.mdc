@@ -1,0 +1,38 @@
+---
+description: Launch a fresh subagent for security, quality, and standards scan before every git commit
+alwaysApply: true
+---
+
+# Pre-commit quality and security scan (subagent)
+
+Before **any** `git commit` (including WIP checkpoints on `wip`, feature commits, and amend), **always** spawn a **new** Task subagent in a **separate turn or the same message batch before `git commit`**, so another model pass does a full-repo read pass the parent may have skipped.
+
+## When this applies
+
+- **Every commit** you are about to make, unless it is explicitly trivial (see exceptions).
+
+## How to run the scan
+
+1. Use the **Task** tool with a **new** subagent (do not reuse a prior subagent id).
+2. Prefer **`subagent_type: generalPurpose`** (or **`explore`** for broad codebase search) with **`readonly: true`** so the scan cannot mutate files; the **parent** applies fixes after review.
+3. **Prompt the subagent** to report back in structured prose (not code dumps):  
+   - **Security**: secrets in repo, unsafe defaults, auth bypass, injection (SQL, shell, template), SSRF, path traversal, insecure deserialization, weak crypto, exposed internal URLs, logging of sensitive data.  
+   - **Dependencies**: surface obvious risk areas (e.g. suggest `npm audit` / `pip audit` findings as *recommendations* for the parent to run if needed).  
+   - **Practices**: error handling, resource cleanup, race conditions, env handling, consistent patterns with surrounding code.  
+   - **Standards**: alignment with common industry baselines for the stack (Node, Python, Docker, etc.) and this repo’s existing conventions.
+
+4. **Parent obligation**: Read the subagent’s summary; **fix blocking issues** or **note in the commit message** why something is deferred. **Do not commit** if the scan reports a critical security issue you have not addressed.
+
+## Order with WIP safety
+
+If **both** this rule and **WIP Safety Commit** apply: **subagent scan first**, then stage, commit, and push to `wip` as documented in `wip-safety-commit.mdc`.
+
+## Exceptions (no subagent required)
+
+- **Typo / comment-only** changes.  
+- **Pure `.env` value** edits (no code).  
+- **Only** updating Cursor rules under `.cursor/rules/` with no code change.
+
+## Narration
+
+Follow **`cursor-agent-narration.mdc`**: if Cursor narration is off, skip `friday-speak` for scan lifecycle; if on, you may briefly announce spinning up the pre-commit scan (one short line).

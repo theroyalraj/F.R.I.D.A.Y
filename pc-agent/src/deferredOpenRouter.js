@@ -27,7 +27,7 @@ export function yieldEventLoopTurn() {
 
 /**
  * Optional metadata for AI cache + Postgres log after deferred completion.
- * @typedef {{ modelKey: string, mode?: string, source?: string, orgId?: string|null, userId?: string|null }} DeferredAiCacheMeta
+ * @typedef {{ modelKey: string, mode?: string, source?: string, orgId?: string|null, userId?: string|null, extraMetadata?: Record<string, unknown> }} DeferredAiCacheMeta
  */
 
 /**
@@ -76,6 +76,7 @@ export function scheduleOpenRouterFallback(ctx, cacheMeta = undefined) {
               orgId: cacheMeta.orgId,
               userId: cacheMeta.userId,
               log: ctx.log,
+              extraMetadata: cacheMeta.extraMetadata,
             });
           } catch (e) {
             ctx.log?.warn({ err: String(e?.message || e).slice(0, 200) }, 'deferred OpenRouter: cache persist failed');

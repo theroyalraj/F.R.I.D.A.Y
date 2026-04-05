@@ -288,6 +288,8 @@
       width: 36%; height: 26%;
       background: radial-gradient(ellipse, rgba(255,255,255,0.18) 0%, transparent 70%);
       border-radius: 50%;
+      z-index: 1;
+      pointer-events: none;
     }
     .orb-scene[data-state="listening"] .orb-core {
       box-shadow: 0 0 90px rgba(56,217,255,0.32), 0 0 170px rgba(56,217,255,0.14), inset 0 0 65px rgba(56,217,255,0.12);
@@ -382,8 +384,80 @@
       font-size: 0.59rem; letter-spacing: 0.16em;
       text-transform: uppercase; color: var(--muted);
       margin-bottom: 0.3rem; font-weight: 600;
+      display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;
     }
+    .msg-dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      flex-shrink: 0; box-shadow: 0 0 8px currentColor;
+    }
+    .msg-emoji { font-size: 0.75rem; line-height: 1; }
     .msg-text { white-space: pre-wrap; word-break: break-word; }
+
+    .persona-card-pill {
+      margin-top: 0.35rem;
+      font-size: 0.68rem; letter-spacing: 0.06em;
+      padding: 0.38rem 0.85rem; border-radius: 999px;
+      border: 1px solid var(--stroke);
+      background: var(--glass); backdrop-filter: blur(12px);
+      color: var(--text); text-align: center;
+      max-width: 22rem; line-height: 1.45;
+      opacity: 0; transform: translateY(6px);
+      transition: opacity 0.35s ease, transform 0.35s ease;
+    }
+    .persona-card-pill.visible { opacity: 1; transform: translateY(0); }
+
+    .orb-face-layer {
+      position: absolute; inset: 0; z-index: 4;
+      display: flex; align-items: center; justify-content: center;
+      pointer-events: none;
+      transform-style: preserve-3d;
+    }
+    .persona-face-svg {
+      width: 72%; height: 72%;
+      max-width: 168px; max-height: 168px;
+      filter: drop-shadow(0 0 12px rgba(56,217,255,0.25));
+    }
+    .pf-mouth { fill: none; stroke: rgba(30,40,80,0.85); stroke-width: 2.2; stroke-linecap: round; }
+    body.light .pf-mouth { stroke: rgba(15,30,70,0.75); }
+    .pf-eye { fill: rgba(25,35,70,0.88); }
+    body.light .pf-eye { fill: rgba(15,25,60,0.9); }
+    .pf-wave {
+      fill: var(--persona-color, var(--cyan));
+      opacity: 0.35;
+    }
+    .orb-scene[data-state="speaking"] .pf-wave { opacity: 0.55; }
+
+    .tts-audit-panel {
+      width: 100%; max-width: 30rem;
+      border-radius: 14px; border: 1px solid var(--stroke);
+      background: rgba(8,14,36,0.55); backdrop-filter: blur(12px);
+      margin-top: 0.5rem; overflow: hidden;
+    }
+    body.light .tts-audit-panel { background: rgba(255,255,255,0.72); }
+    .tts-audit-toggle {
+      width: 100%; padding: 0.55rem 0.85rem;
+      background: none; border: none; cursor: pointer;
+      font-family: inherit; font-size: 0.62rem; letter-spacing: 0.14em;
+      text-transform: uppercase; color: var(--muted);
+      text-align: left; display: flex; justify-content: space-between; align-items: center;
+    }
+    .tts-audit-toggle:hover { color: var(--text); }
+    .tts-audit-body {
+      max-height: 0; overflow: hidden;
+      transition: max-height 0.35s cubic-bezier(0.4,0,0.2,1);
+    }
+    .tts-audit-body.open { max-height: 280px; }
+    .tts-audit-inner {
+      padding: 0 0.75rem 0.75rem;
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 0.62rem; line-height: 1.45;
+      color: var(--muted);
+      max-height: 240px; overflow-y: auto;
+    }
+    .tts-audit-row { padding: 0.22rem 0; border-bottom: 1px solid var(--stroke); }
+    .tts-audit-row:last-child { border-bottom: none; }
+    .tts-audit-row.interrupted { color: var(--amber); }
+    .tts-audit-row.overlap { color: var(--danger); font-weight: 600; }
 
     /* ── CONTROL BUTTONS ─────────────────────────────────────── */
     .control-row {
@@ -441,7 +515,7 @@
       overflow: hidden; max-height: 0;
       transition: max-height 0.38s cubic-bezier(0.4,0,0.2,1);
     }
-    .settings-body.open { max-height: 420px; }
+    .settings-body.open { max-height: 920px; }
     .settings-inner {
       padding: 0 1rem 1rem;
       display: flex; flex-direction: column; gap: 0.6rem;
@@ -632,7 +706,7 @@
   -->
   <script type="module">
   import {
-    createElement as h, useState, useEffect, useRef, useLayoutEffect
+    createElement as h, useState, useEffect, useRef, useLayoutEffect, useMemo
   } from 'https://esm.sh/react@18.2.0';
   import { createRoot } from 'https://esm.sh/react-dom@18.2.0/client?deps=react@18.2.0';
   import htm from 'https://esm.sh/htm@3.1.1?deps=react@18.2.0';
@@ -715,10 +789,50 @@
     return t || 'Done.';
   }
 
+  const PERSONA_BY_VOICE = {
+    'en-US-AvaMultilingualNeural': { name: 'Jarvis', role: 'Chief of Staff', emoji: '✦', color: '#c084fc' },
+    'en-US-GuyNeural': { name: 'Argus', role: 'VP, Security', emoji: '🛡', color: '#34d399' },
+    'en-GB-SoniaNeural': { name: 'Nova', role: 'Communications', emoji: '📬', color: '#e879f9' },
+    'en-US-AndrewMultilingualNeural': { name: 'Sage', role: 'Research', emoji: '🔬', color: '#94a3b8' },
+    'en-US-EricNeural': { name: 'Dexter', role: 'Engineering', emoji: '⚙', color: '#fbbf24' },
+    'en-US-BrianMultilingualNeural': { name: 'Maestro', role: 'Operations', emoji: '🏠', color: '#a8a29e' },
+    'en-US-MichelleNeural': { name: 'Echo', role: 'Presence', emoji: '✨', color: '#f472b6' },
+    'en-US-JennyNeural': { name: 'Harper', role: 'Assistant', emoji: '📌', color: '#fb923c' },
+    'en-IE-ConnorNeural': { name: 'Sentinel', role: 'Composer TTS', emoji: '📧', color: '#7dd3fc' },
+    'hi-IN-MadhurNeural': { name: 'Jarvis', role: 'Chief of Staff', emoji: '✦', color: '#c084fc' },
+  };
+  const PERSONA_BY_KEY = {
+    jarvis: { name: 'Jarvis', role: 'Chief of Staff', emoji: '✦', color: '#c084fc' },
+    argus: { name: 'Argus', role: 'VP, Security', emoji: '🛡', color: '#34d399' },
+    nova: { name: 'Nova', role: 'Communications', emoji: '📬', color: '#e879f9' },
+    sage: { name: 'Sage', role: 'Research', emoji: '🔬', color: '#94a3b8' },
+    dexter: { name: 'Dexter', role: 'Engineering', emoji: '⚙', color: '#fbbf24' },
+    maestro: { name: 'Maestro', role: 'Operations', emoji: '🏠', color: '#a8a29e' },
+    echo: { name: 'Echo', role: 'Presence', emoji: '✨', color: '#f472b6' },
+    harper: { name: 'Harper', role: 'Assistant', emoji: '📌', color: '#fb923c' },
+    sentinel: { name: 'Sentinel', role: 'Composer TTS', emoji: '📧', color: '#7dd3fc' },
+    atlas: { name: 'Atlas', role: 'Listen', emoji: '👂', color: '#38bdf8' },
+  };
+
+  function resolvePersonaLabel(voiceOrKey, session) {
+    const sk = (session || '').toLowerCase().trim();
+    const vk = (voiceOrKey || '').trim();
+    if (vk) {
+      const byK = PERSONA_BY_KEY[vk.toLowerCase()];
+      if (byK) return { ...byK };
+      const byV = PERSONA_BY_VOICE[vk];
+      if (byV) return { ...byV };
+    }
+    if (sk === 'subagent') return { name: 'Subagent', role: 'Task runner', emoji: '◆', color: '#f472b6' };
+    if (sk === 'cursor-reply') return { name: 'Sentinel', role: 'Composer TTS', emoji: '📧', color: '#7dd3fc' };
+    if (sk === 'thinking') return { name: 'Sage', role: 'Thinking', emoji: '💭', color: '#94a3b8' };
+    return null;
+  }
+
   /* ══════════════════════════════════════════════════════════
      MessageBubble — springs in with anime.js on mount
   ══════════════════════════════════════════════════════════ */
-  function MessageBubble({ role, text }) {
+  function MessageBubble({ role, text, persona }) {
     const ref = useRef(null);
     useEffect(() => {
       if (!ref.current) return;
@@ -731,11 +845,138 @@
         duration: 480,
       });
     }, []);
+    const tag = role === 'you'
+      ? 'You'
+      : (persona ? `${persona.name}` : 'Friday');
     return html`
       <div ref=${ref} className=${'msg-bubble ' + role} style=${{ opacity: 0 }}>
-        <div className="msg-tag">${role === 'you' ? 'You' : 'Friday'}</div>
+        <div className="msg-tag">
+          ${persona && role !== 'you' && html`<span className="msg-emoji">${persona.emoji}</span>`}
+          <span>${tag}</span>
+          ${persona && persona.color && role !== 'you' && html`<span className="msg-dot" style=${{ background: persona.color }} />`}
+        </div>
         <div className="msg-text">${text}</div>
       </div>
+    `;
+  }
+
+  /* ══════════════════════════════════════════════════════════
+     PersonaFace — SVG inside orb (lip sync + waveform)
+  ══════════════════════════════════════════════════════════ */
+  function PersonaFace({ state, persona }) {
+    const mouthWrapRef = useRef(null);
+    const waveRefs = useRef([]);
+    const eyeLRef = useRef(null);
+    const eyeRRef = useRef(null);
+    const color = (persona && persona.color) || '#38d9ff';
+    const gradId = useMemo(
+      () => `pfG${(typeof crypto !== 'undefined' && crypto.randomUUID
+        ? crypto.randomUUID().replace(/-/g, '').slice(0, 12)
+        : String(Math.random()).slice(2, 14))}`,
+      [],
+    );
+
+    useEffect(() => {
+      const w = waveRefs.current.filter(Boolean);
+      w.forEach((el, i) => {
+        if (!el) return;
+        anime.remove(el);
+        if (state === 'speaking') {
+          anime({
+            targets: el,
+            height: [
+              { value: 3 + (i % 3) * 2 },
+              { value: 10 + (i % 4) * 3 },
+              { value: 3 + (i % 3) * 2 },
+            ],
+            easing: 'easeInOutSine',
+            duration: 380 + i * 40,
+            loop: true,
+            delay: i * 45,
+          });
+        } else {
+          el.setAttribute('height', '4');
+        }
+      });
+    }, [state]);
+
+    useEffect(() => {
+      const el = mouthWrapRef.current;
+      if (!el) return;
+      anime.remove(el);
+      if (state === 'speaking') {
+        anime({
+          targets: el,
+          scaleY: [0.45, 0.95, 0.55, 0.88, 0.45],
+          scaleX: [1, 1.08, 0.96, 1.04, 1],
+          easing: 'easeInOutSine',
+          duration: 520,
+          loop: true,
+        });
+      } else {
+        anime({
+          targets: el,
+          scaleY: 0.5,
+          scaleX: 1,
+          duration: 280,
+          easing: 'easeOutQuad',
+        });
+      }
+    }, [state]);
+
+    useEffect(() => {
+      let cancelled = false;
+      let t;
+      const scheduleBlink = () => {
+        t = setTimeout(() => {
+          if (cancelled) return;
+          [eyeLRef.current, eyeRRef.current].forEach((eye) => {
+            if (!eye) return;
+            anime({ targets: eye, ry: [6, 0.5, 6], duration: 120, easing: 'easeInOutQuad' });
+          });
+          scheduleBlink();
+        }, 2200 + Math.random() * 2800);
+      };
+      scheduleBlink();
+      return () => {
+        cancelled = true;
+        clearTimeout(t);
+      };
+    }, []);
+
+    return html`
+      <svg
+        className="persona-face-svg"
+        viewBox="0 0 120 120"
+        aria-hidden="true"
+        style=${{ '--persona-color': color }}
+      >
+        <defs>
+          <radialGradient id=${gradId} cx="35%" cy="30%" r="65%">
+            <stop offset="0%" stop-color="rgba(255,255,255,0.35)" />
+            <stop offset="55%" stop-color="rgba(180,200,255,0.12)" />
+            <stop offset="100%" stop-color="rgba(8,12,28,0.5)" />
+          </radialGradient>
+        </defs>
+        <circle cx="60" cy="60" r="50" fill=${`url(#${gradId})`} stroke=${color} stroke-width="1.4" opacity="0.95" />
+        <ellipse ref=${eyeLRef} className="pf-eye" cx="42" cy="52" rx="5" ry="6" />
+        <ellipse ref=${eyeRRef} className="pf-eye" cx="78" cy="52" rx="5" ry="6" />
+        <g ref=${mouthWrapRef} style=${{ transformOrigin: '60px 78px' }}>
+          <ellipse className="pf-mouth" cx="60" cy="78" rx="14" ry="8" fill="rgba(200,80,120,0.2)" stroke=${color} stroke-width="1.8" />
+        </g>
+        ${[0, 1, 2, 3, 4, 5, 6].map((i) => html`
+          <rect
+            key=${'w' + i}
+            ref=${(el) => { waveRefs.current[i] = el; }}
+            className="pf-wave"
+            x=${28 + i * 10}
+            y="96"
+            width="4"
+            height="4"
+            rx="1"
+          />
+        `)}
+      </svg>
     `;
   }
 
@@ -746,7 +987,7 @@
   const N_RIPPLE  = 3;
   const N_DOTS    = 3;
 
-  function VoiceOrb({ state, onOrbClick, onStop }) {
+  function VoiceOrb({ state, onOrbClick, onStop, persona }) {
     const sceneRef = useRef(null);
     const coreRef  = useRef(null);
     const rOuter   = useRef(null);
@@ -755,6 +996,26 @@
     const ripples  = useRef(Array(N_RIPPLE).fill(null));
     const dots     = useRef(Array(N_DOTS).fill(null));
     const anims    = useRef([]);
+    const [parallax, setParallax] = useState({ rx: 0, ry: 0 });
+
+    function onSceneMouseMove(e) {
+      const el = sceneRef.current;
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      const cx = r.left + r.width / 2;
+      const cy = r.top + r.height / 2;
+      const nx = (e.clientX - cx) / (r.width / 2);
+      const ny = (e.clientY - cy) / (r.height / 2);
+      setParallax({
+        ry: Math.max(-1, Math.min(1, nx)) * 8,
+        rx: Math.max(-1, Math.min(1, ny)) * -8,
+      });
+    }
+    function onSceneMouseLeave() {
+      setParallax({ rx: 0, ry: 0 });
+    }
+
+    const facePersona = persona || { name: 'Friday', role: 'Voice', emoji: '◉', color: '#38d9ff' };
 
     useLayoutEffect(() => {
       anims.current.forEach(a => a?.pause?.());
@@ -827,7 +1088,9 @@
 
     return html`
       <div ref=${sceneRef} className="orb-scene" data-state=${state}
-        onClick=${e => { if (!e.target.closest('.orb-stop')) onOrbClick(); }}>
+        onClick=${e => { if (!e.target.closest('.orb-stop')) onOrbClick(); }}
+        onMouseMove=${onSceneMouseMove}
+        onMouseLeave=${onSceneMouseLeave}>
 
         <div className="orb-glow"></div>
         <div ref=${rOuter} className="orb-ring-outer"></div>
@@ -843,7 +1106,16 @@
           )}
         </div>
 
-        <div ref=${coreRef} className="orb-core"></div>
+        <div ref=${coreRef} className="orb-core">
+          <div
+            className="orb-face-layer"
+            style=${{
+              transform: `perspective(520px) rotateX(${parallax.rx}deg) rotateY(${parallax.ry}deg)`,
+            }}
+          >
+            <${PersonaFace} state=${state} persona=${facePersona} />
+          </div>
+        </div>
 
         <div className="wave-bars">
           ${waveBars.current = []; Array.from({length: N_WAVE}).map((_, i) =>
@@ -1104,6 +1376,20 @@
     `;
   }
 
+  function fmtAuditRow(row) {
+    const t = row.ts ? new Date(row.ts).toLocaleTimeString() : '';
+    const bits = [
+      t,
+      row.session,
+      row.state,
+      row.voice,
+      row.text_preview,
+      row.reason,
+      row.duration_ms != null ? `${row.duration_ms} ms` : '',
+    ].filter(Boolean);
+    return bits.join(' · ');
+  }
+
   /* ══════════════════════════════════════════════════════════
      App — root component + all voice/session logic
   ══════════════════════════════════════════════════════════ */
@@ -1127,6 +1413,9 @@
     const [ttsHint, setTtsHint] = useState('');
     const [panelOpen, setPanelOpen] = useState(false);
     const [typed, setTyped] = useState('');
+    const [activePersona, setActivePersona] = useState(null);
+    const [auditOpen, setAuditOpen] = useState(false);
+    const [auditLines, setAuditLines] = useState([]);
 
     /* ── mutable refs (no re-render needed) ── */
     const stateRef = useRef('idle');
@@ -1145,11 +1434,50 @@
     const rateRef  = useRef(rate);
     const pitchRef = useRef(pitch);
     const chatVRef = useRef(chatVoice);
+    const recentCmdRef = useRef(false);
+    const recentCmdTimerRef = useRef(null);
+    const auditLastStartRef = useRef(0);
 
     useEffect(() => { bvRef.current = bv; }, [bv]);
     useEffect(() => { rateRef.current = rate; }, [rate]);
     useEffect(() => { pitchRef.current = pitch; }, [pitch]);
     useEffect(() => { chatVRef.current = chatVoice; }, [chatVoice]);
+
+    function markRecentCommand() {
+      recentCmdRef.current = true;
+      if (recentCmdTimerRef.current) clearTimeout(recentCmdTimerRef.current);
+      recentCmdTimerRef.current = setTimeout(() => {
+        recentCmdRef.current = false;
+        recentCmdTimerRef.current = null;
+      }, 5000);
+    }
+
+    function appendAuditLine(ev) {
+      const row = { ...ev };
+      if (row.state === 'speak_start') {
+        const ts = typeof row.ts === 'number' ? row.ts : Date.now();
+        if (auditLastStartRef.current && ts - auditLastStartRef.current < 2000) {
+          row.overlap = true;
+        }
+        auditLastStartRef.current = ts;
+      }
+      setAuditLines((prev) => [{ ...row, _k: `${Date.now()}-${Math.random()}` }, ...prev].slice(0, 26));
+    }
+
+    useEffect(() => {
+      if (!auditOpen) return;
+      (async () => {
+        try {
+          const r = await fetch(API('/voice/tts-audit'), { headers: VOICE_HEADERS() });
+          const d = await r.json();
+          if (d.ok && Array.isArray(d.entries)) {
+            setAuditLines(
+              d.entries.map((e, i) => ({ ...e, _k: `h-${i}-${e.ts || i}` })).slice(0, 26),
+            );
+          }
+        } catch {}
+      })();
+    }, [auditOpen]);
 
     /* ── helpers ── */
     function setOrb(s) { stateRef.current = s; setOrbState_(s); }
@@ -1340,9 +1668,10 @@
     }
 
     /* ── add message with spring animation ── */
-    function addMsg(role, text) {
+    function addMsg(role, text, voiceOrPersona = '', session = '') {
       const id = ++msgIdRef.current;
-      setMessages(prev => [...prev, { id, role, text }]);
+      const persona = role === 'agent' ? resolvePersonaLabel(voiceOrPersona, session) : null;
+      setMessages((prev) => [...prev, { id, role, text, persona }]);
     }
     const chatRef = useRef(null);
     useEffect(() => {
@@ -1362,6 +1691,7 @@
         setHint('Okay — that was not sent. Listening again.'); startListenTurn(); return;
       }
       if (busyRef.current && stateRef.current !== 'speaking') return;
+      markRecentCommand();
       busyRef.current = true;
       addMsg('you', t);
       stopRec(); stopBarge();
@@ -1397,7 +1727,7 @@
           }, 120_000);
         }
         if (replyTrim) {
-          addMsg('agent', reply);
+          addMsg('agent', reply, chatVRef.current?.voice || '', '');
         }
         if (j.speakAsync !== false && replyTrim) {
           setOrb('speaking'); setHint('Speak to interrupt, tap Stop, or tap the orb.');
@@ -1427,23 +1757,56 @@
       setHint('Speak when ready.'); startListenTurn();
     }
 
-    /* Deferred OpenRouter answer arrives via SSE — do not speak the rate-limit status line above */
+    /* Deferred OpenRouter + external TTS (friday-speak.py) via SSE */
     useEffect(() => {
       let es;
       try {
         es = new EventSource(API('/voice/stream'));
         es.onmessage = (e) => {
           try {
+            if (e.data.startsWith(':')) return;
             const ev = JSON.parse(e.data);
+            if (ev.type === 'tts_audit') {
+              appendAuditLine(ev);
+              return;
+            }
+            if (ev.type === 'tts_speak') {
+              const s = String(ev.text || '');
+              const pers = resolvePersonaLabel(ev.voice || '', ev.session || '');
+              setActivePersona(pers);
+              setOrb('speaking');
+              if (s) {
+                setHint(s.length > 140 ? s.slice(0, 140) + '…' : s);
+                addMsg('agent', s, ev.voice || '', ev.session || '');
+              }
+              return;
+            }
+            if (ev.type === 'tts_done') {
+              if (!busyRef.current && sessRef.current) {
+                setOrb('listening');
+                setHint('Speak when ready.');
+                startListenTurn();
+              } else if (!busyRef.current) {
+                setOrb('idle');
+              }
+              if (!busyRef.current) setActivePersona(null);
+              return;
+            }
             if (ev.type === 'speak' && sessRef.current) {
               setOrb('speaking');
               if (ev.text) {
                 const s = String(ev.text);
                 setHint(s.length > 140 ? s.slice(0, 140) + '…' : s);
+                const pers = resolvePersonaLabel(ev.personaKey || '', '');
+                if (pers) setActivePersona(pers);
+                if (!recentCmdRef.current) {
+                  addMsg('agent', s, ev.personaKey || '', '');
+                }
               }
             } else if (ev.type === 'listening' && sessRef.current && !busyRef.current) {
               setOrb('listening');
               setHint('Speak when ready.');
+              setActivePersona(null);
               startListenTurn();
             }
             if (!openRouterPendingRef.current) return;
@@ -1453,7 +1816,7 @@
                 clearTimeout(openRouterTimeoutRef.current);
                 openRouterTimeoutRef.current = null;
               }
-              addMsg('agent', ev.text);
+              addMsg('agent', ev.text, chatVRef.current?.voice || '', '');
               setOrb('speaking');
               setHint('Speak to interrupt, tap Stop, or tap the orb.');
               busyRef.current = true;
@@ -1464,7 +1827,7 @@
                 clearTimeout(openRouterTimeoutRef.current);
                 openRouterTimeoutRef.current = null;
               }
-              addMsg('agent', ev.text);
+              addMsg('agent', ev.text, chatVRef.current?.voice || '', '');
               setOrb('speaking');
               busyRef.current = true;
               speak('Open Router failed. Check the chat.', cycleAfterSpeech);
@@ -1664,16 +2027,22 @@
 
         <!-- STAGE -->
         <div ref=${stgRef} className="stage" style=${{ opacity: 0 }}>
-          <${VoiceOrb} state=${orbState} onOrbClick=${cancelAll} onStop=${cancelAll} />
+          <${VoiceOrb} state=${orbState} persona=${activePersona} onOrbClick=${cancelAll} onStop=${cancelAll} />
 
           <div className="state-label" data-state=${orbState}>
             ${ORB_LABELS[orbState] || orbState}
           </div>
 
+          <div className=${'persona-card-pill' + (activePersona && orbState === 'speaking' ? ' visible' : '')}>
+            ${activePersona && orbState === 'speaking'
+              ? `${activePersona.emoji} ${activePersona.name} · ${activePersona.role}`
+              : ''}
+          </div>
+
           <p className="hint-text">${hint}</p>
 
           <div className="chat-history" ref=${chatRef} aria-live="polite">
-            ${messages.map(m => html`<${MessageBubble} key=${m.id} role=${m.role} text=${m.text} />`)}
+            ${messages.map((m) => html`<${MessageBubble} key=${m.id} role=${m.role} text=${m.text} persona=${m.persona} />`)}
           </div>
 
           <div className="control-row">
@@ -1741,6 +2110,31 @@
                 </select>
               </div>
               <p className="voice-info">${bvDescTxt}</p>
+
+              <div className="tts-audit-panel">
+                <button type="button" className="tts-audit-toggle" onClick=${() => setAuditOpen((o) => !o)}>
+                  <span>TTS debug timeline</span>
+                  <span>${auditOpen ? '▴' : '▾'}</span>
+                </button>
+                <div className=${'tts-audit-body' + (auditOpen ? ' open' : '')}>
+                  <div className="tts-audit-inner">
+                    ${auditLines.length === 0
+                      ? html`<div className="tts-audit-row">No entries yet. Speak from Cursor or the daemon to populate.</div>`
+                      : auditLines.map(
+                          (row) => html`
+                            <div
+                              key=${row._k}
+                              className=${'tts-audit-row'
+                                + (row.state === 'speak_interrupted' ? ' interrupted' : '')
+                                + (row.overlap ? ' overlap' : '')}
+                            >
+                              ${row.overlap ? 'Overlap detected — ' : ''}${fmtAuditRow(row)}
+                            </div>
+                          `,
+                        )}
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
