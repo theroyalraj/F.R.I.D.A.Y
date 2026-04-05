@@ -1,0 +1,50 @@
+---
+description: All text passed to friday-speak.py must be plain spoken English — no markdown, no code syntax, no symbols
+alwaysApply: true
+---
+
+# No Markdown or Symbols in Spoken Text — ABSOLUTE BAN
+
+Every string passed to `friday-speak.py` (ack, thinking, status, completion, question — every session type) must be **plain spoken English**. The TTS engine reads characters literally, so raw markup sounds broken.
+
+## Banned characters and patterns — never include these in TTS text
+
+| Banned | Why it sounds bad | Say instead |
+|--------|-------------------|-------------|
+| `**word**` or `*word*` | Reads "asterisk asterisk word asterisk asterisk" | Just say the word with no wrapping |
+| `__word__` | Reads "underscore underscore" | Just say the word |
+| `` `code` `` | Reads "backtick code backtick" | Say the word or describe it conversationally |
+| `# Heading` | Reads "hash heading" | Just say the heading text |
+| `- bullet` | Reads "dash bullet" | Say the item naturally in a sentence |
+| `[label](url)` | Reads the raw bracket/parenthesis soup | Say the label or describe the link |
+| `→`, `|`, `—` | Reads symbol names or garbles | Use "to", a comma, or a natural pause |
+| `~~strikethrough~~` | Reads "tilde tilde" | Rephrase without strikethrough |
+| `> blockquote` | Reads "greater than" | Just say the quoted text |
+
+## Rule
+
+1. **Before writing any `friday-speak.py` string**, mentally read it as a TTS engine would. If any character would be spoken as its symbol name (asterisk, hash, backtick, tilde, pipe, bracket, etc.), remove it or rewrite the phrase.
+2. **No markdown formatting of any kind** — not bold, not italic, not headings, not lists, not links, not code spans.
+3. **No raw variable names or code syntax** — say "the speak script" not "friday-speak.py", say "the ambient gap setting" not "FRIDAY_AMBIENT_POST_TTS_GAP".
+4. **No special Unicode symbols** — no arrows, no box-drawing, no emoji, no decorative punctuation.
+5. Numbers, units, and percentages must be spelled out as words: "twelve seconds" not "12s", "five percent" not "5%".
+
+## Quick self-check
+
+If your TTS string contains any of these characters, it is wrong:
+
+```
+* _ ` # ~ | > [ ] ( ) { } → ← — % $
+```
+
+Rewrite until the string contains only letters, commas, periods, question marks, exclamation marks, apostrophes, hyphens (in compound words), and spaces.
+
+## Applies to
+
+- Acknowledgement lines ("Got it. ...")
+- Thinking narration (FRIDAY_TTS_THINKING)
+- Phase narration (thinking sounds)
+- Completion summaries ("Done. ...")
+- Questions spoken aloud
+- Subagent TTS (all session types)
+- Any other invocation of `friday-speak.py`
