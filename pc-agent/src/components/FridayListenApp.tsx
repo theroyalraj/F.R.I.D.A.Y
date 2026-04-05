@@ -253,7 +253,18 @@ const FridayListenApp: React.FC = () => {
   // Poll sessions
   useEffect(() => {
     const poll = () => fetch('/voice/status', { headers: authHeaders() }).then(r => r.json())
-      .then(d => { if (d.ok) setSessions(d.contexts || []); }).catch(() => {});
+      .then(d => {
+        if (d.ok) {
+          // Deduplicate sessions by context
+          const seen = new Set();
+          const deduped = (d.contexts || []).filter(s => {
+            if (seen.has(s.context)) return false;
+            seen.add(s.context);
+            return true;
+          });
+          setSessions(deduped);
+        }
+      }).catch(() => {});
     poll();
     const iv = setInterval(poll, 5000);
     return () => clearInterval(iv);
