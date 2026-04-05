@@ -113,6 +113,7 @@ const FridayListenApp: React.FC = () => {
     dismissMiniOrb,
     dnd, setDnd,
     winNotifications, dismissWinNotification,
+    cursorDoneNotifications, dismissCursorDone, clearAllCursorDone,
   } = useVoiceApp();
   const { authHeaders } = useAuth();
 
@@ -139,6 +140,7 @@ const FridayListenApp: React.FC = () => {
   );
   const [personaModalOpen, setPersonaModalOpen] = useState(false);
   const [winNotifyPanelOpen, setWinNotifyPanelOpen] = useState(false);
+  const [agentPanelOpen, setAgentPanelOpen] = useState(false);
   const [celebrationOffer, setCelebrationOffer] = useState<CelebrationPayload | null>(null);
   const [claudeModel, setClaudeModel] = useState(() => {
     try {
@@ -319,6 +321,9 @@ const FridayListenApp: React.FC = () => {
     } else if (event.type === 'dnd_changed') {
       const de = event as { dnd?: boolean };
       postEvent('dnd_changed', '', { ...(de as unknown as Record<string, unknown>) } as import('../contexts/VoiceAppContext').VoicePostEventOptions);
+    } else if (event.type === 'cursor_agent_done') {
+      const ce = event as { task?: string; detail?: string };
+      postEvent('cursor_agent_done', ce.task || '', { ...(ce as unknown as Record<string, unknown>) } as import('../contexts/VoiceAppContext').VoicePostEventOptions);
     } else if (event.type === 'music_play') {
       const me = event as { type: string; text?: string; seconds?: number };
       const seconds = typeof me.seconds === 'number' && Number.isFinite(me.seconds) ? me.seconds : 30;
@@ -751,6 +756,28 @@ const FridayListenApp: React.FC = () => {
           >
             {dnd ? '\uD83D\uDD15' : '\uD83D\uDD14'}
           </button>
+          {/* Agent counts (derived from session poll — always visible once sessions load) */}
+          {(() => {
+            const working = sessions.filter((s) => s.status === 'active').length;
+            const free    = sessions.filter((s) => s.status === 'idle').length;
+            if (sessions.length === 0) return null;
+            return (
+              <button
+                type="button"
+                className={`${styles['top-btn']} ${styles['top-btn-agents']} ${cursorDoneNotifications.length > 0 ? styles['top-btn-agents-done'] : ''}`}
+                onClick={() => setAgentPanelOpen((v) => !v)}
+                title={`${working} working · ${free} free — click to see Cursor agent completions`}
+              >
+                <span className={styles['agent-working-dot']} />
+                {working > 0 ? `${working}W` : '0W'}
+                {' · '}
+                {free > 0 ? `${free}F` : '0F'}
+                {cursorDoneNotifications.length > 0 && (
+                  <span className={styles['agent-done-badge']}>{cursorDoneNotifications.length > 9 ? '9+' : cursorDoneNotifications.length}</span>
+                )}
+              </button>
+            );
+          })()}
           {winNotifications.length > 0 && (
             <button
               className={`${styles['top-btn']} ${styles['top-btn-notify']}`}
@@ -1197,6 +1224,61 @@ const FridayListenApp: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* Agent Panel — Cursor done notifications + live working/free counts */}
+      {agentPanelOpen && (() => {
+        const working = sessions.filter((s) => s.status === 'active').length;
+        const free    = sessions.filter((s) => s.status === 'idle').length;
+        return (
+          <div className={`${styles['agent-panel']} ${theme === 'light' ? styles['agent-panel-light'] : ''}`}>
+            <div className={styles['agent-panel-head']}>
+              <span>{'⚡'} Agents</span>
+              <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                <span className={styles['agent-count-working']}>{working} working</span>
+                <span className={styles['agent-count-free']}>{free} free</span>
+                {cursorDoneNotifications.length > 0 && (
+                  <button type="button" className={styles['agent-panel-clear']} onClick={clearAllCursorDone}>
+                    Clear
+                  </button>
+                )}
+                <button type="button" className={styles['agent-panel-close']} onClick={() => setAgentPanelOpen(false)} aria-label="Close">✕</button>
+              </div>
+            </div>
+            <div className={styles['agent-sessions-row']}>
+              {sessions.map((s) => (
+                <span
+                  key={s.context}
+                  className={`${styles['agent-session-chip']} ${s.status === 'active' ? styles['agent-session-active'] : styles['agent-session-idle']}`}
+                  title={`${s.context} · ${s.voice || 'no voice'} · ${s.status}`}
+                >
+                  {s.context.replace('cursor:', '').replace('api', 'listen')}
+                </span>
+              ))}
+            </div>
+            <div className={styles['agent-done-list']}>
+              {cursorDoneNotifications.length === 0 ? (
+                <div className={styles['agent-done-empty']}>No agent completions yet</div>
+              ) : (
+                cursorDoneNotifications.map((n) => (
+                  <div key={n.id} className={styles['agent-done-row']}>
+                    <div className={styles['agent-done-row-head']}>
+                      <span className={styles['agent-done-check']}>{'✓'}</span>
+                      <span className={styles['agent-done-time']}>
+                        {new Date(n.ts).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })}
+                      </span>
+                      <button type="button" className={styles['agent-done-dismiss']} onClick={() => dismissCursorDone(n.id)} aria-label="Dismiss">✕</button>
+                    </div>
+                    <div className={styles['agent-done-task']}>{n.task}</div>
+                    {n.detail && n.detail !== n.task && (
+                      <div className={styles['agent-done-detail']}>{n.detail}</div>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       <ToastContainer />
     </div>

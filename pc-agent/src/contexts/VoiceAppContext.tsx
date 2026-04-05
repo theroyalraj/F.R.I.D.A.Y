@@ -128,6 +128,13 @@ export interface WinNotification {
   ts: number;
 }
 
+export interface CursorDoneNotification {
+  id: string;
+  task: string;
+  detail: string;
+  ts: number;
+}
+
 const VoiceAppContext = createContext<VoiceAppContextType | undefined>(undefined);
 
 export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -195,6 +202,8 @@ export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [dnd, setDndState] = useState<boolean>(false);
   const [winNotifications, setWinNotifications] = useState<WinNotification[]>([]);
   const WIN_NOTIFY_MAX = 50;
+  const [cursorDoneNotifications, setCursorDoneNotifications] = useState<CursorDoneNotification[]>([]);
+  const CURSOR_DONE_MAX = 30;
 
   useEffect(() => {
     fetch('/settings/dnd')
@@ -214,6 +223,14 @@ export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const dismissWinNotification = useCallback((id: string) => {
     setWinNotifications((prev) => prev.filter((n) => n.id !== id));
+  }, []);
+
+  const dismissCursorDone = useCallback((id: string) => {
+    setCursorDoneNotifications((prev) => prev.filter((n) => n.id !== id));
+  }, []);
+
+  const clearAllCursorDone = useCallback(() => {
+    setCursorDoneNotifications([]);
   }, []);
 
   const musicVisualTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -554,6 +571,16 @@ export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             setDndState((opts as unknown as { dnd: boolean }).dnd);
           }
           break;
+        case 'cursor_agent_done': {
+          const task   = (opts as unknown as Record<string, string> | undefined)?.task   ?? text;
+          const detail = (opts as unknown as Record<string, string> | undefined)?.detail ?? '';
+          const doneId = `cd-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+          setCursorDoneNotifications((prev) => {
+            const next = [{ id: doneId, task, detail, ts: Date.now() }, ...prev];
+            return next.slice(0, CURSOR_DONE_MAX);
+          });
+          break;
+        }
         default:
           break;
       }
@@ -613,6 +640,9 @@ export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setDnd,
     winNotifications,
     dismissWinNotification,
+    cursorDoneNotifications,
+    dismissCursorDone,
+    clearAllCursorDone,
   };
 
   return <VoiceAppContext.Provider value={value}>{children}</VoiceAppContext.Provider>;
