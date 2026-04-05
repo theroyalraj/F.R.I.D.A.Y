@@ -34,6 +34,17 @@ cd d:\code\openclaw; $env:FRIDAY_TTS_PRIORITY='1'; $env:FRIDAY_TTS_BYPASS_CURSOR
 
 Must have `block_until_ms: 0`. **Must** set `FRIDAY_TTS_PRIORITY=1` on every acknowledgement (main Composer, not only subagents). Can be in the same message as real work tool calls — that's the point.
 
+## Combine ack + thinking when possible
+
+If you have meaningful reasoning to share (see `narrate-thinking.mdc`), **fold it into the ack call** instead of firing two separate speak calls. One combined call is better than two short ones back-to-back:
+
+```powershell
+# GOOD — combined ack + reasoning in ONE call
+cd d:\code\openclaw; $env:FRIDAY_TTS_PRIORITY='1'; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "Got it. So the issue is probably in the lock release path, because the timeout is not clearing the Redis key. I'll fix it in the speak script."
+```
+
+Only fire a **separate** `FRIDAY_TTS_THINKING=1` call when the reasoning is substantial (5+ sentences) and would make the ack line awkwardly long. For short-to-medium reasoning, always combine.
+
 ## Example — correct async batch
 
 ```

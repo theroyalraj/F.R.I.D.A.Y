@@ -15,7 +15,9 @@ This is NOT the same as the acknowledgement ("Got it…") or the completion summ
 
 ## How to do it
 
-After your internal thinking phase completes and before (or in parallel with) your first real work tool calls, fire **ONE** `friday-speak.py` call with `FRIDAY_TTS_THINKING=1` that captures the essence of your reasoning as a single spoken chunk.
+**Prefer combining with the ack.** If your reasoning is short-to-medium (under ~4 sentences), fold it into the acknowledgement call from `acknowledge-before-planning.mdc` instead of firing a separate thinking speak. This avoids two back-to-back speak calls that sound robotic.
+
+Only fire a **separate** `friday-speak.py` call with `FRIDAY_TTS_THINKING=1` when the reasoning is substantial (5+ sentences) and would make the ack awkwardly long. In that case, one `FRIDAY_TTS_THINKING=1` call captures the essence of your reasoning as a single spoken chunk.
 
 ### Singleton pattern
 
@@ -68,14 +70,26 @@ cd d:\code\openclaw; $env:FRIDAY_TTS_SESSION='subagent'; $env:FRIDAY_TTS_PRIORIT
 
 ## Ordering in a message
 
+**Preferred (combined ack + reasoning — 1 speak call):**
+
 ```
 Message N:
-  ├── Shell: FRIDAY_TTS_PRIORITY=1 friday-speak.py "Got it…"         ← ack (existing rule; pre-empts ambient)
-  ├── Shell: FRIDAY_TTS_THINKING=1 friday-speak.py "So the issue…"  ← reasoning (THIS rule, singleton)
+  ├── Shell: FRIDAY_TTS_PRIORITY=1 friday-speak.py "Got it. So the issue is [reasoning]. I'll [plan]."  ← ONE call
+  ├── Read / Grep / Glob: actual work                                                                   ← starts NOW
+```
+
+**Only when reasoning is long (separate thinking call — 2 speak calls max):**
+
+```
+Message N:
+  ├── Shell: FRIDAY_TTS_PRIORITY=1 friday-speak.py "Got it…"         ← ack
+  ├── Shell: FRIDAY_TTS_THINKING=1 friday-speak.py "So the issue…"  ← reasoning (singleton)
   ├── Read / Grep / Glob: actual work                               ← starts NOW, parallel
 ```
 
-All fire simultaneously. The TTS lock serialises playback (ack first, then reasoning). The thinking singleton ensures only one reasoning speak is in the pipeline — duplicate/stale thinking calls exit silently.
+All fire simultaneously. The TTS lock serialises playback. The thinking singleton ensures only one reasoning speak is in the pipeline — duplicate/stale thinking calls exit silently.
+
+**Hard cap: never more than 2 speak calls per message (ack + thinking). Phase filler on top of that is always too many.**
 
 ## Gating
 
