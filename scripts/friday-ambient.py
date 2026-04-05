@@ -490,8 +490,6 @@ SPEAK_SCRIPT    = ROOT / "skill-gateway" / "scripts" / "friday-speak.py"
 
 VERBOSE_RATIO   = float(os.environ.get("FRIDAY_AMBIENT_VERBOSE_RATIO", "0.30"))  # 30% of turns are longer / richer
 SONG_CHANCE     = float(os.environ.get("FRIDAY_AMBIENT_SONG_CHANCE",   "0.12"))  # 12% of ambient turns play music
-_autoplay_v     = os.environ.get("FRIDAY_AUTOPLAY", "true").lower()
-AUTOPLAY_ENABLED = _autoplay_v not in ("false", "0", "off", "no")
 # After this many completed ambient speech turns (not counting song intros), force song_moment next.
 # 0 = disabled (only SONG_CHANCE). Same quiet hours and _is_music_playing() guards as random songs.
 SONG_AFTER_SPEECHES = int(os.environ.get("FRIDAY_AMBIENT_SONG_AFTER_SPEECHES", "3"))
@@ -500,6 +498,16 @@ SONG_SECONDS  = int(os.environ.get("FRIDAY_AMBIENT_SONG_SECONDS",    "10"))
 SONG_SEC_MIN  = int(os.environ.get("FRIDAY_AMBIENT_SONG_SECONDS_MIN",  "8"))
 SONG_SEC_MAX  = int(os.environ.get("FRIDAY_AMBIENT_SONG_SECONDS_MAX",  "14"))
 PLAY_SCRIPT   = ROOT / "skill-gateway" / "scripts" / "friday-play.py"
+
+
+def _ambient_autoplay_enabled() -> bool:
+    try:
+        from music_autoplay_prefs import read_music_autoplay_enabled
+
+        return read_music_autoplay_enabled()
+    except Exception:
+        _v = os.environ.get("FRIDAY_AUTOPLAY", "true").lower()
+        return _v not in ("false", "0", "off", "no")
 
 
 def _song_moment_weights() -> tuple[float, float, float]:
@@ -2252,9 +2260,9 @@ def play_song_ambient(query: str, seconds: int) -> None:
     """
     Launch friday-play.py in the background (non-blocking).
     The play script has its own fade / PID management.
-    Skipped when FRIDAY_AUTOPLAY=false.
+    Skipped when music autoplay pref is off (Redis / file / FRIDAY_AUTOPLAY).
     """
-    if not AUTOPLAY_ENABLED:
+    if not _ambient_autoplay_enabled():
         log.info("[song] autoPlay disabled — skipping ambient song")
         return
     if not PLAY_SCRIPT.exists():
@@ -2355,7 +2363,7 @@ def _meme_zone_pop_next(r) -> Path | None:
 
 
 def play_meme_zone_clip(path: Path, seconds: int) -> None:
-    if not AUTOPLAY_ENABLED:
+    if not _ambient_autoplay_enabled():
         log.info("[meme] autoPlay disabled — skip")
         return
     if not PLAY_SCRIPT.exists():
@@ -2891,12 +2899,70 @@ _SUB_VOICE_PHRASES = [
 ]
 
 
+# Spoken hour/minute for check-in TTS — avoids "colon", digits-only, and clipped "fifteen" reads.
+_CHECKIN_ONES = (
+    "",
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "ten",
+    "eleven",
+    "twelve",
+    "thirteen",
+    "fourteen",
+    "fifteen",
+    "sixteen",
+    "seventeen",
+    "eighteen",
+    "nineteen",
+)
+_CHECKIN_TENS = ("", "", "twenty", "thirty", "forty", "fifty")
+
+
+def _checkin_minutes_words(m: int) -> str:
+    if m < 20:
+        return _CHECKIN_ONES[m]
+    tens, ones = divmod(m, 10)
+    if ones == 0:
+        return _CHECKIN_TENS[tens]
+    return f"{_CHECKIN_TENS[tens]}-{_CHECKIN_ONES[ones]}"
+
+
 def _format_local_time_spoken() -> str:
-    """12-hour time string for TTS — no trailing period so templates control punctuation."""
+    """Spoken 12-hour time for TTS (words, no A M letters that read oddly)."""
     t = _user_localtime()
-    h12 = t.tm_hour % 12 or 12
-    suf = "AM" if t.tm_hour < 12 else "PM"
-    return f"{h12}:{t.tm_min:02d} {suf}"
+    h24 = t.tm_hour
+    h12 = h24 % 12 or 12
+    hw = _CHECKIN_ONES[h12]
+    m = t.tm_min
+    if m == 0:
+        tail = ""
+    elif m < 10:
+        tail = f" oh {_CHECKIN_ONES[m]}"
+    else:
+        tail = " " + _checkin_minutes_words(m)
+    if h24 < 5:
+        per = " at night"
+    elif h24 < 12:
+        per = " in the morning"
+    elif h24 < 17:
+        per = " in the afternoon"
+    elif h24 < 21:
+        per = " in the evening"
+    else:
+        per = " at night"
+    return f"{hw}{tail}{per}".strip()
+
+
+# Prepended to every periodic check-in so it reads as an intentional steward ping, not a stray quip.
+_CHECKIN_SPOKEN_PREFIX_EN = "Quick house steward check-in. "
+_CHECKIN_SPOKEN_PREFIX_HI = "घर की स्टीवर्ड चेक-इन। "
 
 
 # ── Emotionally-aware check-in template pools ────────────────────────────────
@@ -3152,6 +3218,9 @@ def _pick_checkin_line(r) -> tuple:
     if category == "continuation" and ctx["latest_topic"] and random.random() < 0.3:
         topic_short = ctx["latest_topic"][:60].rstrip(".,;")
         line = f"By the way — you were on '{topic_short}' earlier. " + line
+
+    # Explicit framing: must sound like a real periodic check-in, not a fragment (e.g. time-only).
+    line = (_CHECKIN_SPOKEN_PREFIX_HI if lang == "hindi" else _CHECKIN_SPOKEN_PREFIX_EN) + line
 
     # Stamp wellness timestamp so the once-per-hour throttle survives restarts
     if category == "wellness" and r and r is not False:

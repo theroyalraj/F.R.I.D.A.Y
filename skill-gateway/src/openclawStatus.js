@@ -3,6 +3,7 @@
  */
 import http from 'node:http';
 import { getBriefingCronSnapshot } from './briefingCron.js';
+import { readMusicAutoplayEnabledSync } from '../../lib/musicAutoplayPrefs.js';
 
 function envBool(key, defaultVal = false) {
   const v = String(process.env[key] ?? '').trim().toLowerCase();
@@ -95,7 +96,7 @@ export async function buildOpenclawStatus() {
         note: 'Python friday-music-scheduler.py when FRIDAY_MUSIC_SCHEDULER is on',
         enabled: musicSchedOn,
         intervalMinutes: musicIntervalMin,
-        autoplayOn: envBool('FRIDAY_AUTOPLAY', true),
+        autoplayOn: readMusicAutoplayEnabledSync(),
       },
       silenceWatch: {
         note: 'Python friday-silence-watch.py — ECHO check-in after idle (Redis friday:tts:last_activity)',

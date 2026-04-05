@@ -400,6 +400,7 @@ def speak(
     *,
     jarvis: bool = False,
     priority: bool = True,
+    voice: Optional[str] = None,
     on_done: Optional[Callable[[], None]] = None,
 ):
     from friday_speaker import speaker
@@ -413,15 +414,15 @@ def speak(
                     _wait_for_tts_clear()
                 try:
                     override = edge_voice_override_for_text(text)
-                    voice = override or VOICE
-                    use_sticky = not bool(override)
+                    eff_voice = (voice or "").strip() or (override or VOICE)
+                    use_sticky = not bool(override) and not (voice and voice.strip())
                     rate = None
                     pitch = None
                     if jarvis:
                         rate, pitch = sample_greeting_rate_pitch()
                     speaker.speak_blocking(
                         text,
-                        voice=voice,
+                        voice=eff_voice,
                         priority=priority,
                         bypass_cursor_defer=True,
                         use_session_sticky=use_sticky,
@@ -609,8 +610,8 @@ def try_handle_whatsapp_read(text: str) -> bool:
                 "Be conversational — tell him who said what and whether anything needs a reply. "
                 "Messages:\n" + "\n".join(snippets)
             )
-            reply = send_command(summary_prompt)
-            speak(reply)
+            reply, reply_voice = send_command(summary_prompt)
+            speak(reply, voice=reply_voice)
         except req_lib.exceptions.ConnectionError:
             speak(f"Couldn't reach the Evolution API, {USER_DISPLAY}. Make sure Docker is running.")
         except Exception as e:
@@ -694,7 +695,8 @@ def try_handle_ambient_frequency(text: str) -> bool:
 
 
 # ── PC-agent command ───────────────────────────────────────────────────────────
-def send_command(text: str) -> str:
+def send_command(text: str) -> tuple[str, Optional[str]]:
+    """Returns (spoken text, optional Edge voice id for assigned-agent replies)."""
     try:
         h = {"ngrok-skip-browser-warning": "1"}
         bh = _agent_bearer_headers()
@@ -708,11 +710,14 @@ def send_command(text: str) -> str:
         )
         r.raise_for_status()
         j = r.json()
-        return str(j.get("summary") or j.get("error") or "Done.")
+        summary = str(j.get("summary") or j.get("error") or "Done.")
+        rv = j.get("replyVoice")
+        reply_voice = str(rv).strip() if rv else None
+        return summary, reply_voice
     except req_lib.exceptions.ConnectionError:
-        return "Cannot reach the Friday agent. Is pc-agent running on port 3847?"
+        return "Cannot reach the Friday agent. Is pc-agent running on port 3847?", None
     except Exception as e:
-        return f"Request failed: {e}"
+        return f"Request failed: {e}", None
 
 # ── Audio helpers ──────────────────────────────────────────────────────────────
 def numpy_to_audio_data(audio_int16: np.ndarray) -> sr.AudioData:
@@ -999,7 +1004,7 @@ def main():
         if SPEAK_ACK:
             speak(ack)
         log.info("Sending to agent…")
-        reply = send_command(text)
+        reply, reply_voice = send_command(text)
         log.info("◄ %s", reply[:120])
 
         spoken = reply if len(reply) <= 1000 else reply[:997] + "…"
@@ -1007,6 +1012,7 @@ def main():
         post_event("speak", spoken)
         speak(
             spoken,
+            voice=reply_voice,
             on_done=lambda: post_event(
                 "listening", f"Ready for your command, {USER_DISPLAY}."
             ),

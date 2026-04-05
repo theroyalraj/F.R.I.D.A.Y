@@ -66,6 +66,9 @@ if ENV_PATH.exists():
 
 PLAY_SCRIPT = ROOT / "skill-gateway" / "scripts" / "friday-play.py"
 SPEAK_SCRIPT = ROOT / "skill-gateway" / "scripts" / "friday-speak.py"
+_SG_SCRIPTS = ROOT / "skill-gateway" / "scripts"
+if str(_SG_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SG_SCRIPTS))
 TTS_ACTIVE_FILE = Path(tempfile.gettempdir()) / "friday-tts-active"
 PLAY_PID_FILE = Path(tempfile.gettempdir()) / "friday-play.pid"
 MUSIC_OFFER_FILE = Path(tempfile.gettempdir()) / "friday-music-offer.json"
@@ -85,8 +88,13 @@ def _python_for_friday_play() -> str:
     return sys.executable
 
 
-_autoplay_raw = os.environ.get("FRIDAY_AUTOPLAY", "true").lower()
-AUTOPLAY_ENABLED = _autoplay_raw not in ("false", "0", "off", "no")
+try:
+    from music_autoplay_prefs import read_music_autoplay_enabled
+
+    AUTOPLAY_ENABLED = read_music_autoplay_enabled()
+except Exception:
+    _autoplay_raw = os.environ.get("FRIDAY_AUTOPLAY", "true").lower()
+    AUTOPLAY_ENABLED = _autoplay_raw not in ("false", "0", "off", "no")
 
 INTERVAL_MIN = float(os.environ.get("FRIDAY_MUSIC_INTERVAL_MIN", "30"))
 DEFAULT_SONG = os.environ.get("FRIDAY_STARTUP_SONG", "Back in Black AC DC")

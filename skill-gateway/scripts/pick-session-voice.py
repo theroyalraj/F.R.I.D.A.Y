@@ -238,12 +238,41 @@ def _jarvis_greeting_env(voice: str) -> dict:
     }
 
 
-def _speak_welcome(voice: str) -> None:
-    """Fire-and-forget: speak the session-start greeting in the new voice."""
+def _welcome_lock_acquire(chat_id: str) -> bool:
+    """Atomic Redis NX guard — returns True only for the FIRST caller per chat_id.
+
+    Prevents two concurrent pick-session-voice invocations (e.g. Cursor hook +
+    cursor-reply-watch seeding) from both passing is_new=True and speaking the
+    welcome twice for the same chat.  TTL of 60 s auto-clears on crash.
+    """
+    if not chat_id:
+        return True  # no chat_id guard possible — allow (single-process path)
+    try:
+        url = (
+            os.environ.get("OPENCLAW_REDIS_URL", "").strip()
+            or os.environ.get("FRIDAY_AMBIENT_REDIS_URL", "").strip()
+            or "redis://127.0.0.1:6379"
+        )
+        import redis as _redis  # type: ignore
+        r = _redis.Redis.from_url(url, decode_responses=True)
+        key = f"friday:voice:welcome_lock:{chat_id[:32]}"
+        return bool(r.set(key, "1", nx=True, ex=60))
+    except Exception:
+        return True  # Redis unavailable — fall back to allowing the welcome
+
+
+def _speak_welcome(voice: str, chat_id: str = "") -> None:
+    """Fire-and-forget: speak the session-start greeting in the new voice.
+
+    Only fires once per chat_id (Redis NX lock).  Suppressed when
+    FRIDAY_PICK_SESSION_NO_WELCOME=true.
+    """
     if os.environ.get("FRIDAY_PICK_SESSION_NO_WELCOME", "").strip().lower() in (
         "1", "true", "yes", "on",
     ):
         return
+    if not _welcome_lock_acquire(chat_id):
+        return  # another process already spoke the welcome for this chat
     who = _user_display_name()
     if _main_random_voices_enabled():
         greeting = (
@@ -398,7 +427,7 @@ def pick_voice(*, subagent: bool = False, cursor_reply: bool = False, thinking: 
     state["voice"]   = new_voice
     _save_state(state)
     _redis_touch_voice_context("cursor:main", new_voice)
-    _speak_welcome(new_voice)
+    _speak_welcome(new_voice, chat_id=chat_id)
     return new_voice
 
 

@@ -87,6 +87,18 @@ _DELIVERY_STYLES: list[tuple[str, str]] = [
     ("warmth", "Pure warmth. No agenda, no ask. One or two short sentences."),
     ("playful", "Light, kind humour about the situation — late night, long slog, another refactor — never mean-spirited."),
     ("continuation", "Pick up a thread mid-thought, as if you have been mulling it since they last mentioned it."),
+    (
+        "interesting_fact",
+        "Dig up a genuinely surprising fact, historical origin, or counterintuitive real-world connection tied directly to what they have been working on — something that makes you go 'huh'. Sound like you just remembered it. Aim for 40–70 words.",
+    ),
+    (
+        "meme_energy",
+        "Channel the vibe of a classic tech or programming meme that perfectly fits their session — the it-works-and-I-don't-know-why spiral, the 4am debug rabbit hole, the endless refactor loop. Dry and knowing. Never say the word 'meme'. 30–60 words.",
+    ),
+    (
+        "trivia_tangent",
+        "Pick ONE thing from their work and hit them with a real trivia connection they almost certainly don't know — etymology, industry backstory, a bizarre edge-case that ships in production somewhere. Sound delighted by it. 40–70 words.",
+    ),
 ]
 
 
@@ -123,29 +135,30 @@ def _infer_vibe_from_memos(memos: list) -> str:
 def _pick_weighted_style(memos: list) -> tuple:
     """
     Pick a delivery style weighted by emotional context instead of uniform random.
-    Style order: callback, gentle_observation, tangent, offer_subtle, warmth, playful, continuation
+    Style order: callback, gentle_observation, tangent, offer_subtle, warmth, playful,
+    continuation, interesting_fact, meme_energy, trivia_tangent
     """
     vibe = _infer_vibe_from_memos(memos)
-    has_context = any((m.get("user_line") or "").strip() for m in memos[:4])
+    has_context = any((m.get("user_line") or "").strip() for m in memos[:5])
 
     if not has_context:
-        # No context — observation and warmth only
-        weights = [0, 3, 0, 1, 4, 2, 0]
+        # No context — observation and warmth only; no creative fact/meme/trivia
+        weights = [0, 3, 0, 1, 4, 2, 0, 0, 0, 0]
     elif vibe == "stuck":
-        # Struggling — empathy, offer concrete help, warmth; no playful
-        weights = [1, 1, 1, 4, 4, 0, 2]
+        # Struggling — empathy, offer concrete help, warmth; no playful or creative riffs
+        weights = [1, 1, 1, 4, 4, 0, 2, 0, 0, 0]
     elif vibe == "shipping":
-        # Building something — genuine curiosity in their work + continuation + playful
-        weights = [4, 0, 2, 1, 1, 2, 4]
+        # Building something — curiosity, continuation, playful, plus interesting tangents
+        weights = [4, 0, 2, 1, 1, 2, 4, 3, 2, 3]
     elif vibe == "grinding":
-        # Long session — warmth-heavy with continuation interest
-        weights = [1, 2, 1, 1, 5, 1, 1]
+        # Long session — warmth-heavy; light creative to break the slog
+        weights = [1, 2, 1, 1, 5, 1, 1, 1, 1, 2]
     elif vibe == "winding_down":
-        # Late night — gentle, warm, no pressure
-        weights = [0, 2, 0, 0, 5, 1, 2]
+        # Late night — gentle, warm, no pressure; no trivia or meme energy
+        weights = [0, 2, 0, 0, 5, 1, 2, 0, 0, 0]
     else:
-        # Balanced with continuation bias
-        weights = [2, 1, 2, 1, 1, 2, 3]
+        # focused / unknown — balanced with continuation bias + moderate creative
+        weights = [2, 1, 2, 1, 1, 2, 3, 2, 2, 3]
 
     return random.choices(_DELIVERY_STYLES, weights=weights, k=1)[0]
 
@@ -595,7 +608,13 @@ def _generate_line_ai(
     r0 = _redis()
     ctx_lines = []
     picked_topic = ""
-    pool = list(memos[:6])
+    pool = list(memos[:5])
+    random.shuffle(pool)
+    _creative = (not reserve_mode) and delivery_name in (
+        "interesting_fact",
+        "meme_energy",
+        "trivia_tangent",
+    )
     for i, m in enumerate(pool, 1):
         if _topic_already_used(r0, m.get("topic_key") or ""):
             continue
@@ -632,6 +651,15 @@ def _generate_line_ai(
         "unknown":      "Session vibe unclear. Match the delivery mode and stay genuine.",
     }.get(vibe, "Match the delivery mode and stay genuine.")
 
+    if reserve_mode:
+        length_rule = "- One paragraph only, 18\u201340 words; still specific if context exists.\n"
+    elif _creative:
+        length_rule = (
+            "- One paragraph only, 40\u201380 words. Be substantive \u2014 this is not a brief nudge.\n"
+        )
+    else:
+        length_rule = "- One paragraph only, 15\u201350 words.\n"
+
     system = (
         "You are Echo \u2014 Director of Presence at OpenClaw Labs. You sit nearby; you notice when "
         "the room goes quiet. You remember conversational threads and bring them up like a perceptive colleague. "
@@ -642,30 +670,40 @@ def _generate_line_ai(
         f"- Never start with the user's real name ({user_name}) if it looks like a name \u2014 use 'you' or no address.\n"
         "- Never start with 'I' as the very first word.\n"
         "- No markdown, no bullet points, no emojis.\n"
-        "- One paragraph only, 15\u201350 words unless reserve_mode asks shorter.\n"
+        f"{length_rule}"
         "- Sound mid-thought, not like a timer fired.\n"
         "- When conversation snippets exist, you MUST reference or continue something specific from them.\n"
         "- Generic wellness (water, stretch, posture, how are you, take a break) is FORBIDDEN when you have context.\n"
         "- Wellness lines are ONLY acceptable when context says '(No recent user messages)' AND delivery mode is 'warmth' or 'gentle_observation'.\n"
         f"- Emotional register to match: {vibe_guidance}\n"
     )
-    if reserve_mode:
-        system += "- Reserve line: keep it 18\u201340 words; still specific if context exists.\n"
 
-    user_msg = (
-        f"Recent conversation snippets (newest listed first):\n{ctx_block}\n\n"
-        f"The room has been quiet about {idle_minutes:.1f} minutes. "
-        f"Time of day feel: {_time_feel_local()}. "
-        f"Session vibe: {vibe}. "
-        "Write ONE brief, emotionally-attuned presence line for text-to-speech. "
-        "NOT a check-in. NOT wellness advice. Continue a thought, notice something, or simply be present."
-    )
+    if _creative:
+        user_msg = (
+            f"Recent conversation snippets (pick ONE at random and focus on it):\n{ctx_block}\n\n"
+            f"The room has been quiet about {idle_minutes:.1f} minutes. "
+            f"Time of day feel: {_time_feel_local()}. "
+            f"Session vibe: {vibe}. "
+            "Write ONE entertaining, substantive spoken line for text-to-speech. "
+            "Be interesting \u2014 a real fact, a sharp observation, or dry humor. Go deep on one specific thing."
+        )
+    else:
+        user_msg = (
+            f"Recent conversation snippets (newest listed first):\n{ctx_block}\n\n"
+            f"The room has been quiet about {idle_minutes:.1f} minutes. "
+            f"Time of day feel: {_time_feel_local()}. "
+            f"Session vibe: {vibe}. "
+            "Write ONE brief, emotionally-attuned presence line for text-to-speech. "
+            "NOT a check-in. NOT wellness advice. Continue a thought, notice something, or simply be present."
+        )
+
+    max_tokens = 400 if _creative else 220
 
     try:
         client = mod.Anthropic(api_key=key)
         msg = client.messages.create(
             model=model,
-            max_tokens=220,
+            max_tokens=max_tokens,
             temperature=0.88,
             system=system,
             messages=[{"role": "user", "content": user_msg}],
@@ -675,8 +713,9 @@ def _generate_line_ai(
             if hasattr(block, "text"):
                 text += block.text
         line = " ".join(text.strip().split())
-        if len(line) > 420:
-            line = line[:417] + "…"
+        _max_chars = 900 if _creative else 420
+        if len(line) > _max_chars:
+            line = line[: _max_chars - 3] + "…"
         _anthropic_ok = True
         return line, picked_topic
     except Exception as e:
@@ -739,7 +778,7 @@ def _refill_reserve_async(memories_snapshot: list[dict[str, Any]], cfg: dict[str
 
 def _resolve_speak_env(cfg: dict[str, Any]) -> dict[str, str]:
     env = os.environ.copy()
-    env.update(friday_speak_env_for_persona("echo", priority=True))
+    env.update(friday_speak_env_for_persona("echo", priority=True, preempt=False))
     voice = (cfg.get("voice") or "").strip()
     if voice and voice not in _house_voice_blocklist():
         env["FRIDAY_TTS_VOICE"] = voice

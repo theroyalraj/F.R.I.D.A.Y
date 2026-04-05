@@ -258,15 +258,24 @@ def get_persona(role: str) -> dict[str, str]:
     return out
 
 
-def friday_speak_env_for_persona(role: str, *, priority: bool = True) -> dict[str, str]:
-    """Env fragment for spawning friday-speak.py subprocess."""
+def friday_speak_env_for_persona(
+    role: str, *, priority: bool = True, preempt: bool = True
+) -> dict[str, str]:
+    """Env fragment for spawning friday-speak.py subprocess.
+
+    preempt=False uses cooperative priority (queues with other cooperative speaks;
+    does not steal the TTS lock). preempt=True is hard pre-empt (default for most personae).
+    """
     p = get_persona(role)
     env: dict[str, str] = {
         "FRIDAY_TTS_USE_SESSION_STICKY_VOICE": "false",
         "FRIDAY_TTS_BYPASS_CURSOR_DEFER": "true",
+        # Tag TTS session with the persona role so _stamp_voice_context writes to
+        # friday:voice:context:<role> instead of polluting cursor:main.
+        "FRIDAY_TTS_SESSION": role.lower(),
     }
     if priority:
-        env["FRIDAY_TTS_PRIORITY"] = "1"
+        env["FRIDAY_TTS_PRIORITY"] = "1" if preempt else "cooperative"
     voice = (p.get("voice") or "").strip()
     if voice:
         env["FRIDAY_TTS_VOICE"] = voice

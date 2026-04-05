@@ -50,6 +50,7 @@ import { startBriefingCron } from './briefingCron.js';
 import { stopAllFridayAudioAsync } from './stopAllFridayAudio.js';
 import { buildOpenclawStatus } from './openclawStatus.js';
 import { handleEvolutionWebhook } from './evolutionWebhook.js';
+import { mirrorMusicAutoplayFromRedisToFile } from '../../lib/musicAutoplayPrefs.js';
 
 /** When true, startup / done / launch songs use yt-dlp on the PC even if an Alexa cookie exists (hear music on your Windows output). */
 function fridaySongsPreferLocalPc() {
@@ -155,6 +156,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
 loadOpenclawUserConfig();
+void mirrorMusicAutoplayFromRedisToFile();
 
 const PORT = Number(process.env.PORT || 3848);
 const N8N_INTAKE_URL = process.env.N8N_INTAKE_URL || 'http://127.0.0.1:5678/webhook/friday-intake';

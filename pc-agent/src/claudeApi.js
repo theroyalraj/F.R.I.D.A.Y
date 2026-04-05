@@ -73,9 +73,8 @@ function anthropicPromptCacheEnabled() {
  * @param {{ speakStyleExtra?: string, companyContext?: string, personaInstruction?: string }} opts
  */
 function buildAnthropicSystemPayload(opts) {
-  const company = opts.meta && String(opts.companyContext).trim()
-    ? String(opts.companyContext).trim()
-    : opts.companyContext && String(opts.companyContext).trim()
+  const company =
+    opts.companyContext && String(opts.companyContext).trim()
       ? String(opts.companyContext).trim()
       : '';
   const style =
@@ -85,10 +84,6 @@ function buildAnthropicSystemPayload(opts) {
   const persona =
     opts.personaInstruction && String(opts.personaInstruction).trim()
       ? String(opts.personaInstruction).trim()
-      : '';
-  const companyStr =
-    opts.companyContext && String(opts.companyContext).trim()
-      ? String(opts.companyContext).trim()
       : '';
 
   if (!anthropicPromptCacheEnabled()) {
@@ -102,7 +97,7 @@ function buildAnthropicSystemPayload(opts) {
       cache_control: { type: 'ephemeral' },
     },
   ];
-  if (companyStr) blocks.push({ type: 'text', text: companyStr });
+  if (company) blocks.push({ type: 'text', text: company });
   if (persona) blocks.push({ type: 'text', text: persona });
   if (style) blocks.push({ type: 'text', text: style });
   return {
@@ -158,7 +153,7 @@ export function isApiKeyAvailable() {
 /**
  * Call the Anthropic Messages API directly.
  * @param {string} prompt — latest user message (after priorTurns when multi-turn)
- * @param {{ model?: string, timeoutMs?: number, log?: import('pino').Logger, speakStyleExtra?: string, companyContext?: string, priorTurns?: Array<{ role: string, content: string }> }} opts
+ * @param {{ model?: string, timeoutMs?: number, log?: import('pino').Logger, speakStyleExtra?: string, companyContext?: string, personaInstruction?: string, priorTurns?: Array<{ role: string, content: string }> }} opts
  * @returns {Promise<{ ok: boolean, text: string, model: string, ms: number, needsOpenRouterKey?: boolean, deferred?: boolean, deferredContext?: { prompt: string, system: string, tier: string, timeoutMs: number, log?: import('pino').Logger } }>}
  */
 export async function callClaudeApi(prompt, opts = {}) {
@@ -183,11 +178,13 @@ export async function callClaudeApi(prompt, opts = {}) {
   const systemString = buildVoiceSystem({
     speakStyleExtra: opts.speakStyleExtra,
     companyContext: opts.companyContext,
+    personaInstruction: opts.personaInstruction,
   });
   const deferredPrompt = buildDeferredPrompt(latest, priorTurns);
   const { system: systemPayload, headers: anthropicExtraHeaders } = buildAnthropicSystemPayload({
     speakStyleExtra: opts.speakStyleExtra,
     companyContext: opts.companyContext,
+    personaInstruction: opts.personaInstruction,
   });
 
   if (await isAnthropicCooldownActive()) {

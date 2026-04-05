@@ -9,7 +9,8 @@ import dotenv from 'dotenv';
 import pinoHttp from 'pino-http';
 import { rootLogger } from './log.js';
 import { runTask } from './taskRunner.js';
-import { playMusicSearch, stopMusicPlayback } from './playMusic.js';
+import { playMusicSearch, stopMusicPlayback, setMusicPlayVolumeCli } from './playMusic.js';
+import { getMusicPlayVolumePercent } from './musicVolume.js';
 import { pythonChildExecutable } from './winPython.js';
 import { prepareTextForTts } from './ttsPrep.js';
 import { piperConfigured, synthesizePiperWav } from './piperTts.js';
@@ -51,6 +52,11 @@ import {
   refreshPersonaPatchRedisFromDb,
   getVoicePersonasRegistrySnapshot,
 } from './voiceAgentPersona.js';
+import {
+  getMusicAutoplayEnabled,
+  setMusicAutoplayEnabled,
+  mirrorMusicAutoplayFromRedisToFile,
+} from '../../lib/musicAutoplayPrefs.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, '../public');
@@ -73,6 +79,7 @@ function broadcastEvent(type, data = {}) {
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
 loadOpenclawUserConfig();
+void mirrorMusicAutoplayFromRedisToFile();
 
 const PORT = Number(process.env.PC_AGENT_PORT || 3847);
 
@@ -253,7 +260,7 @@ const voiceRouter = express.Router();
 
 voiceRouter.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, POST, PUT, OPTIONS');
   res.setHeader(
     'Access-Control-Allow-Headers',
     'Content-Type, Accept, ngrok-skip-browser-warning, Authorization',
@@ -349,6 +356,54 @@ voiceRouter.post('/celebration', async (req, res, next) => {
   } catch (e) {
     next(e);
   }
+});
+
+/** Current Maestro music level 0–100 (Redis / file / FRIDAY_PLAY_VOLUME). */
+voiceRouter.get('/music/volume', async (_req, res) => {
+  try {
+    const volume = await getMusicPlayVolumePercent();
+    res.json({ ok: true, volume });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+/** Automatic background music (scheduler, ambient clips, gateway boot / task-done songs). Not manual play from Listen. */
+voiceRouter.get('/music/autoplay', async (_req, res) => {
+  try {
+    const enabled = await getMusicAutoplayEnabled();
+    res.json({ ok: true, enabled });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+voiceRouter.put('/music/autoplay', async (req, res) => {
+  const raw = req.body?.enabled;
+  if (typeof raw !== 'boolean') {
+    return res.status(400).json({ ok: false, error: 'Expected JSON body: { "enabled": true|false }' });
+  }
+  try {
+    const { ok, enabled } = await setMusicAutoplayEnabled(raw);
+    res.json({ ok: ok !== false, enabled });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+/** Persist music level and retune live ffplay session (Windows mixer). */
+voiceRouter.put('/music/volume', async (req, res) => {
+  const raw = req.body?.volume;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) {
+    return res.status(400).json({ ok: false, error: 'Expected JSON body: { "volume": 0-100 }' });
+  }
+  const volume = Math.max(0, Math.min(100, Math.round(n)));
+  const r = await setMusicPlayVolumeCli(volume);
+  if (!r.ok) {
+    return res.status(500).json({ ok: false, volume: r.volume, detail: r.detail });
+  }
+  res.json({ ok: true, volume: r.volume });
 });
 
 /** Listen UI — start yt-dlp + ffplay full track; broadcasts music_play SSE (Maestro orb). */

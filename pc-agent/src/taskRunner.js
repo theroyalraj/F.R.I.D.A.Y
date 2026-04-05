@@ -18,6 +18,13 @@ import { getModelCascade, isClaudeFallbackEnabled, refreshModelPool } from './op
 import { sanitizeConversationTail, flattenConversationForSingleShot } from './chatContext.js';
 import { buildListenGmailContextBlock, listenGmailContextEnabledForSource } from './listenGmailContext.js';
 import { tryReadAiCaches, persistAiGeneration } from './aiTaskCache.js';
+import { getVoiceAgentPersonasMerged } from './voiceAgentPersona.js';
+import {
+  resolveAssignedPersonaKey,
+  isAssignedTask,
+  buildPersonaInstruction,
+  replyVoiceMeta,
+} from './taskAssignRouting.js';
 
 // Sources that need fast conversational responses — use direct API, not CLI
 const FAST_SOURCES = new Set([
@@ -195,7 +202,25 @@ export async function runTask(body, reqLog, options = {}) {
     }
   }
 
-  const systemForCache = buildVoiceSystem({ speakStyleExtra, companyContext });
+  /** @type {Record<string, string>} */
+  let replyExtras = {};
+  let personaInstruction = '';
+  let assignedFast = false;
+  if (FAST_SOURCES.has(src)) {
+    const { merged } = await getVoiceAgentPersonasMerged();
+    const personaKeyRaw = resolveAssignedPersonaKey(body);
+    assignedFast = isAssignedTask(body, personaKeyRaw);
+    const effectivePersonaKey = personaKeyRaw || (assignedFast ? 'jarvis' : null);
+    if (effectivePersonaKey) {
+      personaInstruction = buildPersonaInstruction(merged, effectivePersonaKey);
+      replyExtras = replyVoiceMeta(merged, effectivePersonaKey);
+    }
+    if (assignedFast) {
+      reqLog.info({ taskRoute: 'assigned', persona: effectivePersonaKey }, 'fast path: assigned → Claude-first');
+    }
+  }
+
+  const systemForCache = buildVoiceSystem({ speakStyleExtra, companyContext, personaInstruction });
 
   /**
    * @param {{ summary: string, mode: string, model: string, provider?: string, fromCache: 'exact' | 'semantic' }} cached
@@ -229,29 +254,131 @@ export async function runTask(body, reqLog, options = {}) {
         correlationId,
         summary: cached.summary,
         cacheHit: cached.fromCache,
+        ...replyExtras,
       },
     };
   }
 
-  // ── OpenRouter free (cascade): try pool models, fall back to Claude Opus ────
   const openRouterDirectTimeoutMs =
     src === 'whatsapp' ? Math.min(TIMEOUT, 180_000) : Math.min(TIMEOUT, 45_000);
 
-  if (FAST_SOURCES.has(src) && claudeModel === 'openrouter-free') {
-    if (!isOpenRouterConfigured()) {
-      reqLog.warn({ mode: 'openrouter' }, 'openrouter-free selected but OPENROUTER_API_KEY missing');
-      return {
-        status: 200,
-        json: {
-          ok: false,
-          mode: 'openrouter',
-          userId,
-          correlationId,
-          error: OPENROUTER_SETUP_MESSAGE,
-        },
-      };
-    }
+  // ── Assigned fast tasks: Claude API first (persona system prompt + reply voice) ───
+  if (FAST_SOURCES.has(src) && assignedFast && isApiKeyAvailable()) {
+    let apiTier = 'sonnet';
+    if (claudeModel === 'opus') apiTier = 'opus';
+    else if (claudeModel === 'haiku') apiTier = 'haiku';
+    const apiTimeoutMs =
+      src === 'whatsapp' ? Math.min(TIMEOUT, 180_000) : Math.min(TIMEOUT, 20_000);
+    reqLog.info({ mode: 'api', apiTier, apiTimeoutMs, taskRoute: 'assigned' }, 'assigned → Claude API');
+    try {
+      const apiModelKey = `api:${apiTier}:assigned`;
+      const cachedAssigned = await tryReadAiCaches({
+        prompt: shotPrompt,
+        system: systemForCache,
+        modelKey: apiModelKey,
+        source: src,
+        body,
+        log: reqLog,
+      });
+      if (cachedAssigned) return await finishFromCache(cachedAssigned, apiModelKey);
 
+      const result = await callClaudeApi(t, {
+        model: apiTier,
+        timeoutMs: apiTimeoutMs,
+        log: reqLog,
+        speakStyleExtra,
+        companyContext,
+        personaInstruction,
+        priorTurns: tailOk,
+      });
+      if (result.needsOpenRouterKey) {
+        reqLog.info({ mode: 'api', taskRoute: 'assigned' }, 'assigned: anthropic limited, no OpenRouter key');
+        return {
+          status: 200,
+          json: {
+            ok: false,
+            mode: 'api',
+            userId,
+            correlationId,
+            error: OPENROUTER_SETUP_MESSAGE,
+            taskRoute: 'assigned-claude',
+            ...replyExtras,
+          },
+        };
+      }
+      if (result.deferred && result.deferredContext) {
+        scheduleOpenRouterFallback(result.deferredContext, {
+          modelKey: `${apiModelKey}:openrouter-deferred`,
+          mode: 'api',
+          source: src,
+          orgId: options.orgId ?? null,
+          userId: userId ?? null,
+        });
+        return {
+          status: 200,
+          json: {
+            ok: true,
+            mode: 'api',
+            userId,
+            correlationId,
+            summary: '',
+            speakAsync: false,
+            deferredOpenRouter: true,
+            taskRoute: 'assigned-claude',
+            ...replyExtras,
+          },
+        };
+      }
+      if (result.skippedAnthropicCooldown) {
+        return {
+          status: 200,
+          json: {
+            ok: true,
+            mode: 'api',
+            userId,
+            correlationId,
+            summary: '',
+            speakAsync: false,
+            taskRoute: 'assigned-claude',
+            ...replyExtras,
+          },
+        };
+      }
+      if (result.ok && (result.text || '').trim()) {
+        await persistAiGeneration({
+          prompt: shotPrompt,
+          system: systemForCache,
+          modelKey: apiModelKey,
+          responseText: result.text,
+          model: result.model,
+          mode: 'api',
+          provider: 'anthropic',
+          source: src,
+          latencyMs: result.ms,
+          orgId: options.orgId ?? null,
+          userId: userId ?? null,
+          log: reqLog,
+        });
+        return {
+          status: 200,
+          json: {
+            ok: true,
+            mode: 'api',
+            userId,
+            correlationId,
+            summary: result.text,
+            taskRoute: 'assigned-claude',
+            ...replyExtras,
+          },
+        };
+      }
+    } catch (e) {
+      reqLog.warn({ err: String(e?.message || e) }, 'assigned Claude API failed — will try OpenRouter if configured');
+    }
+  }
+
+  // ── OpenRouter free (cascade): preferred for unassigned fast path; fallback for assigned if Claude unavailable/failed ────
+  if (FAST_SOURCES.has(src) && isOpenRouterConfigured()) {
     // Background-refresh pool from OpenRouter /models API (non-blocking after first load)
     refreshModelPool({ log: reqLog }).catch(() => {});
 
@@ -309,6 +436,8 @@ export async function runTask(body, reqLog, options = {}) {
             userId,
             correlationId,
             summary: result.text,
+            taskRoute: assignedFast ? 'assigned-openrouter' : 'openrouter',
+            ...replyExtras,
           },
         };
       }
@@ -342,6 +471,7 @@ export async function runTask(body, reqLog, options = {}) {
           log: reqLog,
           speakStyleExtra,
           companyContext,
+          personaInstruction,
           priorTurns: tailOk,
         });
         if (opusResult.ok && (opusResult.text || '').trim()) {
@@ -371,6 +501,8 @@ export async function runTask(body, reqLog, options = {}) {
               userId,
               correlationId,
               summary: opusResult.text,
+              taskRoute: assignedFast ? 'assigned-openrouter-fallback' : 'openrouter-fallback',
+              ...replyExtras,
             },
           };
         }
@@ -391,6 +523,7 @@ export async function runTask(body, reqLog, options = {}) {
               correlationId,
               summary: '',
               deferredOpenRouter: true,
+              ...replyExtras,
             },
           };
         }
@@ -399,16 +532,10 @@ export async function runTask(body, reqLog, options = {}) {
       }
     }
 
-    return {
-      status: 200,
-      json: {
-        ok: false,
-        mode: 'openrouter',
-        userId,
-        correlationId,
-        error: 'All free models rate-limited and Claude fallback unavailable. Try again shortly.',
-      },
-    };
+    reqLog.warn(
+      { mode: 'openrouter' },
+      'OpenRouter cascade exhausted — falling back to Claude API fast path when available',
+    );
   }
 
   // ── Fast path: direct API for voice/mic commands ────────────────────────────
@@ -441,6 +568,7 @@ export async function runTask(body, reqLog, options = {}) {
         log:       reqLog,
         speakStyleExtra,
         companyContext,
+        personaInstruction,
         priorTurns: tailOk,
       });
       if (result.needsOpenRouterKey) {
@@ -453,6 +581,7 @@ export async function runTask(body, reqLog, options = {}) {
             userId,
             correlationId,
             error: OPENROUTER_SETUP_MESSAGE,
+            ...replyExtras,
           },
         };
       }
@@ -482,6 +611,8 @@ export async function runTask(body, reqLog, options = {}) {
             summary: '',
             speakAsync: false,
             deferredOpenRouter: true,
+            taskRoute: 'claude-fast',
+            ...replyExtras,
           },
         };
       }
@@ -496,6 +627,8 @@ export async function runTask(body, reqLog, options = {}) {
             correlationId,
             summary: '',
             speakAsync: false,
+            taskRoute: 'claude-fast',
+            ...replyExtras,
           },
         };
       }
@@ -518,7 +651,15 @@ export async function runTask(body, reqLog, options = {}) {
       }
       return {
         status: 200,
-        json: { ok: result.ok, mode: 'api', userId, correlationId, summary: result.text },
+        json: {
+          ok: result.ok,
+          mode: 'api',
+          userId,
+          correlationId,
+          summary: result.text,
+          taskRoute: 'claude-fast',
+          ...replyExtras,
+        },
       };
     } catch (e) {
       reqLog.warn({ err: String(e.message) }, 'claude api failed — falling back to CLI');

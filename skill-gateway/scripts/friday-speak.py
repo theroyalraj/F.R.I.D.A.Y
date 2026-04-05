@@ -22,10 +22,13 @@ Env vars (all optional):
                      sticky session / env if they point at a blocked voice
   FRIDAY_TTS_USE_SESSION_STICKY_VOICE  set false so FRIDAY_TTS_VOICE from this
                      process env wins over .session-voice.json (e.g. ambient alt voice)
-  FRIDAY_TTS_PRIORITY  when true (1/true/on): voice-daemon / urgent playback —
-                     stops competing friday-player + ambient TTS, clears the TTS
-                     lock, then speaks immediately; if ambient was mid-line, replays
-                     it afterward with a short apology (friday-listen sets this).
+  FRIDAY_TTS_PRIORITY  Hard preempt: 1/true/on/high/hard — stops competing
+                     friday-player + ambient TTS, clears the TTS lock, then speaks;
+                     if ambient was mid-line, optional replay afterward.
+                     Cooperative (same tier, no pre-empting each other): 2/cooperative/
+                     soft/queue — still bypasses Cursor defer when combined with
+                     FRIDAY_TTS_BYPASS_CURSOR_DEFER, but waits in line for other TTS
+                     instead of killing it (ECHO silence nudges + task summary digest).
   FRIDAY_TTS_LOCK_TTL_SEC  Redis + friday-tts-active lock TTL seconds (default 600;
                      clamped 60–3600). Must match waiter stale thresholds in scripts/tts_lock_env.py.
   FRIDAY_TTS_INTERRUPT_MUSIC  set to ui (or true/yes/on) to allow fading/stopping
@@ -70,6 +73,7 @@ import atexit
 import asyncio
 import hashlib
 import io
+import json
 import os
 import random
 import unicodedata
@@ -896,12 +900,11 @@ def _music_duck_level() -> float:
 
 
 def _music_normal_level() -> float:
-    """Normal mixer volume for music (derived from FRIDAY_PLAY_VOLUME 0–100 → 0.0–1.0)."""
-    raw = os.environ.get("FRIDAY_PLAY_VOLUME", "20").split("#")[0].strip()
-    try:
-        return max(0.0, min(1.0, int(float(raw)) / 100.0))
-    except ValueError:
-        return 0.20
+    """Normal mixer volume for music (prefs / env 0–100 → 0.0–1.0)."""
+    from music_volume_prefs import read_music_play_volume_percent
+
+    pct = read_music_play_volume_percent()
+    return max(0.0, min(1.0, pct / 100.0))
 
 
 def _get_music_pid() -> int | None:
@@ -1248,6 +1251,40 @@ def _stamp_tts_activity_long() -> None:
         pass
 
 
+def _stamp_voice_context() -> None:
+    """Keep friday:voice:context:{session} last_used + status fresh on every TTS.
+
+    Key naming mirrors pick-session-voice.py:
+      FRIDAY_TTS_SESSION=""          → cursor:main
+      FRIDAY_TTS_SESSION="subagent"  → cursor:subagent
+      FRIDAY_TTS_SESSION="cursor-reply" → cursor:reply
+      FRIDAY_TTS_SESSION="<persona>" → <persona>  (e.g. "nova", "dexter", "echo")
+
+    Persona sessions (set by friday_speak_env_for_persona) get their own key so
+    they never overwrite cursor:main with notification activity.
+    """
+    r = _get_redis_client()
+    if r is None:
+        return
+    try:
+        _CURSOR_SESSION_MAP = {
+            "":             "cursor:main",
+            "subagent":     "cursor:subagent",
+            "cursor-reply": "cursor:reply",
+            "thinking":     "cursor:thinking",
+        }
+        ctx = _CURSOR_SESSION_MAP.get(_SESSION_KIND, _SESSION_KIND) or "cursor:main"
+        key = f"friday:voice:context:{ctx}"
+        now = __import__("datetime").datetime.utcnow().isoformat() + "Z"
+        existing_voice = r.hget(key, "voice")
+        if existing_voice and existing_voice == VOICE:
+            r.hset(key, mapping={"last_used": now, "status": "active"})
+        elif VOICE:
+            r.hset(key, mapping={"voice": VOICE, "set_at": now, "last_used": now, "status": "active"})
+    except Exception:
+        pass
+
+
 def _release_own_tts_lock() -> None:
     """
     Remove TTS_ACTIVE_FILE only if this process is the recorded holder.
@@ -1543,11 +1580,20 @@ async def speak():
 
     # For playback (not --output/--stdout) signal to ambient that TTS is active.
     is_playback = not (OUTPUT or STDOUT)
-    _priority = os.environ.get("FRIDAY_TTS_PRIORITY", "").strip().lower() in (
+    _prio_raw = os.environ.get("FRIDAY_TTS_PRIORITY", "").strip().lower()
+    _priority_preempt = _prio_raw in (
         "1",
         "true",
         "yes",
         "on",
+        "high",
+        "hard",
+    )
+    _priority_bypass_cursor = _priority_preempt or _prio_raw in (
+        "2",
+        "cooperative",
+        "soft",
+        "queue",
     )
     _is_thinking = os.environ.get("FRIDAY_TTS_THINKING", "").strip().lower() in (
         "1", "true", "yes", "on",
@@ -1622,7 +1668,7 @@ async def speak():
         _ds = os.environ.get("FRIDAY_DEFER_SPEAK_WHEN_CURSOR", "true").strip().lower()
         if (
             not _bypass
-            and not _priority
+            and not _priority_bypass_cursor
             and _ds not in ("0", "false", "no", "off")
             and platform.system() in ("Windows", "Darwin")
         ):
@@ -1649,15 +1695,16 @@ async def speak():
         # Bump generation before pre-empt so in-flight older speaks see stale gen immediately,
         # and waiters in the file-lock loop exit without overlapping playback.
         _my_gen = _bump_tts_generation()
-        if _priority:
+        if _priority_preempt:
             preempted_replay = _preempt_for_priority_tts()
 
         # ── Redis distributed lock — serialises ALL callers system-wide ──
-        if not _acquire_redis_tts_lock(priority=_priority, timeout=60.0):
+        if not _acquire_redis_tts_lock(priority=_priority_preempt, timeout=60.0):
             print("[friday-speak] timed out waiting for Redis TTS lock — skipping", flush=True)
             sys.exit(0)
         _stamp_tts_call()
         _stamp_tts_activity_long()
+        _stamp_voice_context()
 
         # ── Global serialisation: wait for any other speak instance to finish ──
         # Uses O_CREAT|O_EXCL for atomic lock acquisition on NTFS — eliminates
@@ -1702,7 +1749,7 @@ async def speak():
             except OSError:
                 pass
 
-            if _priority:
+            if _priority_preempt:
                 # Another friday-speak still starting — pre-empt again and retry.
                 _preempt_for_priority_tts()
                 await asyncio.sleep(0.08)
@@ -1738,7 +1785,7 @@ async def speak():
     _replay_enabled = os.environ.get("FRIDAY_AMBIENT_REPLAY_PREEMPTED", "false").strip().lower() in (
         "1", "true", "yes", "on",
     )
-    if is_playback and _priority and preempted_replay and _replay_enabled:
+    if is_playback and _priority_preempt and preempted_replay and _replay_enabled:
         _play_priority_followup(preempted_replay)
 
 

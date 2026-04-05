@@ -9,6 +9,7 @@ import { spawn } from 'node:child_process';
 import { pythonChildExecutable } from './winPython.js';
 import { getSpeakStyle, normalizeSpeakStyle, mergeDeliveryWithSpeakStyle } from './speakStyle.js';
 import { getAllVoiceContexts } from './voiceRedis.js';
+import { readMusicAutoplayEnabledSync } from '../../lib/musicAutoplayPrefs.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PLAY_SCRIPT = path.resolve(__dirname, '../../skill-gateway/scripts/friday-play.py');
@@ -132,7 +133,7 @@ export function buildFocusModeDigest(style, contexts) {
 export function getCelebrationMode() {
   const song = (process.env.FRIDAY_DONE_SONG || '').trim();
   if (!song) return 'off';
-  if (/^(false|0|no|off)$/i.test((process.env.FRIDAY_AUTOPLAY || 'true').trim())) return 'off';
+  if (!readMusicAutoplayEnabledSync()) return 'off';
   const m = (process.env.FRIDAY_DONE_SONG_MODE || 'ask').trim().toLowerCase();
   if (['off', 'false', '0', 'no'].includes(m)) return 'off';
   if (['immediate', 'now', 'auto'].includes(m)) return 'immediate';
@@ -203,7 +204,7 @@ export async function spawnCelebrationSpeak(text, log) {
       ...process.env,
       FRIDAY_TTS_VOICE: process.env.FRIDAY_TTS_VOICE || 'en-US-AvaMultilingualNeural',
       FRIDAY_TTS_DEVICE: process.env.FRIDAY_TTS_DEVICE || 'default',
-      FRIDAY_TTS_PRIORITY: '1',
+      FRIDAY_TTS_PRIORITY: 'cooperative',
       FRIDAY_TTS_BYPASS_CURSOR_DEFER: 'true',
       ...delivery,
     },
