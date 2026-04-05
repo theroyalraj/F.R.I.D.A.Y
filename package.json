@@ -47,6 +47,7 @@
     "start:action-tracker": "python scripts/friday-action-tracker.py",
     "smoke:action-tracker": "node scripts/smoke-action-tracker.mjs",
     "smoke:listen-ui": "node scripts/smoke-listen-ui.mjs",
+    "smoke:ngrok-split": "node scripts/smoke-ngrok-split.mjs",
     "setup:alexa": "node scripts/setup-alexa-cookie.mjs",
     "play": "python skill-gateway/scripts/friday-play.py",
     "clear:locks": "python skill-gateway/scripts/clear_friday_locks.py",

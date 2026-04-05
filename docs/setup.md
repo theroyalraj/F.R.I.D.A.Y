@@ -330,9 +330,22 @@ Gmail in the rail needs **`GMAIL_ADDRESS`** and **`GMAIL_APP_PWD`** in `.env` (s
 - Add N8N branches after **Normalize** (Alexa) or extend the WhatsApp flow: Gmail / Google Sheets nodes (OAuth in N8N).
 - Keep **long** work out of the Alexa request path; the gateway already ACKs fast.
 
+## 10b) Split-stack: home server + remote clients (ngrok)
+
+Run **Docker, Postgres, Redis, skill-gateway, and pc-agent** on one always-on machine. On laptops (macOS or Windows), run **only** the client stack so mic, **friday-speak**, Cursor reply TTS, and ambient talk to the house over HTTPS.
+
+- **Home:** `npm run start:server-stack` (or `OPENCLAW_START_MODE=server` with `npm run start:all`). Keep `OPENCLAW_SKILL_GATEWAY_URL=http://127.0.0.1:3848` on the server. Tunnel pc-agent: `npm run tunnel:friday` → `ngrok http 3847`. Optionally tunnel the gateway: `npm run tunnel:ngrok` → `ngrok http 3848`.
+- **Remote:** Copy `.env` secrets (`PC_AGENT_SECRET`, etc.) from the server; set `PC_AGENT_URL` and `FRIDAY_PC_AGENT_URL` to the **public** pc-agent base (no trailing slash). Set `OPENCLAW_START_MODE=client` or run `npm run start:client-stack`. Turn off server-only daemons on the laptop (e.g. `FRIDAY_EMAIL_WATCH=false` if Gmail watch runs on the server).
+- **Redis:** For shared TTS locks and ambient coherence, use the **same** `OPENCLAW_REDIS_URL` on server and clients (Tailscale/VPN IP, or managed Redis). Plain `127.0.0.1` on a remote machine is **local-only** and will diverge from the house.
+- **Bootstrap:** [`scripts/openclaw-client-bootstrap.sh`](../scripts/openclaw-client-bootstrap.sh) (host raw URL on a GitHub Gist) clones or pulls the repo, runs `npm ci`, `pip install -r scripts/requirements-openclaw-client.txt`, upserts client `.env` keys, optionally speaks a **celebration** after a successful `/voice/ping` (at most once per 30 minutes). Set `OPENCLAW_REPO_URL` or pass `--repo`.
+- **macOS:** Listen UI opens via `open`. Offline TTS uses **`say`** with optional `FRIDAY_MACOS_SAY_VOICE` and `FRIDAY_MACOS_SAY_RATE`. List voices: `scripts/list-macos-voices.sh` or `python scripts/pick-macos-say-voice.py --list`. Optional Notification Center bridge: `FRIDAY_MAC_NOTIFY_WATCH=true` (subscribes to `/voice/stream` and forwards `win_notify` SSE events).
+- **Smoke:** `npm run smoke:ngrok-split -- https://YOUR.ngrok-free.app` checks health and voice ping (pass ngrok URL as first argument or set `PC_AGENT_TEST_URL`).
+
 ## 11) Security checklist
 
-- Do **not** expose N8N (5678) or pc-agent (3847) to the internet.
+- Do **not** expose N8N (5678) or Postgres **5433** to the internet without auth.
+- **pc-agent on 3847** is powerful: if you use **ngrok** on 3847, treat the URL as a secret, prefer **ngrok OAuth** or IP allowlists, and keep `PC_AGENT_SECRET` long and unguessable.
+- Prefer **Tailscale or VPN** for `OPENCLAW_REDIS_URL` instead of exposing Redis on a public port.
 - Rotate `N8N_WEBHOOK_SECRET` and `PC_AGENT_SECRET` if leaked.
 - Review allowlisted apps in `pc-agent/src/open.js` before widening.
 

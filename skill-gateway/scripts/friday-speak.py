@@ -661,6 +661,23 @@ def _sapi_voice_setup_ps() -> str:
     return "$s.SelectVoiceByHints([System.Speech.Synthesis.VoiceGender]::Female); "
 
 
+def _darwin_say_cmd_prefix() -> list[str]:
+    """macOS say(1): optional FRIDAY_MACOS_SAY_VOICE and FRIDAY_MACOS_SAY_RATE (words per minute, roughly 90–200)."""
+    cmd: list[str] = ["say"]
+    voice = os.environ.get("FRIDAY_MACOS_SAY_VOICE", "").strip()
+    if voice:
+        cmd.extend(["-v", voice])
+    rate = os.environ.get("FRIDAY_MACOS_SAY_RATE", "").strip()
+    if rate:
+        try:
+            wpm = int(rate)
+            if 1 <= wpm <= 500:
+                cmd.extend(["-r", str(wpm)])
+        except ValueError:
+            pass
+    return cmd
+
+
 def _offline_speak_short(message: str) -> None:
     """Brief offline TTS: Windows SAPI or macOS `say` (Edge timeout / cap paths)."""
     try:
@@ -669,10 +686,7 @@ def _offline_speak_short(message: str) -> None:
             return
         sysname = platform.system()
         if sysname == "Darwin":
-            voice = os.environ.get("FRIDAY_MACOS_SAY_VOICE", "").strip()
-            cmd = ["say"]
-            if voice:
-                cmd.extend(["-v", voice])
+            cmd = _darwin_say_cmd_prefix()
             cmd.append(safe)
             print(f"[friday-speak] say short: {safe[:80]!r}...", flush=True)
             subprocess.run(cmd, timeout=15, capture_output=True)
@@ -1699,10 +1713,7 @@ def _sapi_speak() -> None:
         safe = TEXT.replace("'", " ").replace('"', " ")[:400]
         sysname = platform.system()
         if sysname == "Darwin":
-            voice = os.environ.get("FRIDAY_MACOS_SAY_VOICE", "").strip()
-            cmd = ["say"]
-            if voice:
-                cmd.extend(["-v", voice])
+            cmd = _darwin_say_cmd_prefix()
             cmd.append(safe)
             print(f"[friday-speak] say fallback (Edge offline): text={safe[:60]!r}...", flush=True)
             subprocess.run(cmd, timeout=120, capture_output=False)
@@ -2223,7 +2234,7 @@ async def _speak_inner(my_gen: int) -> None:
         except Exception as dl_exc:
             print(f"friday-speak: edge-tts download failed — {dl_exc}", file=sys.stderr, flush=True)
             if platform.system() == "Darwin":
-                hint = "macOS: optional FRIDAY_MACOS_SAY_VOICE for the built-in say command."
+                hint = "macOS: FRIDAY_MACOS_SAY_VOICE and optional FRIDAY_MACOS_SAY_RATE for the built-in say command."
             elif platform.system() == "Windows":
                 hint = "Set FRIDAY_WIN_TTS_VOICE (e.g. Microsoft Zira Desktop) or FRIDAY_WIN_TTS_GENDER."
             else:

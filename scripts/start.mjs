@@ -107,6 +107,11 @@ function readWinNotifyFromDotEnv() {
   return envBool('FRIDAY_WIN_NOTIFY_WATCH', true);
 }
 
+/** macOS — SSE win_notify-style toasts via osascript (default off). */
+function readMacNotifyFromDotEnv() {
+  return envBool('FRIDAY_MAC_NOTIFY_WATCH', false);
+}
+
 /** Cursor JSONL → TTS: on if reply and/or thinking toggle is on, unless live narration suppresses it. */
 function readCursorReplyWatchFromDotEnv() {
   function enabled(key) {
@@ -299,9 +304,21 @@ function waitForPort(port, timeoutMs = 10_000) {
   });
 }
 
-// ── Focus existing Chrome tab (or open if none) ─────────────────────────────
-function openChrome(url) {
-  // Just navigate — Chrome reuses the existing tab for same-origin URLs when no --new-tab flag
+// ── Open Listen UI in the default browser (Windows Chrome preferentially, macOS open, Linux xdg-open) ──
+function openListenBrowser(url) {
+  if (process.platform === 'darwin') {
+    const child = spawn('open', [url], { detached: true, stdio: 'ignore' });
+    child.unref();
+    child.on('error', () => {});
+    return;
+  }
+  if (process.platform === 'linux') {
+    const child = spawn('xdg-open', [url], { detached: true, stdio: 'ignore' });
+    child.unref();
+    child.on('error', () => {});
+    return;
+  }
+  // Windows — prefer Chrome so same-origin reuse behaves; fall back to default handler
   const candidates = [
     'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
     'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
@@ -403,9 +420,10 @@ ${C.reset}\n`);
     process.stdout.write(`${C.warn}[openclaw] Waiting for pc-agent to be ready…${C.reset}\n`);
     const agentReady = await waitForPort(3847, 12_000);
     if (agentReady) {
-      const listenUrl = 'http://127.0.0.1:3847/friday/listen';
-      process.stdout.write(`${C.warn}[openclaw] Opening Chrome → ${listenUrl}${C.reset}\n`);
-      openChrome(listenUrl);
+      const agentBase = (process.env.PC_AGENT_URL || 'http://127.0.0.1:3847').replace(/\/$/, '');
+      const listenUrl = `${agentBase}/friday/listen`;
+      process.stdout.write(`${C.warn}[openclaw] Opening Listen UI → ${listenUrl}${C.reset}\n`);
+      openListenBrowser(listenUrl);
     } else {
       process.stdout.write(`${C.warn}[openclaw] pc-agent not ready in time — skipping Chrome open${C.reset}\n`);
     }
@@ -417,6 +435,14 @@ ${C.reset}\n`);
     process.stdout.write(
       `${C.warn}[openclaw] client mode — voice commands go to ${agentUrl} (set PC_AGENT_URL if remote)${C.reset}\n`,
     );
+    const openClientListen = envBool('OPENCLAW_CLIENT_OPEN_LISTEN', true);
+    if (openClientListen) {
+      const listenUrl = `${agentUrl}/friday/listen`;
+      setTimeout(() => {
+        process.stdout.write(`${C.warn}[openclaw] Opening Listen UI → ${listenUrl}${C.reset}\n`);
+        openListenBrowser(listenUrl);
+      }, 4000);
+    }
   }
 
   if (MODE === 'server') {
@@ -473,6 +499,12 @@ ${C.reset}\n`);
       if (readWinNotifyFromDotEnv() && existsSync(winNotifyScript)) {
         log('winnotify', 'Windows toast notification watcher will start in 3.5 s...');
         await start('winnotify', 'python', ['scripts/win-notify-watch.py'], { delayMs: 3500 });
+      }
+    } else if (process.platform === 'darwin') {
+      const macNotifyScript = path.join(ROOT, 'scripts', 'mac-notify-watch.py');
+      if (readMacNotifyFromDotEnv() && existsSync(macNotifyScript)) {
+        log('macnotify', 'macOS notification watcher (SSE) will start in 3.5 s...');
+        await start('macnotify', 'python', ['scripts/mac-notify-watch.py'], { delayMs: 3500 });
       }
     }
 

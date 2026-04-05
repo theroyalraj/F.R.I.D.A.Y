@@ -182,6 +182,23 @@ app.use((req, res, next) => {
   next();
 });
 
+/** Browser or curl from another origin (e.g. dev UI on file:// or a second host) hitting /openclaw/trigger or /health. */
+function corsPreflightAllow(req, res, next) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS');
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'Content-Type, Accept, Authorization, X-Openclaw-Secret, ngrok-skip-browser-warning',
+  );
+  res.setHeader('Access-Control-Max-Age', '86400');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+  next();
+}
+
+app.use(corsPreflightAllow);
+
 app.use(
   pinoHttp({
     logger: rootLogger,
