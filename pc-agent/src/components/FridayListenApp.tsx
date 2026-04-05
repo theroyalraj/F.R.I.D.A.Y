@@ -978,36 +978,37 @@ const FridayListenApp: React.FC = () => {
       <div className={styles['main-layout']}>
         {/* Left sidebar: orb + sessions */}
         <div className={styles.sidebar}>
-          {/* Orb */}
-          <div
-            className={`${styles['orb-area']} ${styles[`orb-${connectionStatus}`]} ${
-              connectionStatus === 'listening' && !listenMuted ? styles['orb-siri-listen'] : ''
-            }`}
-            style={
-              speakOrbPalette
-                ? ({ '--orb-persona-color': speakOrbPalette.primary } as React.CSSProperties)
-                : undefined
-            }
-            onClick={handleOrbClick}
-            role="button"
-            tabIndex={0}
-          >
-            <div className={styles['orb-circle']}>
-              <span
-                className={`${styles['orb-icon']} ${listenMuted ? styles['orb-icon-muted'] : ''}`}
-                style={speakOrbPalette ? { color: speakOrbPalette.primary, filter: `drop-shadow(0 0 8px ${speakOrbPalette.primary})` } : undefined}
+          {/* Orb — only visible when speaking */}
+          {connectionStatus === 'speaking' && (
+            <>
+              <div
+                className={`${styles['orb-area']} ${styles[`orb-${connectionStatus}`]}`}
+                style={
+                  speakOrbPalette
+                    ? ({ '--orb-persona-color': speakOrbPalette.primary } as React.CSSProperties)
+                    : undefined
+                }
+                onClick={handleOrbClick}
+                role="button"
+                tabIndex={0}
               >
-                {listenMuted ? '\u2298' : (speakOrbIcon && connectionStatus === 'speaking' ? speakOrbIcon : stateIcons[connectionStatus])}
-              </span>
-              {connectionStatus === 'listening' && !listenMuted && <Waveform />}
-            </div>
-          </div>
-          <div
-            className={styles['orb-label']}
-            style={speakOrbPalette && connectionStatus === 'speaking' ? { color: speakOrbPalette.primary } : undefined}
-          >
-            {listenMuted ? 'Muted' : (speakOrbName && connectionStatus === 'speaking' ? speakOrbName : statusLabels[connectionStatus])}
-          </div>
+                <div className={styles['orb-circle']}>
+                  <span
+                    className={styles['orb-icon']}
+                    style={speakOrbPalette ? { color: speakOrbPalette.primary, filter: `drop-shadow(0 0 8px ${speakOrbPalette.primary})` } : undefined}
+                  >
+                    {speakOrbIcon || stateIcons[connectionStatus]}
+                  </span>
+                </div>
+              </div>
+              <div
+                className={styles['orb-label']}
+                style={speakOrbPalette ? { color: speakOrbPalette.primary } : undefined}
+              >
+                {speakOrbName || statusLabels[connectionStatus]}
+              </div>
+            </>
+          )}
 
           {/* Speaking indicator */}
           {speakingText && (
