@@ -11,6 +11,8 @@ Env:
   FRIDAY_CURSOR_GRPC_TTS=false  — speak truncated gRPC result via Sentinel session
   FRIDAY_CURSOR_GRPC_POLL_SEC=2
   FRIDAY_CURSOR_GRPC_MODEL=default
+  FRIDAY_CURSOR_GRPC_MODEL_FALLBACK — optional second model if first returns empty (e.g. gpt-4)
+  FRIDAY_CURSOR_GRPC_RETRY_HTTP11 — set false to skip HTTP/1.1 fallback (see stream_client)
   CURSOR_TRANSCRIPTS_DIR — same as cursor-reply-watch
 """
 
@@ -96,10 +98,24 @@ def _tail_new_lines(path: Path, offset: int) -> tuple[str, int]:
 def _run_grpc(user_text: str) -> None:
     from cursor_grpc.stream_client import GrpcTimingLog, stream_unified_chat
 
-    model = os.environ.get("FRIDAY_CURSOR_GRPC_MODEL", "default").strip() or "default"
+    primary = os.environ.get("FRIDAY_CURSOR_GRPC_MODEL", "default").strip() or "default"
+    fb = os.environ.get("FRIDAY_CURSOR_GRPC_MODEL_FALLBACK", "").strip()
+    models = [primary]
+    if fb and fb != primary:
+        models.append(fb)
+
     slog = GrpcTimingLog()
     slog.emit("t0_user")
-    out = stream_unified_chat(user_text, model=model, timing=slog)
+    out = ""
+    for i, model in enumerate(models):
+        if i > 0:
+            print(f"[gRPC] primary returned empty — retry model={model!r}", flush=True)
+            slog = GrpcTimingLog()
+            slog.emit("t0_user")
+        out = stream_unified_chat(user_text, model=model, timing=slog)
+        if (out or "").strip():
+            break
+        out = ""
     if os.environ.get("FRIDAY_CURSOR_GRPC_TTS", "").strip().lower() in ("1", "true", "yes") and out:
         try:
             from friday_speaker import speaker
@@ -119,24 +135,41 @@ def main() -> None:
     ):
         print("cursor-grpc-watch: FRIDAY_CURSOR_GRPC not enabled — exiting.", flush=True)
         return
-    path = _main_chat_jsonl()
-    if not path:
-        print("cursor-grpc-watch: no main chat jsonl (check .session-voice.json chat_id).", flush=True)
-        return
     poll = float(os.environ.get("FRIDAY_CURSOR_GRPC_POLL_SEC", "2") or "2")
-    print(f"cursor-grpc-watch: tailing {path} poll={poll}s", flush=True)
-    offset = path.stat().st_size
+    wait_chat = float(os.environ.get("FRIDAY_CURSOR_GRPC_WAIT_CHAT_SEC", "5") or "5")
+    path: Path | None = None
+    offset = 0
     seen_user: set[str] = set()
 
+    print(
+        f"cursor-grpc-watch: poll={poll}s — waiting for main Composer jsonl (refreshing .session-voice.json)",
+        flush=True,
+    )
     try:
         while True:
+            if path is None:
+                p = _main_chat_jsonl()
+                if not p:
+                    time.sleep(wait_chat)
+                    continue
+                path = p
+                offset = path.stat().st_size
+                seen_user.clear()
+                print(f"cursor-grpc-watch: tailing {path}", flush=True)
+
             time.sleep(poll)
             p = _main_chat_jsonl()
-            if p and p != path:
+            if not p:
+                print("cursor-grpc-watch: main chat path unavailable — will re-resolve after next wait", flush=True)
+                path = None
+                time.sleep(wait_chat)
+                continue
+            if p != path:
                 path = p
                 offset = path.stat().st_size
                 seen_user.clear()
                 print(f"cursor-grpc-watch: switched to {path}", flush=True)
+
             chunk, offset = _tail_new_lines(path, offset)
             if not chunk:
                 continue
