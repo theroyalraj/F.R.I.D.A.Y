@@ -3,52 +3,11 @@ import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { createClient } from 'redis';
 import { fetchGmailSnapshot } from './gmailRunner.js';
 
 const _ROOT = path.dirname(path.dirname(path.dirname(fileURLToPath(import.meta.url))));
 import { getPoolSnapshot, refreshModelPool } from './openRouterModelPool.js';
 import { getKeyPoolSnapshot, validateAllKeys } from './openRouterKeyPool.js';
-
-// Gmail Redis caching (2-minute TTL)
-const GMAIL_CACHE_KEY = 'openclaw:integrations:gmail:snapshot';
-const GMAIL_CACHE_TTL_SEC = 120; // 2 minutes
-
-function _redisUrl() {
-  return (process.env.OPENCLAW_REDIS_URL || '').trim() || 'redis://127.0.0.1:6379';
-}
-
-async function getCachedGmail() {
-  try {
-    const c = createClient({
-      url: _redisUrl(),
-      socket: { connectTimeout: 800, reconnectStrategy: false },
-    });
-    c.on('error', () => {});
-    await c.connect();
-    const cached = await c.get(GMAIL_CACHE_KEY);
-    await c.quit();
-    return cached ? JSON.parse(cached) : null;
-  } catch (e) {
-    // Silently ignore cache errors
-    return null;
-  }
-}
-
-async function setCachedGmail(data) {
-  try {
-    const c = createClient({
-      url: _redisUrl(),
-      socket: { connectTimeout: 800, reconnectStrategy: false },
-    });
-    c.on('error', () => {});
-    await c.connect();
-    await c.setEx(GMAIL_CACHE_KEY, GMAIL_CACHE_TTL_SEC, JSON.stringify(data));
-    await c.quit();
-  } catch (e) {
-    // Silently ignore cache errors
-  }
-}
 
 function evolutionBase() {
   const port = (process.env.EVOLUTION_PORT || '8181').trim();
@@ -193,36 +152,14 @@ export function createIntegrationsRouter(authMiddleware) {
     const recentOffset = Math.min(500, Math.max(0, Number(req.query.recentOffset) || 0));
 
     try {
-      // Try cache first (ignores offsets for simplicity; cache is for base queries)
-      if (unreadOffset === 0 && recentOffset === 0) {
-        const cached = await getCachedGmail();
-        if (cached) {
-          return res.json(cached);
-        }
-      }
-
-      // Cache miss or pagination query — fetch from Gmail
       const snap = await fetchGmailSnapshot({
         unreadCount,
         recentCount,
         unreadOffset,
         recentOffset,
       });
-
-      // Cache base queries only
-      if (unreadOffset === 0 && recentOffset === 0) {
-        await setCachedGmail(snap);
-      }
-
       res.json(snap);
     } catch (e) {
-      // On error, try to return cached data if available
-      if (unreadOffset === 0 && recentOffset === 0) {
-        const cached = await getCachedGmail();
-        if (cached) {
-          return res.json({ ...cached, _fromCache: true });
-        }
-      }
       req.log?.warn({ err: String(e.message) }, 'integrations gmail failed');
       res.status(503).json({ ok: false, error: String(e.message || e) });
     }
