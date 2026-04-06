@@ -21,8 +21,8 @@ Run this checkpoint flow before:
 
 ## How to do it
 
-```powershell
-cd d:\code\openclaw
+```bash
+cd "$OPENCLAW_HOME"
 
 # 0 — after readonly subagent scan from pre-commit-quality-scan.mdc (when required)
 
@@ -44,7 +44,7 @@ git checkout main
 
 Replace the date segment with the real commit day if needed; if the branch name collides, append `-2`, `-3`, etc.
 
-**Voice:** If Cursor narration is on per **`cursor-agent-narration.mdc`**, after a successful push run **`friday-speak.py`** once with **`FRIDAY_TTS_PRIORITY=1`** and **`FRIDAY_TTS_BYPASS_CURSOR_DEFER=true`**: a verbose spoken summary of what was checkpointed, why, and the branch name in speakable form (see **`no-markdown-in-speech.mdc`**). If narration is off, skip speech.
+**Voice:** If Cursor narration is on per **`cursor-agent-narration.mdc`**, after a successful push run **`oc-speak.sh`** once with **priority `1`**: a verbose spoken summary of what was checkpointed, why, and the branch name in speakable form (see **`no-markdown-in-speech.mdc`**). If narration is off, skip speech.
 
 Then make your change on the working tree on your usual branch (e.g. `main`).
 
@@ -71,9 +71,6 @@ When narration is on: prefer **one** post-push checkpoint explanation (covers ou
 
 Post-push example (adjust the spoken text to match the real branch and message):
 
-```powershell
-cd d:\code\openclaw
-$env:FRIDAY_TTS_PRIORITY='1'
-$env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'
-python skill-gateway/scripts/friday-speak.py "Done saving checkpoint. I pushed a new branch wip slash checkpoint slash your slug with everything staged so far, so main stays safe before the next change."
+```bash
+$OPENCLAW_HOME/scripts/oc-speak.sh "Done saving checkpoint. I pushed a new branch wip slash checkpoint slash your slug with everything staged so far, so main stays safe before the next change." 1
 ```

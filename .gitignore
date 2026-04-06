@@ -4,6 +4,8 @@ __pycache__/
 node_modules/
 openclaw-ship/extension-ui/dist/
 .env
+# Top-level secrets dump (duplicate of .env) — never commit
+/env
 *.log
 logs/
 .DS_Store

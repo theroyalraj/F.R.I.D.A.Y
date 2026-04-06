@@ -5,102 +5,88 @@ alwaysApply: true
 
 # Narrate Thinking — Speak Reasoning Before Redaction
 
-Cursor redacts extended-thinking content once the thinking tab is closed. The only way to preserve it for the user is to **speak the reasoning out loud in speakable chunks** as part of your response — before Cursor ever touches the transcript.
+Cursor redacts extended-thinking content once the thinking tab closes. **Speak the reasoning out loud** in speakable chunks before Cursor touches the transcript.
 
 ## When this applies
 
-Every time you do significant internal reasoning (extended thinking, multi-step analysis, weighing options, diagnosing a bug, planning an approach) — **speak the key reasoning out loud**.
+Every time you do significant internal reasoning — **speak the key reasoning out loud**.
 
-This is NOT the same as the acknowledgement ("Got it…") or the completion summary ("Done…"). This is the **middle part** — the actual thinking that would otherwise be silently redacted.
+This is NOT the acknowledgement nor the completion summary. This is the **middle part**.
 
 ## How to do it
 
-**Prefer combining with the ack.** If your reasoning is short-to-medium (under ~4 sentences), fold it into the acknowledgement call from `acknowledge-before-planning.mdc` instead of firing a separate thinking speak. This avoids two back-to-back speak calls that sound robotic.
+**Prefer combining with the ack.** Fold short reasoning into the ack call from `acknowledge-before-planning.mdc`.
 
-Only fire a **separate** `friday-speak.py` call with `FRIDAY_TTS_THINKING=1` when the reasoning is substantial (5+ sentences) and would make the ack awkwardly long. In that case, one `FRIDAY_TTS_THINKING=1` call captures the essence of your reasoning as a single spoken chunk.
+Only fire a **separate** thinking call when the reasoning is substantial (5+ sentences) and would make the ack awkwardly long.
 
 ### Singleton pattern
 
-`FRIDAY_TTS_THINKING=1` activates a **singleton lock** in the speak script. Only one thinking narration process can be active at a time — if a thinking speak is already in flight (from a previous message, the watcher, or a subagent), the new one **exits silently** instead of queuing. This prevents broken/overlapping audio from piled-up thinking chunks.
+Thinking mode uses a **singleton lock** on the server. Only one thinking narration at a time — extras exit silently.
 
 ### Chunk rules
 
-- **One chunk per message.** Combine your key insights into a single spoken paragraph of 3–6 sentences.
-- **Fire it in the same parallel batch** as your work tool calls — `block_until_ms: 0`.
-- **Speak like a person thinking aloud**, not like a report. Use "I think…", "The issue is…", "So the plan is…", "One thing to watch out for…".
-- **Cover the reasoning, not the actions.** Don't say "I'm going to read the file" — say "The problem is probably in the TTS pipeline because the lock isn't being released." The thinking-sounds rule already covers action narration.
+- **One chunk per message.** Three to six sentences.
+- **Fire in the same parallel batch** as work tool calls — `block_until_ms: 0`.
+- **Speak like a person thinking aloud.**
+- **Cover reasoning, not actions** the thinking-sounds rule already covers.
 
 ### Template
 
-```powershell
-# Single reasoning chunk — set FRIDAY_TTS_THINKING for singleton guard; PRIORITY=1 cuts through ambient like the ack
-cd d:\code\openclaw; $env:FRIDAY_TTS_PRIORITY='1'; $env:FRIDAY_TTS_THINKING='1'; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "So looking at this, I think the issue is [insight], because [reason]. The approach I'd take is [plan]. One thing to be careful about is [risk]."
+```bash
+$OPENCLAW_HOME/scripts/oc-speak.sh "So looking at this, I think the issue is [insight], because [reason]. The approach I would take is [plan]. One thing to be careful about is [risk]." 1 "" thinking
 ```
-
-`block_until_ms: 0` — fires async alongside real work.
 
 ### Subagent variant
 
-Subagents use the same pattern with priority, session env, and the thinking flag:
-
-```powershell
-cd d:\code\openclaw; $env:FRIDAY_TTS_SESSION='subagent'; $env:FRIDAY_TTS_PRIORITY='1'; $env:FRIDAY_TTS_THINKING='1'; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "So I think the approach here is [reasoning]."
+```bash
+$OPENCLAW_HOME/scripts/oc-speak.sh "So I think the approach here is [reasoning]." 1 subagent thinking
 ```
 
 ## What to include in reasoning chunks
 
 | Reasoning type | What to speak |
-|---|---|
+|----------------|---------------|
 | Diagnosis | "I think the problem is X because Y" |
-| Decision | "There are two ways to do this — A or B. Going with A because…" |
-| Discovery | "Interesting — I found that X is actually doing Y, which means…" |
-| Risk | "One thing that could go wrong is X, so I'll make sure to…" |
-| Architecture | "This needs to touch three things: X, Y, and Z. The order matters because…" |
-| Debugging | "The error points to X, but I suspect the real cause is Y upstream" |
+| Decision | "There are two ways — A or B. Going with A because..." |
+| Discovery | "I found that X is actually doing Y, which means..." |
+| Risk | "One thing that could go wrong is X, so I will..." |
+| Architecture | "This needs X, Y, and Z. The order matters because..." |
+| Debugging | "The error points to X, but I suspect Y upstream" |
 
 ## What NOT to do
 
-- **DO mention file names naturally** — say "the speak script" or "server dot JS" or "the env file", not line numbers or raw paths. When you are about to change or create a file, say which file.
-- **Don't dump the entire thinking block** — distill it. If you thought for twenty lines internally, speak the three most important insights in one paragraph.
-- **Don't skip this for complex tasks** — if you did significant reasoning, the user deserves to hear it. That reasoning is about to be redacted.
-- **Don't block on these calls** — always `block_until_ms: 0`.
-- **Don't repeat the acknowledgement** — the ack rule already handles "Got it." This rule handles the reasoning that follows.
-- **Don't fire multiple thinking chunks** — the singleton only lets one through. Combine your reasoning into a single spoken paragraph.
-- **Always include `FRIDAY_TTS_THINKING=1`** — without this flag, no singleton guard is active and you risk overlapping speech.
+- Do not dump twenty lines of internal monologue — distill.
+- Do not block on speak calls.
+- Do not repeat the acknowledgement phrasing.
+- Do not fire multiple thinking chunks — combine into one paragraph.
 
 ## Ordering in a message
 
-**Preferred (combined ack + reasoning — 1 speak call):**
+**Preferred (one speak call):**
 
 ```
-Message N:
-  ├── Shell: FRIDAY_TTS_PRIORITY=1 friday-speak.py "Got it. So the issue is [reasoning]. I'll [plan]."  ← ONE call
-  ├── Read / Grep / Glob: actual work                                                                   ← starts NOW
+Shell: oc-speak.sh "Got it. So the issue is [reasoning]. I will [plan]." 1
+Read / Grep / Glob: actual work
 ```
 
-**Only when reasoning is long (separate thinking call — 2 speak calls max):**
+**Long reasoning (two calls max):**
 
 ```
-Message N:
-  ├── Shell: FRIDAY_TTS_PRIORITY=1 friday-speak.py "Got it…"         ← ack
-  ├── Shell: FRIDAY_TTS_THINKING=1 friday-speak.py "So the issue…"  ← reasoning (singleton)
-  ├── Read / Grep / Glob: actual work                               ← starts NOW, parallel
+Shell: oc-speak.sh "Got it..." 1
+Shell: oc-speak.sh "So the issue..." 1 "" thinking
+Read / Grep / Glob: parallel
 ```
 
-All fire simultaneously. The TTS lock serialises playback. The thinking singleton ensures only one reasoning speak is in the pipeline — duplicate/stale thinking calls exit silently.
-
-**Hard cap: never more than 2 speak calls per message (ack + thinking). Phase filler on top of that is always too many.**
+**Hard cap: never more than 2 speak calls per message (ack + thinking).**
 
 ## Gating
 
-Respect `FRIDAY_CURSOR_NARRATION` from `.env` — if it is false/off/0/no, skip reasoning narration (same as all other narration). Check `cursor-agent-narration.mdc` for the full gating logic.
+Respect `FRIDAY_CURSOR_NARRATION` from `.env` — see `cursor-agent-narration.mdc`.
 
 ## CRITICAL: You are the ONLY source of thinking narration
 
-Cursor does **NOT** write `type: thinking` blocks to JSONL transcripts. The watcher (`cursor-reply-watch.py`) cannot capture thinking — there is nothing to capture. **Your own `friday-speak.py` call with `FRIDAY_TTS_THINKING=1` is the ONLY way the user hears you think.**
-
-This is NOT optional or best-effort. If you did significant reasoning, you MUST fire the thinking speak. If you skip it, the user hears nothing — no watcher backup exists.
+The watcher cannot capture thinking from JSONL. **`oc-speak.sh` with thinking mode is the ONLY way the user hears you think.**
 
 ## Why this matters
 
-Extended thinking is the most valuable part of the agent's reasoning — it shows *why* decisions were made, not just *what* was done. Cursor redacts it once the thinking tab closes, and it is lost forever. Speaking it preserves the reasoning as audio that the user hears in real time, regardless of what Cursor does to the transcript afterwards.
+Speaking preserves reasoning as audio in real time before redaction removes it from the transcript.

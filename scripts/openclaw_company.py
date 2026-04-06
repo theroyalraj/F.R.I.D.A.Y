@@ -25,6 +25,7 @@ PERSONAS: dict[str, dict[str, str]] = {
         "rate": "",
         "personality": "Composed, warm, confident — your primary executive assistant.",
         "daemon_role": "Main Cursor narrator (ack, status, done summaries). The primary executive assistant.",
+        "macos_say_voice": "Samantha",
     },
     "argus": {
         "name": "Argus",
@@ -33,6 +34,7 @@ PERSONAS: dict[str, dict[str, str]] = {
         "rate": "+5%",
         "personality": "Dry, watchful, direct; no-nonsense on pending reviews.",
         "daemon_role": "Pending Composer edits / accept reminders",
+        "macos_say_voice": "Daniel",
     },
     "nova": {
         "name": "Nova",
@@ -41,6 +43,7 @@ PERSONAS: dict[str, dict[str, str]] = {
         "rate": "",
         "personality": "Polished, concise; delivers briefings like a news lead.",
         "daemon_role": "Gmail notifications",
+        "macos_say_voice": "Karen",
     },
     "sage": {
         "name": "Sage",
@@ -49,6 +52,7 @@ PERSONAS: dict[str, dict[str, str]] = {
         "rate": "-5%",
         "personality": "Measured, academic; narrates reasoning aloud.",
         "daemon_role": "`cursor-thinking-ocr.py` — gated thinking narration (JSONL + OCR + reasoning heuristics)",
+        "macos_say_voice": "Alex",
     },
     "dexter": {
         "name": "Dexter",
@@ -57,6 +61,7 @@ PERSONAS: dict[str, dict[str, str]] = {
         "rate": "",
         "personality": "Methodical, lightly nerdy; standup-style updates.",
         "daemon_role": "Action tracker briefings / Gmail+WhatsApp pipeline",
+        "macos_say_voice": "Tom",
     },
     "maestro": {
         "name": "Maestro",
@@ -70,6 +75,7 @@ PERSONAS: dict[str, dict[str, str]] = {
             "a break. She tidies after the team without fuss; backbone energy — responsible, kind, never dramatic."
         ),
         "daemon_role": "Ambient steward: responsible check-ins, rest/chai nudges, commit hygiene, backbone of the org",
+        "macos_say_voice": "Moira",
     },
     "harper": {
         "name": "Harper",
@@ -78,6 +84,7 @@ PERSONAS: dict[str, dict[str, str]] = {
         "rate": "",
         "personality": "Organised, supportive; reminders without nagging.",
         "daemon_role": "Due reminders (`friday-reminder-watch`)",
+        "macos_say_voice": "Allison",
     },
     "riya": {
         "name": "Riya",
@@ -92,6 +99,7 @@ PERSONAS: dict[str, dict[str, str]] = {
             "Optional `FRIDAY_TTS_SESSION=riya` speaks; pair voice with Hinglish or playful lines "
             "(see `friday_speak_env_for_persona(\"riya\")`)"
         ),
+        "macos_say_voice": "Lekha",
     },
     "sentinel": {
         "name": "Sentinel",
@@ -100,6 +108,7 @@ PERSONAS: dict[str, dict[str, str]] = {
         "rate": "+3%",
         "personality": "Understated relay; reads Composer output when enabled.",
         "daemon_role": "Composer JSONL transcript TTS when enabled (`cursor-reply-watch`)",
+        "macos_say_voice": "Tessa",
     },
     "atlas": {
         "name": "Atlas",
@@ -108,6 +117,7 @@ PERSONAS: dict[str, dict[str, str]] = {
         "rate": "",
         "personality": "Listen path only; does not speak independently.",
         "daemon_role": "`friday-listen` — ears only; spoken replies are Jarvis's words",
+        "macos_say_voice": "",
     },
     "echo": {
         "name": "Echo",
@@ -116,6 +126,7 @@ PERSONAS: dict[str, dict[str, str]] = {
         "rate": "",
         "personality": "Context-aware presence: remembers recent Cursor threads, speaks natural check-ins via AI, tone steered by Listen UI sliders.",
         "daemon_role": "`friday-silence-watch.py` — AI-driven silence nudges with transcript context; voice and personality from Redis / UI",
+        "macos_say_voice": "Fiona",
     },
 }
 

@@ -92,6 +92,7 @@ import tempfile
 import threading
 import time
 import platform
+import shutil
 import warnings
 from pathlib import Path
 
@@ -235,6 +236,8 @@ if VOICE in _blocked_tts:
 RATE   = os.environ.get("FRIDAY_TTS_RATE",   "+7.5%")
 PITCH  = os.environ.get("FRIDAY_TTS_PITCH",  "+2Hz")
 VOLUME = os.environ.get("FRIDAY_TTS_VOLUME", "+0%")
+
+_PLAYER_BIN = shutil.which("friday-player") or shutil.which("ffplay") or "friday-player"
 
 # Org-chart persona: FRIDAY_TTS_SESSION=riya|jarvis|… applies registry voice + rate (after env defaults).
 try:
@@ -627,6 +630,8 @@ def _fix_ffplay_volume(pid: int, target: float = 1.0, timeout: float = 2.0) -> N
     friday-player.exe (a copy of ffplay) so its name has no stored preference.
     This guard catches any edge case where the session still starts below target.
     """
+    if platform.system() != "Windows":
+        return
     try:
         from pycaw.utils import AudioUtilities
         deadline = time.time() + timeout
@@ -662,8 +667,28 @@ def _sapi_voice_setup_ps() -> str:
 
 
 def _darwin_say_cmd_prefix() -> list[str]:
-    """macOS say(1): optional FRIDAY_MACOS_SAY_VOICE and FRIDAY_MACOS_SAY_RATE (words per minute, roughly 90–200)."""
+    """macOS say(1): persona registry voice, else FRIDAY_MACOS_SAY_VOICE / FRIDAY_MACOS_SAY_RATE."""
     cmd: list[str] = ["say"]
+    persona_key = os.environ.get("FRIDAY_TTS_SPEAK_PERSONA", "").strip().lower()
+    if persona_key:
+        try:
+            from openclaw_company import get_persona
+
+            p = get_persona(persona_key)
+            mac_voice = (p.get("macos_say_voice") or "").strip()
+            if mac_voice:
+                cmd.extend(["-v", mac_voice])
+                rate = os.environ.get("FRIDAY_MACOS_SAY_RATE", "").strip()
+                if rate:
+                    try:
+                        wpm = int(rate)
+                        if 1 <= wpm <= 500:
+                            cmd.extend(["-r", str(wpm)])
+                    except ValueError:
+                        pass
+                return cmd
+        except Exception:
+            pass
     voice = os.environ.get("FRIDAY_MACOS_SAY_VOICE", "").strip()
     if voice:
         cmd.extend(["-v", voice])
@@ -768,7 +793,7 @@ def _play_ffplay(mp3_data: bytes, my_gen: int | None = None) -> None:
     play_t0 = time.monotonic()
     try:
         proc = subprocess.Popen(
-            ["friday-player", "-nodisp", "-autoexit", "-loglevel", "quiet", tmp],
+            [_PLAYER_BIN, "-nodisp", "-autoexit", "-loglevel", "quiet", tmp],
             **kwargs,
         )
         _emit_tts_speak_if_needed()
@@ -854,7 +879,7 @@ async def _stream_and_play(switch_done: threading.Event, my_gen: int) -> None:
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
 
     proc = subprocess.Popen(
-        ["friday-player", "-nodisp", "-autoexit", "-loglevel", "quiet", "-"],
+        [_PLAYER_BIN, "-nodisp", "-autoexit", "-loglevel", "quiet", "-"],
         **kwargs,
     )
     _emit_tts_speak_if_needed()

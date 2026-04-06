@@ -1,43 +1,35 @@
 ---
-description: Subagent TTS must always use FRIDAY_TTS_PRIORITY=1 so they are heard immediately and never silently queue
+description: Subagent TTS must always use priority 1 so they are heard immediately and never silently queue
 alwaysApply: true
 ---
 
 # Subagent TTS — Priority is Mandatory
 
-Every `friday-speak.py` call inside a Task subagent (explore / shell / generalPurpose) **MUST** include `FRIDAY_TTS_PRIORITY=1`. Subagents use the **young-sounding** sticky pool (Jenny, Aria, Michelle, Blue, Nancy — see `pick-session-voice.py`). Do not force Ana or other toddler timbres.
+Every speak call inside a Task subagent (explore / shell / generalPurpose) **MUST** include priority `1` and the `subagent` session. Subagents use the **young-sounding** sticky pool (Jenny, Aria, Michelle, Blue, Nancy — see `pick-session-voice.py`).
 
 ## Why this matters
 
-Without priority, a subagent's TTS waits behind the global speak lock — which the main agent or ambient may already hold. The result is **silent subagents**: they technically "speak" but the audio is swallowed or delayed until the lock clears.
+Without priority, a subagent's TTS waits behind the global speak lock — **silent subagents**.
 
-`FRIDAY_TTS_PRIORITY=1` pre-empts any competing TTS, kills friday-player, releases the Redis lock, and speaks immediately — exactly like a user-facing voice reply.
+Priority `1` pre-empts competing TTS and speaks immediately.
 
 ## Required subagent speak pattern (copy verbatim into every Task prompt)
 
-```powershell
-# Single command — no separate pick-session-voice needed (friday-speak.py auto-picks if missing)
-cd d:\code\openclaw; $env:FRIDAY_TTS_SESSION='subagent'; $env:FRIDAY_TTS_PRIORITY='1'; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "your message here"
+```bash
+$OPENCLAW_HOME/scripts/oc-speak.sh "your message here" 1 subagent
 ```
 
-**No separate `pick-session-voice.py` call needed.** `friday-speak.py` auto-detects missing session voice and spawns the picker in the background.
+## Test command
 
-## Test command — verify subagent TTS is working
-
-Run this to confirm a subagent voice fires with priority and is heard through the speakers:
-
-```powershell
-cd d:\code\openclaw; $env:FRIDAY_TTS_SESSION='subagent'; $env:FRIDAY_TTS_PRIORITY='1'; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "Subagent priority TTS test. If you hear this, the fix is working."
+```bash
+$OPENCLAW_HOME/scripts/oc-speak.sh "Subagent priority TTS test. If you hear this, the fix is working." 1 subagent
 ```
-
-Expected: a teen/young-adult voice speaks the test line immediately, pre-empting any ambient TTS.
 
 ## Enforcement checklist
 
-When writing any Task subagent prompt, verify the prompt contains:
+When writing any Task subagent prompt, verify:
 
-- [ ] `$env:FRIDAY_TTS_SESSION='subagent'`
-- [ ] `$env:FRIDAY_TTS_PRIORITY='1'`
-- [ ] `$env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'`
+- [ ] priority `1` (second argument)
+- [ ] `subagent` as third argument
 
-All three on every single `friday-speak.py` invocation. Missing any one of these is a bug.
+Missing either is a bug.

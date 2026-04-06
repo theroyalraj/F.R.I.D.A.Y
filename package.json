@@ -52,6 +52,8 @@
     "play": "python skill-gateway/scripts/friday-play.py",
     "clear:locks": "python skill-gateway/scripts/clear_friday_locks.py",
     "check:voices": "python scripts/print_openclaw_voices.py",
+    "speak": "bash scripts/oc-speak.sh",
+    "sync:rules": "bash scripts/sync-cursor-rules.sh",
     "install:all": "npm install",
     "test:friday-page": "node scripts/smoke-friday-page.mjs",
     "test:pc-agent": "npm test --prefix pc-agent",

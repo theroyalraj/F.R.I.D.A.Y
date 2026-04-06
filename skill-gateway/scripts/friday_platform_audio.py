@@ -16,10 +16,17 @@ if sys.platform == "win32":
         get_default_output_id,
         set_default_endpoint,
     )
+elif sys.platform == "darwin":
+    from friday_mac_audio import (  # type: ignore
+        find_output_device_id,
+        get_default_output_health,
+        get_default_output_id,
+        set_default_endpoint,
+    )
 else:
 
     def find_output_device_id(name_sub: str):
-        """Named-device routing is Windows-only today."""
+        """Named-device routing is Windows + macOS today."""
         return None
 
     def get_default_output_id() -> str | None:
@@ -29,7 +36,7 @@ else:
         pass
 
     def get_default_output_health():
-        """Non-Windows: no MMDevice mute or disable probe."""
+        """Non-Windows (non-macOS): no MMDevice mute or disable probe."""
         return {
             "ok": True,
             "platform": sys.platform,
@@ -37,5 +44,6 @@ else:
             "audioDisabled": False,
             "deviceName": None,
             "state": None,
+            "volume": 100,
             "checkedAtMs": int(time.time() * 1000),
         }

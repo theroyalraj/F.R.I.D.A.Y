@@ -9,7 +9,7 @@ This is the enforcement rule. Claude must narrate EVERY task, EVERY response, EV
 
 ## NON-NEGOTIABLE
 
-- **Every response starts with a speak acknowledgement** — `FRIDAY_TTS_PRIORITY=1`, `block_until_ms: 0`
+- **Every response starts with a speak acknowledgement** — priority `1`, `block_until_ms: 0`
 - **Every significant task gets a completion summary** — spoken, not written
 - **Every finding, diagnosis, or reasoning gets narrated** — fold into ack or fire separate thinking speak
 - **Never block on speak calls** — always async
@@ -21,29 +21,33 @@ This is the enforcement rule. Claude must narrate EVERY task, EVERY response, EV
 - Starting work without speaking acknowledgement
 - Completing a task without a spoken summary
 - Finding something important without narrating it
-- Doing complex reasoning silently (use `FRIDAY_TTS_THINKING=1`)
+- Doing complex reasoning silently (use thinking mode)
 - Firing more than 2 speak calls per message
 - Blocking on TTS calls (always `block_until_ms: 0`)
 - Using ack + completion summary without combining thinking when possible
 
 ## Template — EVERY response
 
-```powershell
+```bash
 # Speak acknowledgement + reasoning combined (if short)
-cd d:\code\openclaw; $env:FRIDAY_TTS_PRIORITY='1'; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "Got it. [restate task]. [brief reasoning if applicable]. Starting now."
+$OPENCLAW_HOME/scripts/oc-speak.sh "Got it. [restate task]. [brief reasoning if applicable]. Starting now." 1
 ```
 
 **Then:** Do the actual work (Read, Glob, Bash, Edit, etc.)
 
 **Then:** After completion, speak summary:
 
-```powershell
-cd d:\code\openclaw; $env:FRIDAY_TTS_PRIORITY='1'; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "Done. [verbose summary of what changed and why it matters]."
+```bash
+$OPENCLAW_HOME/scripts/oc-speak.sh "Done. [verbose summary of what changed and why it matters]." 1
 ```
 
 ## Subagent variant
 
-Same rules apply. Set `$env:FRIDAY_TTS_SESSION='subagent'` on subagent speak calls, `FRIDAY_TTS_PRIORITY=1` always.
+Same rules apply. Add `subagent` session parameter:
+
+```bash
+$OPENCLAW_HOME/scripts/oc-speak.sh "message" 1 subagent
+```
 
 ## If this rule is broken
 

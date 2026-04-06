@@ -9,9 +9,9 @@ alwaysApply: true
 
 Unless the user **clearly and explicitly** asks to **kill**, **force replace**, or **full restart** the stack (e.g. "restart OpenClaw", "kill and restart", "restart:force", "npm run restart:force", "ForceKill"):
 
-- **Do not** run `npm run restart:force`, `restart-local.ps1 -ForceKill`, or any flow that **frees ports 3847/3848** or **Stop-Process**es the gateway/agent/voice stack.
+- **Do not** run `npm run restart:force`, Windows `restart-local.ps1 -ForceKill`, or any flow that **frees ports 3847/3848** or kills the gateway/agent/voice stack (Windows: `taskkill`, `Stop-Process`; macOS or Linux: `kill`, `lsof`).
 - **Do not** run plain `npm run restart:local` to "fix" things unless the user asked for a restart — safe restart exits if already healthy and never kills by default.
-- **Do not** kill listeners on ports **3847** or **3848** manually (e.g. `taskkill`, `Stop-Process` on PIDs holding those ports).
+- **Do not** kill listeners on ports **3847** or **3848** manually (e.g. `kill`, or `lsof -ti :PORT` then kill, on PIDs holding those ports).
 - **Do not** tell the user they "must restart" as a substitute for doing it yourself — explain what to run only if they ask how to restart.
 
 **Still allowed:** editing code, `.env`, workflows, Docker files, docs; running tests, linters, one-off `curl` health checks, `clear_friday_locks.py`, or other tools that do **not** stop or respawn the gateway and pc-agent.

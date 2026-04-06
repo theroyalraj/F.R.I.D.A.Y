@@ -27,7 +27,7 @@ Before **any** `git commit` (including safety checkpoints on a **new** `wip/chec
    - Create a **new temporary** branch so shared `wip` is not overwritten: name pattern `wip/checkpoint-<short-slug>-<YYYYMMDD>` (slug from the upcoming work, e.g. `sse-stream`, `tts-lock`; add `-2`, `-3` if the name already exists locally or on origin).
    - From the branch you were on (usually `main`), run: `git checkout -b <that-branch-name>`, then `git add -A`, then `git commit` with the agreed message.
    - Push: `git push -u origin HEAD`.
-   - **Spoken checkpoint explanation** (only if **`cursor-agent-narration.mdc`** allows narration): one fire-and-forget line with **`FRIDAY_TTS_PRIORITY=1`** and **`FRIDAY_TTS_BYPASS_CURSOR_DEFER=true`** after a successful push — explain in plain English what was saved, why it is a checkpoint, and the branch name (say “wip slash checkpoint slash …” so TTS reads it clearly). Keep it conversational; no markdown or symbols per **`no-markdown-in-speech.mdc`**.
+   - **Spoken checkpoint explanation** (only if **`cursor-agent-narration.mdc`** allows narration): one fire-and-forget line with **priority `1`** via **`oc-speak.sh`** after a successful push — explain in plain English what was saved, why it is a checkpoint, and the branch name (say “wip slash checkpoint slash …” so TTS reads it clearly). Keep it conversational; no markdown or symbols per **`no-markdown-in-speech.mdc`**.
    - Return to the previous branch to continue work: `git checkout -` or `git checkout main` as appropriate.
 
 ## Order with WIP safety
@@ -42,4 +42,4 @@ If **both** this rule and **WIP Safety Commit** apply: **subagent scan first**, 
 
 ## Narration
 
-Follow **`cursor-agent-narration.mdc`**: if Cursor narration is off, skip all `friday-speak` for scan and checkpoint (including the post-push checkpoint explanation). If on: you may briefly announce spinning up the pre-commit scan (one short line, **`FRIDAY_TTS_PRIORITY=1`**), and you **must** deliver the post-push checkpoint explanation after a successful safety push when that flow ran.
+Follow **`cursor-agent-narration.mdc`**: if Cursor narration is off, skip all **`oc-speak.sh`** usage for scan and checkpoint (including the post-push checkpoint explanation). If on: you may briefly announce spinning up the pre-commit scan (one short line, **priority `1`**), and you **must** deliver the post-push checkpoint explanation after a successful safety push when that flow ran.

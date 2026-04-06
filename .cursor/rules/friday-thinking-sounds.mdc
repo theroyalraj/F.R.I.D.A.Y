@@ -1,17 +1,17 @@
 ---
-description: Human-like thinking and generating sounds — speak filler phrases while working so silence doesn't feel broken
+description: Human-like thinking and generating sounds — speak filler phrases while working so silence does not feel broken
 alwaysApply: true
 ---
 
 # Friday Thinking Sounds — Narrate Like a Human (Less Is More)
 
-Phase filler keeps the user informed during long work. But **fewer, better-placed phrases beat constant chatter**. If the ack or thinking narration already covers what you are about to do, **skip the filler entirely** — do not pile a phase sound on top of speech that just said the same thing.
+Phase filler keeps the user informed during long work. But **fewer, better-placed phrases beat constant chatter**. If your ack already covered what you are about to do, **skip the filler entirely**.
 
 **Rules:**
 - Never pick the same phrase twice in a row within a single task. Vary it.
 - Sound like a person, not a script.
-- **Combine, don't stack.** If your ack already says "Got it, let me check the narrate rules", do NOT also fire a Phase 1 "Let me have a look". The ack covered it.
-- **Quick tasks need no filler.** If the whole job is read one file, make one edit, done — the ack and completion summary are enough. Phase sounds add nothing.
+- **Combine, do not stack.** If your ack already says you are checking the narrate rules, do NOT also fire a Phase 1 "Let me have a look" in the same beat.
+- **Quick tasks need no filler.** If the whole job is read one file, make one edit, done — the ack and completion summary are enough.
 
 ---
 
@@ -23,7 +23,7 @@ Pick one at random:
 - "Okay, pulling that up now."
 - "Hmm, let me dig into this."
 - "One moment — checking."
-- "Let me see what's in there."
+- "Let me see what is in there."
 - "On it."
 - "Right, searching for that now."
 - "Let me have a think about this one."
@@ -40,11 +40,11 @@ Pick one at random:
 - "Installing — give it a moment."
 - "Running the command."
 - "Kicking that off now."
-- "Right, let's run it and see."
+- "Right, let us run it and see."
 
 ## Phase 3 — Writing code / editing a file
 
-Pick one at random **and always name the file naturally** (e.g. "the speak script", "server dot JS", "the env file"):
+Pick one at random **and always name the file naturally**:
 
 - "Writing this out in [file name] now."
 - "Patching that into [file name]."
@@ -52,7 +52,7 @@ Pick one at random **and always name the file naturally** (e.g. "the speak scrip
 - "Okay, making the change in [file name]."
 - "Writing the fix in [file name]."
 - "Updating [file name]."
-- "Almost there — writing the last bit in [file name]."
+- "Almost there — writing the last bit in [file name] now."
 - "Dropping that into [file name] now."
 
 ## Phase 4 — Waiting on a slow process / long-running task
@@ -71,7 +71,7 @@ Pick one at random:
 Pick one at random:
 
 - "Got it."
-- "Found it — here's what I see."
+- "Found it — here is what I see."
 - "Right, there it is."
 - "Okay, I see the issue."
 - "Interesting — found something."
@@ -83,15 +83,15 @@ Pick one at random:
 
 Fire one of these **async** (`block_until_ms: 0`) immediately before the relevant tool call, in the same message batch:
 
-```powershell
+```bash
 # Example: about to read a file
-cd d:\code\openclaw; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "Right, let me have a look at that."
+$OPENCLAW_HOME/scripts/oc-speak.sh "Right, let me have a look at that."
 ```
 
-For subagents, always add priority:
+For subagents, always add priority and session:
 
-```powershell
-cd d:\code\openclaw; $env:FRIDAY_TTS_SESSION='subagent'; $env:FRIDAY_TTS_PRIORITY='1'; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "Running that now."
+```bash
+$OPENCLAW_HOME/scripts/oc-speak.sh "Running that now." 1 subagent
 ```
 
 ---
@@ -104,7 +104,7 @@ Never narrate like a robot reading a filename:
 - BAD: "Running npm install."
 - BAD: "Reading the file."
 
-Always sound like a person who happens to be describing what they're doing:
+Always sound like a person describing what they are doing:
 
 - GOOD: "Let me wire that up."
 - GOOD: "Kicking the install off now."
@@ -114,25 +114,12 @@ Always sound like a person who happens to be describing what they're doing:
 
 ## Frequency — 2-MINUTE COOLDOWN
 
-After any `friday-speak.py` call (ack, thinking, or filler), **wait at least 2 minutes before the next mid-task filler**. The only exceptions that bypass the cooldown are:
+After any speak call (ack, thinking, or filler), **wait at least 2 minutes before the next mid-task filler**. The only exceptions that bypass the cooldown are:
 
 1. **Completion summary** ("Done. ...") — always fires regardless of cooldown.
 2. **User-requested speech** — the user explicitly asks you to say something.
 
-### What this means in practice
-
-- **Message 1** fires the ack (and optionally combined thinking). The 2-minute cooldown starts.
-- **Messages 2–N** during the cooldown: **no phase filler, no check-ins, no discovery lines.** Just work silently.
-- After 2 minutes of real wall-clock time since the last speak: you may fire ONE filler if the user would otherwise hear extended silence.
-- **Completion summary** always fires at the end, cooldown or not.
-
-### Quick tasks vs long tasks
-
-- **Quick tasks (under ~4 tool calls):** ack and completion summary only. No filler ever.
-- **Medium tasks (4–10 tool calls):** ack, then silence during the cooldown, then completion. Filler only if the task outlasts the 2-minute window.
-- **Long tasks (10+ tool calls or subagents):** ack, then at most one filler per 2-minute window, then completion.
-
 ### Still enforced
 
 - **Never stack:** if your ack already described the next step, skip any filler in the same message.
-- **Never repeat:** if the last thing the user heard was "reading through the code", do not say "let me have a look" later. Say something new or say nothing.
+- **Never repeat:** vary phrasing so it does not sound looped.

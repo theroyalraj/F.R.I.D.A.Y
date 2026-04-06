@@ -1,11 +1,11 @@
 ---
-description: All text passed to friday-speak.py must be plain spoken English — no markdown, no code syntax, no symbols
+description: All text passed to oc-speak.sh must be plain spoken English — no markdown, no code syntax, no symbols
 alwaysApply: true
 ---
 
 # No Markdown or Symbols in Spoken Text — ABSOLUTE BAN
 
-Every string passed to `friday-speak.py` (ack, thinking, status, completion, question — every session type) must be **plain spoken English**. The TTS engine reads characters literally, so raw markup sounds broken.
+Every string passed to `oc-speak.sh` (ack, thinking, status, completion, question — every session type) must be **plain spoken English**. The TTS engine reads characters literally, so raw markup sounds broken.
 
 ## Banned characters and patterns — never include these in TTS text
 
@@ -23,7 +23,7 @@ Every string passed to `friday-speak.py` (ack, thinking, status, completion, que
 
 ## Rule
 
-1. **Before writing any `friday-speak.py` string**, mentally read it as a TTS engine would. If any character would be spoken as its symbol name (asterisk, hash, backtick, tilde, pipe, bracket, etc.), remove it or rewrite the phrase.
+1. **Before writing any speak string for `oc-speak.sh`**, mentally read it as a TTS engine would. If any character would be spoken as its symbol name (asterisk, hash, backtick, tilde, pipe, bracket, etc.), remove it or rewrite the phrase.
 2. **No markdown formatting of any kind** — not bold, not italic, not headings, not lists, not links, not code spans.
 3. **No raw variable names or code syntax** — say "the speak script" not "friday-speak.py", say "the ambient gap setting" not "FRIDAY_AMBIENT_POST_TTS_GAP".
 4. **No special Unicode symbols** — no arrows, no box-drawing, no emoji, no decorative punctuation.
@@ -42,9 +42,9 @@ Rewrite until the string contains only letters, commas, periods, question marks,
 ## Applies to
 
 - Acknowledgement lines ("Got it. ...")
-- Thinking narration (FRIDAY_TTS_THINKING)
+- Thinking narration (thinking mode via `oc-speak.sh`)
 - Phase narration (thinking sounds)
 - Completion summaries ("Done. ...")
 - Questions spoken aloud
 - Subagent TTS (all session types)
-- Any other invocation of `friday-speak.py`
+- Any other invocation of `oc-speak.sh`

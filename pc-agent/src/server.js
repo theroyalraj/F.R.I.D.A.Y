@@ -544,6 +544,28 @@ voiceRouter.post('/speak-async', async (req, res) => {
     typeof req.body?.personaKey === 'string'
       ? req.body.personaKey.trim().slice(0, 24).toLowerCase()
       : undefined;
+  const pr = req.body?.priority;
+  const priorityRaw =
+    typeof pr === 'string'
+      ? pr.trim().toLowerCase()
+      : pr === 1 || pr === true
+        ? '1'
+        : '';
+  const ch = (speakChannel || '').toLowerCase();
+  /** Inbound mail, WhatsApp, SMS, Windows toast TTS, and Cursor-done must preempt — else cooperative queue starves them. */
+  const inboundPreemptChannels = new Set(['mail', 'whatsapp', 'sms', 'winnotify', 'cursor_done']);
+  const wantsCoop = ['cooperative', 'coop', 'low', 'soft', 'queue', '2', '0', 'false', 'no', 'off'].includes(
+    priorityRaw,
+  );
+  const wantsPreempt = ['1', 'true', 'yes', 'on', 'high', 'hard'].includes(priorityRaw);
+  const inboundPreempt = ch && inboundPreemptChannels.has(ch);
+  let ttsPriority = 'cooperative';
+  if (inboundPreempt || wantsPreempt) {
+    ttsPriority = '1';
+  }
+  if (wantsCoop) {
+    ttsPriority = 'cooperative';
+  }
   if (!text) {
     return res.status(400).json({ error: 'Missing text in body: { "text": "Hello" }' });
   }
@@ -555,16 +577,42 @@ voiceRouter.post('/speak-async', async (req, res) => {
   const currentVoice = resolveSpeakAsyncEdgeVoice(req.body);
   const voiceOverrides = getVoiceDeliveryOverrides(currentVoice);
   const delivery = mergeDeliveryWithSpeakStyle({ ...greetingTtsRatePitch(), ...voiceOverrides }, style);
+  const ttsSessionRaw =
+    typeof req.body?.ttsSession === 'string' ? req.body.ttsSession.trim().toLowerCase() : '';
+  const thinkingFlag =
+    req.body?.thinking === true ||
+    req.body?.thinking === 1 ||
+    String(req.body?.thinking || '').toLowerCase() === 'true';
+  const speakEnv = {
+    ...process.env,
+    FRIDAY_TTS_VOICE: currentVoice,
+    FRIDAY_TTS_DEVICE: process.env.FRIDAY_TTS_DEVICE || 'default',
+    FRIDAY_TTS_PRIORITY: ttsPriority,
+    FRIDAY_TTS_BYPASS_CURSOR_DEFER: 'true',
+    FRIDAY_TTS_EMIT_EVENT: '0',
+    ...delivery,
+  };
+  if (ttsSessionRaw) {
+    speakEnv.FRIDAY_TTS_SESSION = ttsSessionRaw;
+  } else {
+    const ch0 = (speakChannel || '').toLowerCase();
+    if (ch0 === 'cursor_subagent' || ch0 === 'subagent') {
+      speakEnv.FRIDAY_TTS_SESSION = 'subagent';
+    }
+  }
+  if (thinkingFlag) {
+    speakEnv.FRIDAY_TTS_THINKING = '1';
+  } else {
+    const ch1 = (speakChannel || '').toLowerCase();
+    if (ch1 === 'thinking') {
+      speakEnv.FRIDAY_TTS_THINKING = '1';
+    }
+  }
+  if (speakPersonaKey) {
+    speakEnv.FRIDAY_TTS_SPEAK_PERSONA = speakPersonaKey;
+  }
   const child = spawn(pythonChildExecutable(), [SPEAK_SCRIPT, text], {
-    env: {
-      ...process.env,
-      FRIDAY_TTS_VOICE:  currentVoice,
-      FRIDAY_TTS_DEVICE: process.env.FRIDAY_TTS_DEVICE || 'default',
-      FRIDAY_TTS_PRIORITY: '1',
-      FRIDAY_TTS_BYPASS_CURSOR_DEFER: 'true',
-      FRIDAY_TTS_EMIT_EVENT: '0',
-      ...delivery,
-    },
+    env: speakEnv,
     detached: true,
     stdio: ['ignore', 'ignore', 'pipe'],
     windowsHide: true,

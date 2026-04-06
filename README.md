@@ -58,6 +58,48 @@ pip install redis anthropic psutil py-now-playing
 
 ---
 
+## macOS setup
+
+Run OpenClaw locally on Apple Silicon or Intel with Homebrew dependencies, Redis, and Cursor rules that trigger TTS through **pc-agent** (`POST /voice/speak-async`) instead of calling Python directly.
+
+1. **System packages**
+   ```bash
+   brew install ffmpeg portaudio redis
+   # Optional: audio device switching for FRIDAY_TTS_DEVICE-style routing
+   brew install switchaudio-osx
+   ```
+2. **Redis**
+   ```bash
+   brew services start redis
+   ```
+3. **Playback binary** — `friday-speak.py` prefers `friday-player` and falls back to `ffplay` on PATH. Symlink if you want the legacy name:
+   ```bash
+   ln -sf "$(which ffplay)" /usr/local/bin/friday-player
+   ```
+4. **Environment** — copy the template and edit secrets (especially `PC_AGENT_SECRET` to match `.env` used by pc-agent):
+   ```bash
+   cp .env.macos.example .env
+   ```
+   Set `CURSOR_TRANSCRIPTS_DIR` to your real Cursor project path under `~/.cursor/projects/…` if it differs.
+5. **Python packages** (typical; add others from `docs/setup.md` as needed):
+   ```bash
+   pip install edge-tts aiohttp redis sounddevice SpeechRecognition numpy psutil watchdog
+   ```
+6. **Start the stack** — use `node scripts/start.mjs` (or your usual client or server mode) after `npm install`. On macOS, `start.mjs` frees stuck ports with `lsof` + `kill` instead of Windows-only APIs.
+7. **Cursor narration** — from the repo root, agents use `scripts/oc-speak.sh`, which POSTs to `PC_AGENT_URL` with `Authorization: Bearer PC_AGENT_SECRET`. Try:
+   ```bash
+   npm run speak -- "Hello from macOS" 1
+   ```
+8. **Sync rules to other workspaces** — OpenClaw is the source of truth for `.cursor/rules/`. Targets are listed in `OPENCLAW_SYNC_RULE_TARGETS` (colon-separated paths):
+   ```bash
+   npm run sync:rules
+   ```
+   Or pass a project root: `bash scripts/sync-cursor-rules.sh /path/to/project`.
+
+Edge TTS still needs network access; if it fails, playback falls back to macOS `say` (persona voices from `scripts/openclaw_company.py` when `FRIDAY_TTS_SPEAK_PERSONA` is set by the server).
+
+---
+
 ## Quick Start
 
 ### 1. Clone or update the repo
@@ -161,6 +203,8 @@ http://127.0.0.1:3848/friday   → Friday web UI
 | `npm run tunnel:n8n` | Expose n8n publicly via ngrok |
 | `npm run setup:alexa` | One-time Amazon Music cookie setup |
 | `npm run play` | Play a song on Echo Dot |
+| `npm run speak` | Fire-and-forget TTS via `scripts/oc-speak.sh` → pc-agent `/voice/speak-async` |
+| `npm run sync:rules` | Rsync `.cursor/rules/` to projects in `OPENCLAW_SYNC_RULE_TARGETS` |
 
 ---
 
@@ -301,7 +345,7 @@ WHATSAPP_NOTIFY_NUMBER=91XXXXXXXXXX     # other workflows (e.g. reminders); inta
 
 ## Cursor Agent Rules (`.cursor/rules/`)
 
-The repo ships with rules that make any Cursor AI agent behave like Friday when working in this codebase:
+The repo ships with rules that make any Cursor AI agent behave like Friday when working in this codebase. Spoken lines go through **`scripts/oc-speak.sh`**, which POSTs to **pc-agent** `/voice/speak-async` (Bearer `PC_AGENT_SECRET`) so TTS runs on the machine where the agent listens.
 
 | Rule | What it does |
 |---|---|
@@ -310,7 +354,7 @@ The repo ships with rules that make any Cursor AI agent behave like Friday when 
 | `completion-read-memory.mdc` | Forces the agent to re-read changed files before the completion speech |
 | `wip-safety-commit.mdc` | Commits to `wip` branch before any breaking change |
 
-These rules are portable — clone the repo to any machine with Cursor + `pip install edge-tts`, and the voice narration works out of the box.
+Use **`npm run sync:rules`** to copy rules into other repos (see `.env.macos.example` / `OPENCLAW_SYNC_RULE_TARGETS`). For narration to play, pc-agent must be running and `.env` must define `PC_AGENT_URL` and `PC_AGENT_SECRET` for the wrapper.
 
 ---
 

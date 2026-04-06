@@ -341,22 +341,43 @@ function openListenBrowser(url) {
 // ── Kill anything already on our ports ───────────────────────────────────────
 // Kill the port holder AND its parent so node --watch can't auto-restart.
 function freePort(port) {
-  try {
-    execSync(
-      `powershell -NoProfile -Command "` +
-      `$pids = Get-NetTCPConnection -LocalPort ${port} -State Listen -EA SilentlyContinue | ` +
-      `  Select-Object -ExpandProperty OwningProcess -Unique; ` +
-      `foreach ($p in $pids) { ` +
-      `  $pp = (Get-CimInstance Win32_Process -Filter 'ProcessId='+$p -EA SilentlyContinue).ParentProcessId; ` +
-      `  taskkill /F /T /PID $p 2>$null | Out-Null; ` +
-      `  if ($pp -gt 4) { taskkill /F /T /PID $pp 2>$null | Out-Null } ` +
-      `}"`,
-      { stdio: 'ignore', windowsHide: true }
-    );
-    // Give OS ~400ms to release the port after kill
-    execSync('powershell -NoProfile -Command "Start-Sleep -Milliseconds 400"',
-      { stdio: 'ignore', windowsHide: true });
-  } catch { /* non-Windows or no match — fine */ }
+  if (process.platform === 'win32') {
+    try {
+      execSync(
+        `powershell -NoProfile -Command "` +
+        `$pids = Get-NetTCPConnection -LocalPort ${port} -State Listen -EA SilentlyContinue | ` +
+        `  Select-Object -ExpandProperty OwningProcess -Unique; ` +
+        `foreach ($p in $pids) { ` +
+        `  $pp = (Get-CimInstance Win32_Process -Filter 'ProcessId='+$p -EA SilentlyContinue).ParentProcessId; ` +
+        `  taskkill /F /T /PID $p 2>$null | Out-Null; ` +
+        `  if ($pp -gt 4) { taskkill /F /T /PID $pp 2>$null | Out-Null } ` +
+        `}"`,
+        { stdio: 'ignore', windowsHide: true }
+      );
+      execSync('powershell -NoProfile -Command "Start-Sleep -Milliseconds 400"', {
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+    } catch { /* no match — fine */ }
+  } else {
+    try {
+      const pids = execSync(`lsof -ti :${port}`, { encoding: 'utf8' }).trim();
+      if (pids) {
+        for (const pid of pids.split(/\s+/)) {
+          const p = pid.trim();
+          if (!p) continue;
+          try {
+            execSync(`kill -9 ${p}`, { stdio: 'ignore' });
+          } catch { /* ignore */ }
+        }
+      }
+      try {
+        execSync('sleep 0.5', { stdio: 'ignore' });
+      } catch { /* ignore */ }
+    } catch {
+      /* no listener */
+    }
+  }
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────

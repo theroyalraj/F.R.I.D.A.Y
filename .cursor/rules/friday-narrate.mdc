@@ -5,92 +5,88 @@ alwaysApply: true
 
 # Friday Live Narration — MANDATORY
 
-You are working inside the OpenClaw repo. As you work, **speak status out loud** through `friday-speak.py` so the user hears what you are doing in real time — no silent grinding. (Their spoken name comes from `FRIDAY_USER_NAME` in `.env`.)
+You are working inside the OpenClaw repo. As you work, **speak status out loud** through `oc-speak.sh` so the user hears what you are doing in real time — no silent grinding. (Their spoken name comes from `FRIDAY_USER_NAME` in `.env`.)
 
 ## Speak command (ALWAYS async — NEVER block on it)
 
-```powershell
-Start-Process python -ArgumentList "skill-gateway/scripts/friday-speak.py", "your status text here" -WorkingDirectory d:\code\openclaw -NoNewWindow -PassThru -Environment @{FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'}
+```bash
+# Fire-and-forget via the server API wrapper
+$OPENCLAW_HOME/scripts/oc-speak.sh "your status text here"
 ```
 
-Or the short form using PowerShell background job:
+**RULE: Every single speak invocation MUST be fire-and-forget.**
 
-```powershell
-cd d:\code\openclaw; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; Start-Job { python skill-gateway/scripts/friday-speak.py "your status text here" } | Out-Null
-```
-
-**⚠️ RULE: Every single `friday-speak.py` invocation MUST be fire-and-forget.**
 - **Cursor Shell tool: ALWAYS set `block_until_ms: 0`** — no exceptions, not even for completion summaries.
-- NEVER `await`, NEVER block, NEVER wait for the process to exit before continuing.
-- Use PowerShell `Start-Process` (no `-Wait`) or append `; exit 0` and background it.
-- The Bash equivalent: append ` &` to run in background — e.g. `python .../friday-speak.py "text" &`
-- If running via Bash tool: always use `run_in_background: true` on any TTS command, OR append ` &` to the shell command.
+- NEVER await, NEVER block, NEVER wait for the process to exit before continuing.
+- Append ` &` if running in bash, or set `block_until_ms: 0` in Cursor Shell.
 - Blocking on TTS freezes your work loop — this is never acceptable.
-- **Do NOT call `pick-session-voice.py` separately** — `friday-speak.py` auto-triggers it in the background if no session file exists. One fewer Shell call per message.
+- **Do NOT call `pick-session-voice.py` separately** — the server handles voice selection automatically.
 
 ---
 
-## ⚠️ NON-NEGOTIABLE: Speak the completion summary
+## NON-NEGOTIABLE: Speak the completion summary
 
 After **every** substantive task — code change, fix, refactor, investigation, install, debug session — you **MUST** run this before your final text reply. No exceptions. No skipping. No forgetting.
 
-```powershell
-cd d:\code\openclaw; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "Done. [verbose summary of everything changed]."
+```bash
+$OPENCLAW_HOME/scripts/oc-speak.sh "Done. [verbose summary of everything changed]." 1
 ```
 
 ### How to write the completion summary
 
 - **Be verbose** — cover every meaningful change, file touched, and outcome. They are listening, not reading.
-- **Aim for 3–6 sentences** spoken naturally. Do not compress or truncate.
+- **Aim for 3-6 sentences** spoken naturally. Do not compress or truncate.
 - **Name the files and features** — say what was added/changed/fixed and why it matters.
 - End naturally for speech — "sir" is optional, not required every time.
 - Clear, confident narration for TTS; no need for stiff British formality in every sentence.
 
-### ⚠️ ALWAYS write for the human ear — never the eye
+### ALWAYS write for the human ear — never the eye
 
 The text goes directly to a voice synthesiser. Every word must sound natural when spoken aloud.
 
 **DO:**
+
 - Spell out numbers: "twelve" not "12", "one hundred" not "100"
 - Spell out units: "twelve seconds" not "12s", "five hundred milliseconds" not "500ms"
 - Name files conversationally: "the ambient script" not "friday-ambient.py", "the speak script" not "friday-speak.py"
-- Name env vars conversationally: "the post-TTS gap setting" not "FRIDAY_AMBIENT_POST_TTS_GAP"
+- Name env vars conversationally: "the post-TTS gap setting" not long env var names
 - Say "slash" for paths if you must mention them: "voice slash set-voice"
 
 **NEVER:**
-- Use markdown: no `**bold**`, no `# headings`, no `- bullet points`, no backticks
-- Use variable names or env var syntax: no `FRIDAY_TTS_DEVICE=`, no `_normalize_for_speech()`
-- Use symbols that sound wrong spoken: no `→`, `|`, `%`, `—` mid-sentence
-- Use code-like syntax: no `POST_TTS_GAP=12s`, no `(exit_code: 0)`, no `[friday-speak]`
+
+- Use markdown formatting in spoken strings
+- Use variable names or env var syntax literally in the spoken line
+- Use symbols that sound wrong spoken: arrows, pipes, percent signs mid-sentence
+- Use code-like syntax in spoken lines
 - Truncate to save characters — the synthesiser can handle length; robotic compression sounds bad
 
 ### Examples of good verbose summaries
 
 ```
-"Done. I've added a light theme as the default on both the voice and listen pages, with a dark mode toggle in the top right that persists across refreshes. The browser voice picker now lists every available speech synthesis voice grouped by language, with quality badges and a description. I also added a server voice picker for the Edge TTS voices, backed by two new API endpoints — GET slash voice slash voices and POST slash voice slash set-voice — so you can swap the neural voice at runtime without restarting the server. The listen monitor picks up voice changes live via a new SSE event."
+Done. I have added a light theme as the default on both the voice and listen pages, with a dark mode toggle in the top right that persists across refreshes. The browser voice picker now lists every available speech synthesis voice grouped by language, with quality badges and a description. I also added a server voice picker for the Edge TTS voices, backed by two new API endpoints, so you can swap the neural voice at runtime without restarting the server. The listen monitor picks up voice changes live via a new SSE event.
 ```
 
 ```
-"Done. Fixed the mic backoff loop in friday-listen — the reconnect delay was doubling on every no-speech error instead of only on hard failures, causing it to go silent after a few minutes. I also cleared the device index so it falls back to the Windows default mic instead of crashing when the headset is unplugged."
+Done. Fixed the mic backoff loop in friday-listen. The reconnect delay was doubling on every no-speech error instead of only on hard failures, causing it to go silent after a few minutes. I also cleared the device index so it falls back to the default mic instead of crashing when the headset is unplugged.
 ```
 
 ---
 
-## Combine, don't stack — max 2 speak calls per message
+## Combine, do not stack — max 2 speak calls per message
 
 **The golden rule: if you have nothing new to say, say nothing.** Fold content into an adjacent call instead of firing a separate one.
 
-| Instead of… | Do this |
-|-------------|---------|
-| ack + separate thinking + separate phase filler (3 calls) | Combine ack and thinking into ONE call. Skip the filler. |
-| ack that says "Got it, updating the rules" + filler that says "Writing this out in the narrate rule" | Just say "Got it, updating the narrate rule now." — one call covers both. |
+| Instead of | Do this |
+|------------|---------|
+| ack + separate thinking + separate phase filler (three calls) | Combine ack and thinking into ONE call. Skip the filler. |
+| ack plus filler that repeats the same intent | One call covers both; skip the extra filler. |
 | Filler that repeats what the ack already said | Skip it entirely. |
 
-**Hard cap: never fire more than 2 `friday-speak.py` calls in a single message.** Prefer 1 when the task is straightforward.
+**Hard cap: never fire more than 2 speak calls in a single message.** Prefer 1 when the task is straightforward.
 
 ## When to narrate during work
 
-See `friday-thinking-sounds.mdc` for the full phrase pools. The table below shows the moment and example phrasing — always pick naturally, never repeat robotically.
+See `friday-thinking-sounds.mdc` for the full phrase pools.
 
 | Moment | When to actually speak | Example |
 |--------|------------------------|---------|
@@ -99,32 +95,24 @@ See `friday-thinking-sounds.mdc` for the full phrase pools. The table below show
 | About to edit a file | Only if 2-minute cooldown has elapsed | "Updating the narrate rule now." |
 | Running a command / install | Only if 2-minute cooldown has elapsed | "Kicking the install off." |
 | Waiting on a slow process | Only if 2-minute cooldown has elapsed | "Still on it, hang tight." |
-| Spawning a subagent | Always (these are meaningful events) | "Spinning up an agent for that." |
+| Spawning a subagent | Always (meaningful events) | "Spinning up an agent for that." |
 | **Task complete** | **Always — bypasses cooldown** | See above |
 
-**2-minute cooldown:** after any speak call, no mid-task filler for 2 minutes. See `friday-thinking-sounds.mdc` for full details. Only the completion summary and subagent launches bypass this.
+**2-minute cooldown:** after any speak call, no mid-task filler for 2 minutes. Only the completion summary and subagent launches bypass this.
 
 ---
 
 ## Parallel subagents
 
-When using the Task tool to launch subagents, narrate before and after each launch:
+When using the Task tool to launch subagents, narrate before and after each launch when policy allows.
 
-```
-speak → "Spinning up two agents in parallel."
-→ launch Task A + Task B
-speak → "Both agents running. Reporting back when done."
-... finish ...
-speak → "All done. [verbose summary]."
+**Subagent voice (mandatory in subagent prompts):**
+
+```bash
+$OPENCLAW_HOME/scripts/oc-speak.sh "message" 1 subagent
 ```
 
-**Subagent voice (mandatory in subagent prompts):** each Task subagent must use the **young-sounding** subagent voice pool (Jenny, Aria, Michelle, etc. — see `pick-session-voice.py`). No separate `pick-session-voice.py` call needed — `friday-speak.py` auto-picks if missing. Just set:
-
-`$env:FRIDAY_TTS_SESSION='subagent'` plus `FRIDAY_TTS_PRIORITY='1'` and `FRIDAY_TTS_BYPASS_CURSOR_DEFER=true` on **every** `friday-speak.py` call.
-
-`FRIDAY_TTS_PRIORITY=1` is non-negotiable for subagents — without it, subagents queue silently behind ambient TTS and the user never hears them. Priority pre-empts ambient, clears any TTS lock, and speaks immediately.
-
-Main Cursor chat uses `FRIDAY_TTS_VOICE` from the environment (Jarvis by default); subagents stay on the separate young-sounding sticky pool.
+Main Cursor chat uses the main ack command with priority `1` without the subagent parameter.
 
 ---
 
@@ -133,4 +121,4 @@ Main Cursor chat uses `FRIDAY_TTS_VOICE` from the environment (Jarvis by default
 - The user can speak casually; narration should be listenable, not a roleplay duel.
 - Prefer clear, composed delivery — British-ish polish is fine but not mandatory on every line.
 - Skip "I am an AI" filler; otherwise stay practical, not theatrical.
-- Plays through whatever is set as the default Windows audio device
+- Plays through whatever is set as the default audio output device

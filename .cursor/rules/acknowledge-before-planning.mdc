@@ -5,9 +5,9 @@ alwaysApply: true
 
 # Acknowledge Before Planning
 
-Before thinking about or presenting any plan, **always** narrate an acknowledgement out loud first using `friday-speak.py`.
+Before thinking about or presenting any plan, **always** narrate an acknowledgement out loud first using `oc-speak.sh`.
 
-## ⚡ Zero-Delay Async Pattern — ALWAYS use this
+## Zero-Delay Async Pattern — ALWAYS use this
 
 **Fire speak acknowledgement IN THE SAME PARALLEL BATCH as your first real work tool calls.**
 
@@ -15,70 +15,67 @@ Do NOT make it a sequential prerequisite that blocks work from starting. The spe
 
 ```
 Message N (single response):
-  ├── Shell: friday-speak.py "Got it…" + PRIORITY=1  ← block_until_ms: 0  (pre-empts ambient / other TTS)
-  ├── Read: the relevant file                         ← starts NOW, not after speak
-  └── Glob: find related files                        ← starts NOW, not after speak
+  ├── Shell: oc-speak.sh "Got it…" 1              ← block_until_ms: 0  (pre-empts ambient / other TTS)
+  ├── Read: the relevant file                      ← starts NOW, not after speak
+  └── Glob: find related files                     ← starts NOW, not after speak
 ```
 
 This is zero sequential overhead. The voice fires async and work starts at the same time.
 
 ## Required call (every response, block_until_ms: 0)
 
-```powershell
-# Speak acknowledgement — session voice is auto-loaded from .session-voice.json by friday-speak.py.
-# FRIDAY_TTS_PRIORITY=1 pre-empts friday-player, ambient TTS, and the Redis TTS lock so the ack is heard immediately.
-# If no session file exists, friday-speak.py auto-triggers pick-session-voice.py in the background.
-# NO separate pick-session-voice.py call needed — everything is one async fire-and-forget.
-cd d:\code\openclaw; $env:FRIDAY_TTS_PRIORITY='1'; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "Got it. [one sentence restatement of the task]."
+```bash
+# Speak acknowledgement — voice selection, priority, and bypass are handled by the server.
+# oc-speak.sh sends a curl POST to pc-agent /voice/speak-async.
+# Priority 1 pre-empts friday-player, ambient TTS, and the Redis TTS lock.
+$OPENCLAW_HOME/scripts/oc-speak.sh "Got it. [one sentence restatement of the task]." 1
 ```
 
-Must have `block_until_ms: 0`. **Must** set `FRIDAY_TTS_PRIORITY=1` on every acknowledgement (main Composer, not only subagents). Can be in the same message as real work tool calls — that's the point.
+Must have `block_until_ms: 0`. **Must** use priority `1` on every acknowledgement (main Composer, not only subagents). Can be in the same message as real work tool calls — that's the point.
 
 ## Combine ack + thinking when possible
 
 If you have meaningful reasoning to share (see `narrate-thinking.mdc`), **fold it into the ack call** instead of firing two separate speak calls. One combined call is better than two short ones back-to-back:
 
-```powershell
+```bash
 # GOOD — combined ack + reasoning in ONE call
-cd d:\code\openclaw; $env:FRIDAY_TTS_PRIORITY='1'; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "Got it. So the issue is probably in the lock release path, because the timeout is not clearing the Redis key. I'll fix it in the speak script."
+$OPENCLAW_HOME/scripts/oc-speak.sh "Got it. So the issue is probably in the lock release path, because the timeout is not clearing the Redis key. I will fix it in the speak script." 1
 ```
 
-Only fire a **separate** `FRIDAY_TTS_THINKING=1` call when the reasoning is substantial (5+ sentences) and would make the ack line awkwardly long. For short-to-medium reasoning, always combine.
+Only fire a **separate** thinking call when the reasoning is substantial (5+ sentences) and would make the ack line awkwardly long. For short-to-medium reasoning, always combine.
 
 ## Example — correct async batch
 
 ```
-Tool call 1: Shell friday-speak.py + FRIDAY_TTS_PRIORITY=1 "Got it…"  block_until_ms: 0
-Tool call 2: Read d:\code\openclaw\some-file  (reads immediately, no wait)
-Tool call 3: Glob **/*.py                     (searches immediately, no wait)
+Tool call 1: Shell oc-speak.sh "Got it…" 1              block_until_ms: 0
+Tool call 2: Read $OPENCLAW_HOME/some-file               (reads immediately, no wait)
+Tool call 3: Glob **/*.py                                (searches immediately, no wait)
 ```
 
 All tool calls fire in the same message. Voice narration and actual work happen in parallel.
 
 ## Session voice persistence
 
-`friday-speak.py` reads `.session-voice.json` on startup. If the file doesn't exist, it auto-spawns `pick-session-voice.py` in the background (non-blocking) to create it. **You never need to call `pick-session-voice.py` separately.**
+Voice selection is handled server-side by pc-agent. The server reads `.session-voice.json` and auto-triggers `pick-session-voice.py` if needed. **You never need to call `pick-session-voice.py` separately.**
 
-**Task subagents (explore / shell / generalPurpose):** use the **young-sounding** subagent sticky pool (Jenny, Aria, Michelle…). Do not force Ana or toddler voices. Just set the session env:
+**Task subagents (explore / shell / generalPurpose):** use the subagent session parameter:
 
-```powershell
-cd d:\code\openclaw; $env:FRIDAY_TTS_SESSION='subagent'; $env:FRIDAY_TTS_PRIORITY='1'; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "Got it. …"
+```bash
+$OPENCLAW_HOME/scripts/oc-speak.sh "Got it. …" 1 subagent
 ```
 
-`FRIDAY_TTS_PRIORITY=1` is **mandatory** for all subagent speak calls — it pre-empts any ambient TTS or competing lock so subagents are always heard instead of silently queuing behind other speech.
-
-The parent Composer chat uses the main ack command above **without** `FRIDAY_TTS_SESSION`, but **with** `FRIDAY_TTS_PRIORITY=1` so acknowledgements cut through ambient and other playback the same way.
+The parent Composer chat uses the main ack command above **without** the subagent session, but **with** priority `1` so acknowledgements cut through ambient and other playback the same way.
 
 ## If you have clarifying questions
 
 Speak the question out loud AND show it in your text reply. Still batch the voice call with any read/explore calls you can do speculatively:
 
-```powershell
-cd d:\code\openclaw; $env:FRIDAY_TTS_PRIORITY='1'; $env:FRIDAY_TTS_BYPASS_CURSOR_DEFER='true'; python skill-gateway/scripts/friday-speak.py "Before I proceed — [question]?"
+```bash
+$OPENCLAW_HOME/scripts/oc-speak.sh "Before I proceed — [question]?" 1
 ```
 
 ## Do NOT
 
-- Make `pick-session-voice` and `friday-speak` sequential blocking steps before work
+- Make speak calls sequential blocking steps before work
 - Silently start coding without narrating first
 - Ask questions after you've already started planning

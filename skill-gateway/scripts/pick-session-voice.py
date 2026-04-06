@@ -40,6 +40,7 @@ import argparse
 import datetime
 import json
 import os
+import platform as _platform_mod
 import random
 import subprocess
 import sys
@@ -112,10 +113,15 @@ SUBAGENT_POOL = [v for v in [
 # ── Paths ──────────────────────────────────────────────────────────────────────
 _STATE_FILE       = _REPO_ROOT / ".session-voice.json"
 _SPEAK_SCRIPT     = Path(__file__).resolve().parent / "friday-speak.py"
-_TRANSCRIPTS_ROOT = Path(os.environ.get(
-    "CURSOR_TRANSCRIPTS_DIR",
-    r"C:\Users\rajut\.cursor\projects\d-code-openclaw\agent-transcripts"
-))
+def _default_transcripts_dir() -> str:
+    if _platform_mod.system() == "Darwin":
+        return os.path.expanduser("~/.cursor/projects/Users-utkarshraj-openclaw/agent-transcripts")
+    if _platform_mod.system() == "Windows":
+        return r"C:\Users\rajut\.cursor\projects\d-code-openclaw\agent-transcripts"
+    return os.path.expanduser("~/.cursor/projects/openclaw/agent-transcripts")
+
+
+_TRANSCRIPTS_ROOT = Path(os.environ.get("CURSOR_TRANSCRIPTS_DIR", _default_transcripts_dir()))
 
 def _latest_chat_uuid() -> str | None:
     """Return the UUID of the most recently modified chat folder."""
