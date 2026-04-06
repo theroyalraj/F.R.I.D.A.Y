@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useCallback, useRef, useEffect } from 'react';
+import { useAuth } from './AuthContext';
 import {
   mergePersona,
   loadPersonaOverrides,
@@ -143,6 +144,7 @@ export interface CursorDoneNotification {
 const VoiceAppContext = createContext<VoiceAppContextType | undefined>(undefined);
 
 export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const { authHeaders, loading: authLoading } = useAuth();
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('offline');
   const [musicOrbCaption, setMusicOrbCaption] = useState('');
   const [speakingPersonaKey, setSpeakingPersonaKey] = useState<SpeakingPersonaKey>(null);
@@ -211,20 +213,22 @@ export const VoiceAppProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const CURSOR_DONE_MAX = 30;
 
   useEffect(() => {
-    fetch('/settings/dnd')
+    if (authLoading) return;
+    const h = authHeaders();
+    fetch('/settings/dnd', { headers: h })
       .then((r) => r.json())
       .then((d) => { if (typeof d?.dnd === 'boolean') setDndState(d.dnd); })
       .catch(() => {});
-  }, []);
+  }, [authLoading, authHeaders]);
 
   const setDnd = useCallback((enabled: boolean) => {
     setDndState(enabled);
     fetch('/settings/dnd', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders(),
       body: JSON.stringify({ enabled }),
     }).catch(() => {});
-  }, []);
+  }, [authHeaders]);
 
   const dismissWinNotification = useCallback((id: string) => {
     setWinNotifications((prev) => prev.filter((n) => n.id !== id));

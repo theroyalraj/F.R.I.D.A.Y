@@ -63,7 +63,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const authHeaders = useCallback((): HeadersInit => {
     const h: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (token) h.Authorization = `Bearer ${token}`;
+    if (token) {
+      h.Authorization = `Bearer ${token}`;
+      return h;
+    }
+    try {
+      const w = window as { __OPENCLAW_PC_AGENT_BEARER__?: string };
+      const agent = w.__OPENCLAW_PC_AGENT_BEARER__;
+      if (agent && String(agent).trim()) {
+        h.Authorization = `Bearer ${String(agent).trim()}`;
+      }
+    } catch {
+      /* ignore */
+    }
     return h;
   }, [token]);
 

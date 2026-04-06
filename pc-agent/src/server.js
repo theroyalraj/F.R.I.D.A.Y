@@ -97,6 +97,20 @@ function gatewayBaseUrl() {
   return (process.env.OPENCLAW_SKILL_GATEWAY_URL || 'http://127.0.0.1:3848').replace(/\/$/, '');
 }
 
+/** Public origin for link hints in JSON (tunnels, Tailscale). Env wins; else X-Forwarded-* / Host; else loopback. */
+function pcAgentPublicOrigin(req) {
+  const fixed = String(process.env.PC_AGENT_PUBLIC_BASE_URL || '').trim().replace(/\/$/, '');
+  if (fixed) return fixed;
+  if (req) {
+    const xfProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+    const xfHost = String(req.headers['x-forwarded-host'] || '').split(',')[0].trim();
+    const host = xfHost || req.get?.('host') || req.headers?.host || '';
+    const proto = xfProto || (typeof req.protocol === 'string' ? req.protocol : 'http');
+    if (host) return `${proto}://${host}`;
+  }
+  return `http://127.0.0.1:${PORT}`;
+}
+
 // ── Friday startup voice ──────────────────────────────────────────────────────
 const SPEAK_SCRIPT = path.resolve(__dirname, '../../skill-gateway/scripts/friday-speak.py');
 const REPO_ROOT = path.resolve(__dirname, '../..');
@@ -885,7 +899,7 @@ voiceRouter.post('/speak-style', async (req, res) => {
 
 app.use('/voice', voiceRouter);
 
-app.get('/health', async (_req, res) => {
+app.get('/health', async (req, res) => {
   const uptimeSec = Math.floor(process.uptime());
   const startedAt = new Date(Date.now() - process.uptime() * 1000).toISOString();
   const body = { ok: true, service: 'openclaw-pc-agent', uptimeSec, startedAt };
@@ -899,18 +913,20 @@ app.get('/health', async (_req, res) => {
     /* ignore */
   }
   const gw = gatewayBaseUrl();
+  const pub = pcAgentPublicOrigin(req);
   body.links = {
-    openclawStatusProxy: `http://127.0.0.1:${PORT}/openclaw/status`,
+    openclawStatusProxy: `${pub}/openclaw/status`,
     gatewayOpenclawStatus: `${gw}/openclaw/status`,
-    personasJson: `http://127.0.0.1:${PORT}/settings/personas`,
+    personasJson: `${pub}/settings/personas`,
   };
   res.json(body);
 });
 
 /** Aggregated stack status (proxies skill-gateway) + local persona registry snapshot. No auth — same host as Listen. */
-app.get('/openclaw/status', async (_req, res) => {
+app.get('/openclaw/status', async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   const gw = gatewayBaseUrl();
+  const pub = pcAgentPublicOrigin(req);
   try {
     const ac = new AbortController();
     const tid = setTimeout(() => ac.abort(), 4500);
@@ -922,9 +938,9 @@ app.get('/openclaw/status', async (_req, res) => {
       j.personas.note = 'Full merged roster: GET /settings/personas (Bearer JWT or PC_AGENT_SECRET)';
       j.links = {
         ...(typeof j.links === 'object' && j.links ? j.links : {}),
-        listenOpenclawStatus: `http://127.0.0.1:${PORT}/openclaw/status`,
+        listenOpenclawStatus: `${pub}/openclaw/status`,
         gatewayOpenclawStatus: `${gw}/openclaw/status`,
-        personasSettings: `http://127.0.0.1:${PORT}/settings/personas`,
+        personasSettings: `${pub}/settings/personas`,
       };
     } catch (e) {
       j.personasError = String(e.message || e);
@@ -944,9 +960,9 @@ app.get('/openclaw/status', async (_req, res) => {
       gatewayTried: gw,
       personas,
       links: {
-        listenOpenclawStatus: `http://127.0.0.1:${PORT}/openclaw/status`,
+        listenOpenclawStatus: `${pub}/openclaw/status`,
         gatewayOpenclawStatus: `${gw}/openclaw/status`,
-        personasSettings: `http://127.0.0.1:${PORT}/settings/personas`,
+        personasSettings: `${pub}/settings/personas`,
       },
     });
   }
@@ -1043,7 +1059,7 @@ app.post('/task', authTaskOrUser, async (req, res, next) => {
 });
 
 app.use('/perception', createPerceptionRouter(auth));
-app.use('/settings', createSettingsRouter(auth, broadcastEvent));
+app.use('/settings', createSettingsRouter(authJwtOrAgentSecret(SECRET), broadcastEvent));
 app.use('/automation', createAutomationRouter(auth));
 app.use('/integrations', createIntegrationsRouter(authJwtOrAgentSecret(SECRET)));
 app.use('/todos', createTodosRouter(broadcastEvent, SECRET));

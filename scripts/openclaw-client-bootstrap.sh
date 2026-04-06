@@ -54,6 +54,10 @@ INTERACTIVE=0
 ORIG_ARGC=$#
 WIZARD_RAN=0
 CURSOR_ONLY=0
+# Interactive option 3: copy INSTALL_ROOT/.cursor → INVOCATION_CWD only (no ngrok, no npm).
+COPY_CURSOR_ONLY=0
+# If set, launch_cursor_ide opens this folder instead of INSTALL_ROOT (e.g. pwd after copy).
+CURSOR_LAUNCH_DIR=""
 # After pull / setup / full client: open INSTALL_ROOT in Cursor (cursor CLI or macOS Cursor.app)
 OPEN_CURSOR=0
 OPEN_CURSOR_CLI_UNSET=1
@@ -106,6 +110,33 @@ read_tty() {
   fi
 }
 
+# Loop until INSTALL_ROOT is a real directory. strict=1 also requires .cursor (for copy-only).
+wizard_prompt_clone_path() {
+  local strict="${1:-0}"
+  local home_in
+  while true; do
+    home_in="$(read_tty "Full path to your OpenClaw clone" "${INSTALL_ROOT}")"
+    [[ -n "${home_in}" ]] && INSTALL_ROOT="${home_in}"
+    expand_home
+    case "${INSTALL_ROOT}" in
+      y|Y|n|N|yes|no|Yes|No)
+        ui_fail "That looks like a yes or no answer. Enter the directory path (or press Enter for the default in brackets)."
+        continue
+        ;;
+    esac
+    if [[ ! -d "${INSTALL_ROOT}" ]]; then
+      ui_fail "Not a directory: ${INSTALL_ROOT} — use an absolute path like ${HOME}/openclaw"
+      continue
+    fi
+    if [[ "${strict}" -eq 1 ]] && [[ ! -d "${INSTALL_ROOT}/.cursor" ]]; then
+      ui_fail "No .cursor folder there. Run option 2 Setup on that clone first."
+      continue
+    fi
+    break
+  done
+  ui_info "Using clone at: ${INSTALL_ROOT}"
+}
+
 # Returns 0 if /voice/ping returns 2xx.
 verify_voice_ping() {
   local base="${1%/}"
@@ -150,19 +181,20 @@ copy_cursor_to_invocation_cwd() {
 launch_cursor_ide() {
   [[ "${OPEN_CURSOR}" -eq 1 ]] || return 0
   expand_home
-  if [[ ! -d "${INSTALL_ROOT}" ]]; then
-    ui_fail "Cannot open Cursor — missing directory: ${INSTALL_ROOT}"
+  local dir="${CURSOR_LAUNCH_DIR:-${INSTALL_ROOT}}"
+  if [[ ! -d "${dir}" ]]; then
+    ui_fail "Cannot open Cursor — missing directory: ${dir}"
     return 1
   fi
   if command -v cursor >/dev/null 2>&1; then
-    ui_info "Launching Cursor in ${INSTALL_ROOT} …"
-    ( cd "${INSTALL_ROOT}" && cursor . >/dev/null 2>&1 & )
+    ui_info "Launching Cursor in ${dir} …"
+    ( cd "${dir}" && cursor . >/dev/null 2>&1 & )
     ui_ok "Cursor started (cursor CLI in project folder)"
     return 0
   fi
   if [[ "$(uname -s)" == "Darwin" ]] && [[ -d "/Applications/Cursor.app" ]]; then
-    ui_info "Opening Cursor.app with ${INSTALL_ROOT} …"
-    open -a Cursor "${INSTALL_ROOT}" || true
+    ui_info "Opening Cursor.app with ${dir} …"
+    open -a Cursor "${dir}" || true
     ui_ok "Cursor.app opened with this folder"
     return 0
   fi
@@ -188,30 +220,58 @@ run_interactive_wizard() {
   printf '%b\n\n' "${W}Pick what you need. Numbers are enough; press Enter for defaults.${X}" >&2
   echo "  ${G}1${X}  ${BD}Pull${X}     — git clone or pull only" >&2
   echo "  ${G}2${X}  ${BD}Setup${X}    — Cursor company rule + npm ci + pip (client stack)" >&2
-  echo "  ${G}3${X}  ${BD}Cursor${X}   — open existing clone in Cursor only (no git, no npm)" >&2
-  echo "  ${G}4${X}  ${BD}Full${X}     — remote client: ngrok URL, .env, optional ${C}voice test${X}, start stack" >&2
+  echo "  ${G}3${X}  ${BD}Copy rules${X} — copy .cursor from clone → ${C}this folder${X} (where you ran the script)" >&2
+  echo "  ${G}4${X}  ${BD}Cursor${X}   — open existing clone in Cursor only (no git, no npm)" >&2
+  echo "  ${G}5${X}  ${BD}Full${X}     — remote client: ngrok URL, .env, optional ${C}voice test${X}, start stack" >&2
   echo "" >&2
   local mode
-  mode="$(read_tty "Your choice (1 / 2 / 3 / 4)" "4")"
+  mode="$(read_tty "Your choice (1 / 2 / 3 / 4 / 5)" "5")"
   case "${mode}" in
     1) PULL_ONLY=1 ;;
     2) SETUP_ONLY=1 ;;
-    3) CURSOR_ONLY=1 ;;
-    4) ;;
+    3) COPY_CURSOR_ONLY=1 ;;
+    4) CURSOR_ONLY=1 ;;
+    5) ;;
     *)
-      ui_fail "Need 1, 2, 3, or 4."
+      ui_fail "Need 1, 2, 3, 4, or 5."
       exit 1
       ;;
   esac
 
-  ui_step 1 5 "Where to install OpenClaw"
-  local home_in
-  home_in="$(read_tty "Directory (OPENCLAW_HOME)" "${INSTALL_ROOT}")"
-  [[ -n "${home_in}" ]] && INSTALL_ROOT="${home_in}"
-  expand_home
-  ui_info "Using path: ${INSTALL_ROOT}"
+  if [[ "${COPY_CURSOR_ONLY}" -eq 1 ]]; then
+    ui_step 1 2 "Copy .cursor into your current folder"
+    local inv_show
+    inv_show="$(cd "${INVOCATION_CWD}" 2>/dev/null && pwd || echo "${INVOCATION_CWD}")"
+    printf '%b  Destination (pwd): %s%b\n' "${C}" "${inv_show}" "${X}" >&2
+    wizard_prompt_clone_path 1
+    ui_step 2 2 "Confirm"
+    ui_rule
+    printf '  %-16s %b%s%b\n' "Copy from" "${W}" "${INSTALL_ROOT}/.cursor${X}" >&2
+    printf '  %-16s %b%s%b\n' "Copy to" "${W}" "${inv_show}/.cursor${X}" >&2
+    ui_rule
+    local ccopy
+    ccopy="$(read_tty "Proceed with copy? (Y/n)" "y")"
+    if [[ "${ccopy}" =~ ^[nN] ]]; then
+      ui_info "Aborted."
+      exit 0
+    fi
+    COPY_CURSOR_TO_INVOCATION=1
+    printf '\n%b  Optional: open Cursor in the destination folder?%b\n' "${M}" "${X}" >&2
+    local oc_pwd
+    oc_pwd="$(read_tty "Open destination in Cursor after copy? (y/N)" "y")"
+    if [[ "${oc_pwd}" =~ ^[yY] ]]; then
+      OPEN_CURSOR=1
+      CURSOR_LAUNCH_DIR="${inv_show}"
+    else
+      OPEN_CURSOR=0
+    fi
+    WIZARD_RAN=1
+    return
+  fi
 
   if [[ "${CURSOR_ONLY}" -eq 1 ]]; then
+    ui_step 1 2 "Open existing clone in Cursor"
+    wizard_prompt_clone_path 0
     ui_step 2 2 "Confirm"
     ui_rule
     printf '  %-16s %b%s%b\n' "Open in Cursor" "${W}" "${INSTALL_ROOT}" "${X}" >&2
@@ -223,9 +283,27 @@ run_interactive_wizard() {
       exit 0
     fi
     OPEN_CURSOR=1
+    CURSOR_LAUNCH_DIR=""
     WIZARD_RAN=1
     return
   fi
+
+  ui_step 1 5 "Where to install OpenClaw"
+  local home_in
+  home_in="$(read_tty "Directory (OPENCLAW_HOME)" "${INSTALL_ROOT}")"
+  [[ -n "${home_in}" ]] && INSTALL_ROOT="${home_in}"
+  expand_home
+  if [[ -e "${INSTALL_ROOT}" ]] && [[ ! -d "${INSTALL_ROOT}" ]]; then
+    ui_fail "Not a directory: ${INSTALL_ROOT}"
+    exit 1
+  fi
+  case "${INSTALL_ROOT}" in
+    y|Y|n|N)
+      ui_fail "That looks like y or n — enter the install path, or press Enter for the default in brackets."
+      exit 1
+      ;;
+  esac
+  ui_info "Using path: ${INSTALL_ROOT}"
 
   ui_step 2 5 "Git branch"
   local br_in
@@ -276,17 +354,25 @@ run_interactive_wizard() {
     fi
 
     expand_home
-    local inv_canon ins_canon cc_default cc_in
+    local inv_canon ins_canon cc_default_num cc_in
     inv_canon="$(cd "${INVOCATION_CWD}" 2>/dev/null && pwd || echo "")"
     ins_canon="$(cd "${INSTALL_ROOT}" 2>/dev/null && pwd || echo "")"
-    cc_default="n"
+    cc_default_num="2"
     if [[ -n "${inv_canon}" && -n "${ins_canon}" && "${inv_canon}" != "${ins_canon}" ]]; then
-      cc_default="y"
+      cc_default_num="1"
     fi
-    cc_in="$(read_tty "Copy .cursor from install to the folder where you ran this script? (Y/n)" "${cc_default}")"
-    if [[ "${cc_in}" =~ ^[yY] ]]; then
-      COPY_CURSOR_TO_INVOCATION=1
-    fi
+    printf '\n%b  Copy .cursor from install to the folder where you ran this script?%b\n' "${M}" "${X}" >&2
+    echo "  ${G}1${X}  ${BD}Yes${X}  — copy rules into that folder" >&2
+    echo "  ${G}2${X}  ${BD}No${X}" >&2
+    cc_in="$(read_tty "Your choice (1 / 2)" "${cc_default_num}")"
+    case "${cc_in}" in
+      1|y|Y|yes|YES) COPY_CURSOR_TO_INVOCATION=1 ;;
+      2|n|N|no|NO) COPY_CURSOR_TO_INVOCATION=0 ;;
+      "")
+        [[ "${cc_default_num}" == "1" ]] && COPY_CURSOR_TO_INVOCATION=1 || COPY_CURSOR_TO_INVOCATION=0
+        ;;
+      *) COPY_CURSOR_TO_INVOCATION=0 ;;
+    esac
   fi
 
   printf '\n%b  Optional: Cursor IDE%b\n' "${M}" "${X}" >&2
@@ -356,6 +442,7 @@ while [[ $# -gt 0 ]]; do
     --open-cursor) OPEN_CURSOR=1; OPEN_CURSOR_CLI_UNSET=0; shift ;;
     --no-open-cursor) OPEN_CURSOR=0; OPEN_CURSOR_CLI_UNSET=0; shift ;;
     --cursor-only) CURSOR_ONLY=1; OPEN_CURSOR=1; shift ;;
+    --copy-cursor-only) COPY_CURSOR_ONLY=1; shift ;;
     --copy-cursor-to-cwd) COPY_CURSOR_TO_INVOCATION=1; COPY_CURSOR_CLI_UNSET=0; shift ;;
     --no-copy-cursor-to-cwd) COPY_CURSOR_TO_INVOCATION=0; COPY_CURSOR_CLI_UNSET=0; shift ;;
     -h|--help)
@@ -375,6 +462,7 @@ Flags:
   --open-cursor         After pull/setup/full: open INSTALL_ROOT in Cursor (CLI or macOS app)
   --no-open-cursor      Do not open Cursor (overrides env)
   --cursor-only         Only open INSTALL_ROOT in Cursor (use with --home Path; no git/npm)
+  --copy-cursor-only    Copy INSTALL_ROOT/.cursor → pwd only (use with --home /path/to/clone; non-interactive)
   --copy-cursor-to-cwd  After full client setup: copy INSTALL_ROOT/.cursor to INVOCATION_CWD (where you ran the script)
   --no-copy-cursor-to-cwd  Do not copy (overrides env)
   --celebration-off     Skip timed celebration line
@@ -420,6 +508,26 @@ if [[ "${WIZARD_RAN}" -eq 0 ]] && [[ "${COPY_CURSOR_CLI_UNSET}" -eq 1 ]]; then
   case "$(echo "${OPENCLAW_BOOTSTRAP_COPY_CURSOR_CWD:-0}" | tr '[:upper:]' '[:lower:]')" in
     1|true|yes|on) COPY_CURSOR_TO_INVOCATION=1 ;;
   esac
+fi
+
+if [[ "${COPY_CURSOR_ONLY}" -eq 1 ]] && [[ "${CURSOR_ONLY}" -eq 1 ]]; then
+  echo "Use only one of --copy-cursor-only or --cursor-only" >&2
+  exit 1
+fi
+
+# Copy .cursor from clone → invocation cwd (interactive wizard option 3, or --copy-cursor-only --home …)
+if [[ "${COPY_CURSOR_ONLY}" -eq 1 ]]; then
+  expand_home
+  if [[ "${WIZARD_RAN}" -eq 0 ]]; then
+    if [[ ! -d "${INSTALL_ROOT}/.cursor" ]]; then
+      ui_fail "Need --home /path/to/openclaw (clone must contain .cursor). Example: --copy-cursor-only --home \"\$HOME/openclaw\""
+      exit 1
+    fi
+    [[ -z "${CURSOR_LAUNCH_DIR}" ]] && [[ "${OPEN_CURSOR}" -eq 1 ]] && CURSOR_LAUNCH_DIR="${INVOCATION_CWD}"
+  fi
+  copy_cursor_to_invocation_cwd || exit 1
+  launch_cursor_ide
+  exit 0
 fi
 
 if [[ "${CURSOR_ONLY}" -eq 1 ]]; then

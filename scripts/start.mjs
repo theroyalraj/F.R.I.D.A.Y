@@ -437,7 +437,10 @@ ${C.reset}\n`);
     );
     const openClientListen = envBool('OPENCLAW_CLIENT_OPEN_LISTEN', true);
     if (openClientListen) {
-      const listenUrl = `${agentUrl}/friday/listen`;
+      const listenOverride = String(process.env.OPENCLAW_CLIENT_LISTEN_URL || '').trim();
+      const listenUrl =
+        listenOverride.replace(/\/$/, '') ||
+        `${agentUrl}/friday/listen`;
       setTimeout(() => {
         process.stdout.write(`${C.warn}[openclaw] Opening Listen UI → ${listenUrl}${C.reset}\n`);
         openListenBrowser(listenUrl);

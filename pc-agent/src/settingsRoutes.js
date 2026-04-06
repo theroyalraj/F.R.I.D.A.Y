@@ -12,6 +12,13 @@ import { createClient } from 'redis';
 
 const DND_KEY = 'openclaw:dnd';
 
+/** Global persona patch — agent Bearer (home stack) or org admin JWT only; not ordinary members. */
+function requireAgentOrAdmin(req, res, next) {
+  if (req.authMode === 'agent') return next();
+  if (req.user?.role === 'admin') return next();
+  return res.status(403).json({ error: 'Persona changes require PC_AGENT_SECRET or an admin JWT.' });
+}
+
 let _dndRedis = null;
 async function _dndRedisClient() {
   if (_dndRedis?.isOpen) return _dndRedis;
@@ -111,7 +118,7 @@ export function createSettingsRouter(authMiddleware, broadcastEvent) {
     }
   });
 
-  r.delete('/personas', async (_req, res) => {
+  r.delete('/personas', requireAgentOrAdmin, async (_req, res) => {
     if (!perceptionDbConfigured()) {
       return res.status(503).json({
         error: 'Database not configured',
